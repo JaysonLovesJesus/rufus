@@ -1,0 +1,22 @@
+{
+  "name": "rufus",
+  "version": "0.1.0",
+  "description": "A small AI + Code + Human chief-of-staff engine: durable flows where code is exact, AI judges and drafts, and a human has the final say.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "rufus": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1"
+  }
+}
