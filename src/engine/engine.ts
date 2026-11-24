@@ -7,6 +7,7 @@ import { proposeLesson, type ProposeInput, type ProposeOptions, type ProposeResu
 import { LessonCapError } from '../learning/lessons';
 import type { ChannelAdapter } from '../channels/text';
 import { StepRunner } from './context';
+import { DEFAULT_PROVIDER } from './providers';
 import type {
   AiProvider,
   Flow,
@@ -23,6 +24,8 @@ export interface EngineOptions {
   store: FileStore | string;
   /** Needed only if a flow uses `ctx.ai`. */
   provider?: AiProvider;
+  /** Named providers. A flow (`meta.provider`) or ai step (`provider`) picks one by name; `default` is `provider`. */
+  providers?: Record<string, AiProvider>;
   flows?: Flow[];
   /** If set, new human cards are sent through it as soon as a run pauses. */
   channel?: ChannelAdapter;
@@ -41,6 +44,7 @@ export class Engine {
   readonly lessons: LessonStore;
   readonly cases: CaseStore;
   readonly provider: AiProvider;
+  private readonly providers: Record<string, AiProvider>;
   private readonly flows = new Map<string, Flow>();
   private readonly channel?: ChannelAdapter;
   private ready?: Promise<void>;
@@ -50,8 +54,21 @@ export class Engine {
     this.lessons = new LessonStore(this.store, opts.learning);
     this.cases = new CaseStore(this.store);
     this.provider = opts.provider ?? noProvider;
+    this.providers = { ...opts.providers };
     this.channel = opts.channel;
     this.register(...(opts.flows ?? []));
+  }
+
+  /**
+   * The provider for a name from `meta.provider` / a step's `provider`. No name (or `default`) is the default provider.
+   * An unknown name throws instead of quietly using a different model.
+   */
+  providerFor(name?: string): AiProvider {
+    if (name === undefined || name === DEFAULT_PROVIDER) return this.provider;
+    const found = this.providers[name];
+    if (found) return found;
+    const known = Object.keys(this.providers);
+    throw new Error(`Unknown AI provider "${name}". ${known.length ? `Configured: ${known.join(', ')}.` : 'None configured: add it under "providers" in config.json.'}`);
   }
 
   register(...flows: Flow[]): this {
@@ -188,7 +205,7 @@ export class Engine {
 
   private async execute(run: RunRecord, flow: Flow): Promise<RunResult> {
     const runner = new StepRunner(
-      { store: this.store, lessons: this.lessons, cases: this.cases, provider: this.provider },
+      { store: this.store, lessons: this.lessons, cases: this.cases, providerFor: (name) => this.providerFor(name) },
       run,
       flow,
     );

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import type { AiProvider, AiRequest, ProviderConfig } from '../types';
+import type { AiProvider, AiRequest, ProviderConfig, RufusConfig } from '../types';
 
 type Scripted = string | ((req: AiRequest) => string | Promise<string>);
 
@@ -74,4 +74,21 @@ export function createProvider(cfg: ProviderConfig | undefined): AiProvider | un
   if (cfg.type === 'command') return new CommandProvider(cfg);
   const apiKey = process.env[cfg.apiKeyEnv ?? 'RUFUS_API_KEY'];
   return new OpenAiCompatibleProvider({ baseUrl: cfg.baseUrl, model: cfg.model, apiKey });
+}
+
+/** The provider name that always means "the top-level `provider`". */
+export const DEFAULT_PROVIDER = 'default';
+
+/** `provider` and every entry of `providers`, built. A name missing from `providers` is not an error here, only when used. */
+export function createProviders(config: Pick<RufusConfig, 'provider' | 'providers'>): {
+  provider?: AiProvider;
+  providers: Record<string, AiProvider>;
+} {
+  const providers: Record<string, AiProvider> = {};
+  for (const [name, cfg] of Object.entries(config.providers ?? {})) {
+    if (name === DEFAULT_PROVIDER) throw new Error(`"${DEFAULT_PROVIDER}" is reserved for the top-level "provider"; pick another name.`);
+    const built = createProvider(cfg);
+    if (built) providers[name] = built;
+  }
+  return { provider: createProvider(config.provider), providers };
 }

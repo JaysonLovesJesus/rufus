@@ -17,6 +17,8 @@ export interface IncomingMessage {
 /** The smallest thing a chat app needs to be: somewhere to send text, and (optionally) to read replies. */
 export interface LiveChannel {
   send(text: string): Promise<string | void>;
+  /** Optional richer way to send a card (e.g. tap-to-answer buttons). `text` is the plain rendering. */
+  sendCard?(card: HumanCard, text: string): Promise<string | void>;
   /** New messages from the human, oldest first. `since` is the `at` of the last message handled. */
   poll?(since?: string): Promise<IncomingMessage[]>;
 }
@@ -235,7 +237,7 @@ export class CardBridge {
     state.delivered.push(card.id);
     await this.save(state);
     try {
-      await this.say(state, formatCardAsText(card));
+      await this.say(state, formatCardAsText(card), card);
     } catch (err) {
       state.delivered = state.delivered.filter((id) => id !== card.id);
       await this.save(state);
@@ -244,11 +246,12 @@ export class CardBridge {
     report.delivered.push(card.id);
   }
 
-  private async say(state: BridgeState, text: string): Promise<void> {
+  private async say(state: BridgeState, text: string, card?: HumanCard): Promise<void> {
     state.sent.push(hash(text));
     state.sent = state.sent.slice(-KEEP_SENT);
     await this.save(state);
-    await this.channel.send(text);
+    if (card && this.channel.sendCard) await this.channel.sendCard(card, text);
+    else await this.channel.send(text);
   }
 
   private async load(): Promise<BridgeState> {

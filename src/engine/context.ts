@@ -45,7 +45,8 @@ export interface RunnerDeps {
   store: FileStore;
   lessons: LessonStore;
   cases: CaseStore;
-  provider: AiProvider;
+  /** Resolves a provider name (undefined = default). Throws on an unknown name. */
+  providerFor(name?: string): AiProvider;
 }
 
 /** Executes one pass of a flow, replaying finished steps from the run record. */
@@ -104,7 +105,7 @@ export class StepRunner<I = unknown> implements FlowContext<I> {
     // Remember which lessons actually reach a prompt, so `lessons.prune` keeps the ones that matter.
     await this.deps.lessons.markUsed(lessons.map((l) => l.id));
     const { value, attempts } = await runAiStep({
-      provider: this.deps.provider,
+      provider: this.deps.providerFor(opts.provider ?? meta.provider),
       system: buildSystemPrompt(meta.role, lessons, examples),
       step: name,
       opts,

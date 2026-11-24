@@ -23,6 +23,8 @@ export type ChiefCommand =
 
 export interface ChiefOfStaffOptions {
   engine: Engine;
+  /** Named provider for free-form chat (a key of the engine's `providers`). Default: the default provider. */
+  provider?: string;
 }
 
 const STATUS_WORDS = new Set(['status', 'pending', 'what needs me', 'whats pending', "what's pending", 'what is pending', 'what needs my attention']);
@@ -53,9 +55,11 @@ const SYSTEM = [
  */
 export class ChiefOfStaff {
   private readonly engine: Engine;
+  private readonly providerName?: string;
 
   constructor(opts: ChiefOfStaffOptions) {
     this.engine = opts.engine;
+    this.providerName = opts.provider;
   }
 
   /** Is this message an explicit chief command (so a channel should route it here even while a card is open)? */
@@ -230,7 +234,7 @@ export class ChiefOfStaff {
     const reply = (t: string, unavailable = false): ChiefReply => ({ text: t, cards: [], via: 'chat', ...(unavailable ? { unavailable } : {}) });
     try {
       const snapshot = await this.snapshot();
-      const out = await this.engine.provider.complete({
+      const out = await this.engine.providerFor(this.providerName).complete({
         system: SYSTEM,
         messages: [{ role: 'user', content: `Live snapshot (exact data gathered by code):\n\`\`\`json\n${JSON.stringify(snapshot, null, 2)}\n\`\`\`\n\nTheir message:\n${text}` }],
         meta: { runId: 'chief', flowId: 'chief', step: 'chat', attempt: 1 },

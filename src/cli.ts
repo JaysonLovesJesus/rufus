@@ -3,13 +3,13 @@ import { promises as fs, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createBeeperChannel } from './channels/beeper';
+import { selectChannel } from './channels/select';
 import { CardBridge, type LiveChannel, type TickReport } from './channels/bridge';
 import { formatCardAsText, parseTextReply } from './channels/text';
 import { ChiefOfStaff } from './chief/chief';
 import { Engine } from './engine/engine';
 import { isFlow } from './engine/flow';
-import { createProvider } from './engine/providers';
+import { createProviders } from './engine/providers';
 import { formatCompare } from './learning/compare';
 import { suggestLayer } from './learning/layers';
 import type { ScopedReplayReport } from './learning/replay';
@@ -28,8 +28,8 @@ Usage: rufus [--dir <workspace>] <command>
   run <flowId> [inputJson]     start a flow
   pending                      show cards waiting for you ("Your Turn")
   answer <cardId> <reply...>   answer a card: a number, an option name, or your own words
-  bridge [--once] [--interval <sec>]
-                               text new cards to your chat (Beeper) and apply your replies
+  bridge [--once] [--interval <sec>] [--channel telegram|beeper]
+                               text new cards to your chat and apply your replies
   lessons [--prune [--older-than <days>] [--max-unused <n>]]
                                show saved lessons (with the layer each belongs in), or prune stale ones
   propose <scope> <rule...> [--layer code|context|principle] [--sample N] [--force]
@@ -101,7 +101,7 @@ function summarizeScoped(r: ScopedReplayReport): string {
 }
 
 export interface MainOptions {
-  /** Override the channel used by `bridge` (default: Beeper, from config.json / RUFUS_BEEPER_* env). */
+  /** Override the channel used by `bridge` (default: Telegram or Beeper, whichever is configured). */
   channel?: LiveChannel;
 }
 
@@ -124,7 +124,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const force = bool('--force');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
-  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused']) {
+  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
@@ -141,9 +141,11 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const store = new FileStore(dir);
   await store.init();
   const config = await store.loadConfig();
+  const built = cmd === 'demo' ? { provider: demoProvider(), providers: {} } : createProviders(config);
   const engine = new Engine({
     store,
-    provider: cmd === 'demo' ? demoProvider() : createProvider(config.provider),
+    provider: built.provider,
+    providers: built.providers,
     flows: [triageDraft, ...(await loadWorkspaceFlows(store))],
     learning: config.learning,
   });
@@ -191,8 +193,8 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     case 'bridge': {
       const intervalSec = flags['--interval'] ? Number(flags['--interval']) : 5;
       if (!(intervalSec > 0)) throw new Error('--interval needs a number of seconds above 0.');
-      const channel = options.channel ?? createBeeperChannel(config.beeper);
-      const bridge = new CardBridge({ engine, channel });
+      const channel = options.channel ?? selectChannel(config, { channel: flags['--channel'], workspaceDir: dir }).channel;
+      const bridge = new CardBridge({ engine, channel, chief: new ChiefOfStaff({ engine, provider: config.chief?.provider }) });
       let lastError: string | undefined;
       const report = (r: TickReport): void => {
         for (const line of describeBridgeTick(r)) io.out(line);
@@ -349,7 +351,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
 
     case 'chat': {
       if (!rest.length) throw new Error('Usage: rufus chat <message...>');
-      io.out(await new ChiefOfStaff({ engine }).handleMessage(rest.join(' ')));
+      io.out(await new ChiefOfStaff({ engine, provider: config.chief?.provider }).handleMessage(rest.join(' ')));
       return;
     }
 

@@ -86,6 +86,8 @@ export interface AiStepOptions<T = string> {
   /** Default 2 (so up to 3 attempts). */
   maxRetries?: number;
   model?: string;
+  /** Name of a provider in `config.providers` (or `"default"`). Beats the flow's `meta.provider`. */
+  provider?: string;
   /** Turn raw model text into `T`. A throw counts as a failed verification. */
   parse?: (raw: string) => T;
   /**
@@ -103,6 +105,8 @@ export interface FlowMeta {
   description: string;
   /** Lessons scoped to this role are injected into every `ai` step. */
   role?: string;
+  /** Named provider (a key of `config.providers`) for this flow's ai steps. A step's own `provider` beats it. */
+  provider?: string;
   /** How this flow starts. See `at()`, `every()` and `onEvent()` in src/scheduler. Default: manual. */
   trigger?: Trigger;
 }
@@ -164,6 +168,16 @@ export type ProviderConfig =
   | { type: 'openai-compatible'; baseUrl: string; model: string; apiKeyEnv?: string }
   | { type: 'command'; command: string; args?: string[] };
 
+/** Telegram Bot API settings. Env vars (RUFUS_TELEGRAM_*) override these; prefer env for the token. */
+export interface TelegramConfig {
+  /** Bot token from @BotFather. */
+  token?: string;
+  /** The only chat Rufus reads from and writes to. A number or string (negative for groups). */
+  chatId?: string | number;
+  /** Bot API base URL, for a self-hosted Bot API server. Default https://api.telegram.org */
+  apiUrl?: string;
+}
+
 /** Beeper Desktop API settings. Env vars (RUFUS_BEEPER_*) override these; prefer env for the token. */
 export interface BeeperConfig {
   url?: string;
@@ -181,7 +195,13 @@ export interface LearningConfig {
 
 export interface RufusConfig {
   version: 1;
+  /** The default provider, used when a flow or step does not name one. */
   provider?: ProviderConfig;
+  /** Extra named providers, e.g. `claude`, `fast`. Pick one with `meta.provider` or `ctx.ai(..., { provider })`. */
+  providers?: Record<string, ProviderConfig>;
+  /** Chief of Staff chat settings. */
+  chief?: { /** Named provider (a key of `providers`) for free-form chat. */ provider?: string };
+  telegram?: TelegramConfig;
   beeper?: BeeperConfig;
   /** The scheduler stays silent in this window unless a trigger is `urgent`. */
   quietHours?: QuietHours;

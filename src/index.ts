@@ -1,7 +1,7 @@
 export { defineFlow, isFlow } from './engine/flow';
 export { Engine, type EngineOptions } from './engine/engine';
 export { AiVerificationError } from './engine/ai';
-export { FakeProvider, OpenAiCompatibleProvider, CommandProvider, createProvider } from './engine/providers';
+export { FakeProvider, OpenAiCompatibleProvider, CommandProvider, createProvider, createProviders, DEFAULT_PROVIDER } from './engine/providers';
 export { FileStore } from './store';
 export { CaseStore, captureCase, formatExamples, type ReplayCase } from './learning/cases';
 export { compareFlow, formatCompare, type CompareOptions, type CompareReport, type CompareArm, type CompareCaseResult } from './learning/compare';
@@ -16,3 +16,5 @@ export { formatCardAsText, parseTextReply, PlainTextChannel, type ChannelAdapter
 export type * from './types';
 export { CardBridge, type CardBridgeOptions, type IncomingMessage, type LiveChannel, type TickReport } from './channels/bridge';
 export { BeeperChannel, BeeperOfflineError, BeeperApiError, createBeeperChannel, resolveBeeperOptions, type BeeperOptions } from './channels/beeper';
+export { TelegramChannel, TelegramOfflineError, TelegramApiError, createTelegramChannel, resolveTelegramOptions, type TelegramOptions } from './channels/telegram';
+export { selectChannel, configuredChannels, type ChannelName } from './channels/select';

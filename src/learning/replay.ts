@@ -280,7 +280,7 @@ class ReplayContext implements FlowContext<any> {
     const before = (await check(opts, this.c.aiDraft)).ok ? 'passed' : 'failed';
     try {
       const { value, attempts } = await runAiStep({
-        provider: this.engine.provider,
+        provider: this.engine.providerFor(opts.provider ?? this.flow.meta.provider),
         system: this.system,
         step: name,
         opts: this.mode === 'plain' ? plainOpts(opts, this.input) : opts,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Engine, FakeProvider, FileStore, defineFlow, type HumanCard } from '../src';
+import { ChiefOfStaff, Engine, FakeProvider, FileStore, createProviders, defineFlow, type Flow, type HumanCard } from '../src';
 import { tempDir } from './helpers';
 
 const waiting = (r: { status: string }) => r as { status: 'waiting_human'; runId: string; card: HumanCard };
@@ -219,5 +219,101 @@ describe('human steps', () => {
     expect(await engine.answer(r2.card.id, { text: 'y' })).toMatchObject({ output: ['x', 'y'] });
     await engine.resume(r1.runId);
     expect(sent).toEqual(['One', 'Two']);
+  });
+});
+
+describe('named provider routing', () => {
+  const triage = (provider?: string) =>
+    defineFlow({ id: 'route', name: 'r', description: 'r', provider }, async (ctx) => {
+      const flowDefault = await ctx.ai('a', { prompt: 'p' });
+      const stepFast = await ctx.ai('b', { prompt: 'p', provider: 'fast' });
+      const stepDefault = await ctx.ai('c', { prompt: 'p', provider: 'default' });
+      return { flowDefault, stepFast, stepDefault };
+    });
+  const setup = async (flow: Flow = triage()) => {
+    const main = new FakeProvider(['main-1', 'main-2']);
+    const fast = new FakeProvider(['fast-1']);
+    const claude = new FakeProvider(['claude-1', 'claude-2']);
+    const engine = new Engine({ store: await tempDir(), provider: main, providers: { fast, claude }, flows: [flow] });
+    return { engine, main, fast, claude };
+  };
+
+  it('uses the default provider unless a step names one (backwards compatible)', async () => {
+    const { engine, main, fast, claude } = await setup();
+    const r = await engine.start('route');
+    expect(r).toMatchObject({ status: 'completed', output: { flowDefault: 'main-1', stepFast: 'fast-1', stepDefault: 'main-2' } });
+    expect([main.calls.length, fast.calls.length, claude.calls.length]).toEqual([2, 1, 0]);
+  });
+
+  it('a flow can pick its own provider, and a step still beats the flow', async () => {
+    const { engine, main, fast, claude } = await setup(triage('claude'));
+    const r = await engine.start('route');
+    expect(r).toMatchObject({ output: { flowDefault: 'claude-1', stepFast: 'fast-1', stepDefault: 'main-1' } });
+    expect([main.calls.length, fast.calls.length, claude.calls.length]).toEqual([1, 1, 1]);
+  });
+
+  it('an unknown name fails the run loudly, naming what is configured, instead of using another model', async () => {
+    const flow = defineFlow({ id: 'typo', name: 't', description: 't' }, (ctx) => ctx.ai('a', { prompt: 'p', provider: 'neon' }));
+    const { engine, main } = await setup(flow);
+    const r = await engine.start('typo');
+    expect(r).toMatchObject({ status: 'failed', error: expect.stringMatching(/Unknown AI provider "neon".*fast, claude/) });
+    expect(main.calls).toHaveLength(0);
+  });
+
+  it('retries stay on the chosen provider, and a resumed run keeps routing', async () => {
+    const fast = new FakeProvider(['bad', 'good']);
+    const main = new FakeProvider([]);
+    const flow = defineFlow({ id: 'retry', name: 'r', description: 'r', provider: 'fast' }, async (ctx) => {
+      const out = await ctx.ai('a', { prompt: 'p', verify: (o) => (o === 'good' ? { ok: true } : { ok: false, reason: 'not good' }) });
+      await ctx.human('ok', { title: 't', summary: 's', options: ['yes'] });
+      return out;
+    });
+    const engine = new Engine({ store: await tempDir(), provider: main, providers: { fast }, flows: [flow] });
+    const paused = waiting(await engine.start('retry'));
+    expect(fast.calls).toHaveLength(2);
+    expect(await engine.answer(paused.card.id, { choice: '1' })).toMatchObject({ status: 'completed', output: 'good' });
+    expect(main.calls).toHaveLength(0);
+  });
+
+  it('with no default provider, a flow that names a provider still works', async () => {
+    const fast = new FakeProvider(['ok']);
+    const flow = defineFlow({ id: 'only', name: 'o', description: 'o', provider: 'fast' }, (ctx) => ctx.ai('a', { prompt: 'p' }));
+    expect(await new Engine({ store: await tempDir(), providers: { fast }, flows: [flow] }).start('only')).toMatchObject({ output: 'ok' });
+  });
+
+  it('createProviders builds the default and every named provider from config, and reserves "default"', () => {
+    const cmd = { type: 'command', command: 'echo' } as const;
+    const built = createProviders({ provider: cmd, providers: { claude: cmd, fast: { type: 'openai-compatible', baseUrl: 'http://localhost:1/v1', model: 'm' } } });
+    expect(built.provider).toBeDefined();
+    expect(Object.keys(built.providers)).toEqual(['claude', 'fast']);
+    expect(() => createProviders({ providers: { default: cmd } })).toThrow(/reserved/);
+    expect(createProviders({ provider: cmd }).providers).toEqual({});
+    expect(createProviders({}).provider).toBeUndefined();
+  });
+
+  it('the Chief of Staff can chat on its own named provider', async () => {
+    const main = new FakeProvider(['from main']);
+    const claude = new FakeProvider(['from claude']);
+    const engine = new Engine({ store: await tempDir(), provider: main, providers: { claude } });
+    expect(await new ChiefOfStaff({ engine, provider: 'claude' }).handleMessage('how is it going?')).toBe('from claude');
+    expect(await new ChiefOfStaff({ engine }).handleMessage('how is it going?')).toBe('from main');
+  });
+
+  it('replay uses the flow\'s named provider too', async () => {
+    const fast = new FakeProvider(['replayed']);
+    const main = new FakeProvider(['original']);
+    const flow = defineFlow({ id: 'rp', name: 'r', description: 'r', provider: 'fast' }, async (ctx) => {
+      const out = await ctx.ai('a', { prompt: 'p' });
+      const h = await ctx.human('ok', { title: 't', summary: 's', options: ['yes'] });
+      return `${out}:${h.choice}`;
+    });
+    const engine = new Engine({ store: await tempDir(), provider: main, providers: { fast: new FakeProvider(['original']) }, flows: [flow] });
+    const paused = waiting(await engine.start('rp'));
+    await engine.answer(paused.card.id, { choice: '1', text: 'looks right' });
+    const swapped = new Engine({ store: engine.store, provider: main, providers: { fast }, flows: [flow] });
+    const report = await swapped.replay('rp');
+    expect(report.total).toBe(1);
+    expect(fast.calls).toHaveLength(1);
+    expect(main.calls).toHaveLength(0);
   });
 });

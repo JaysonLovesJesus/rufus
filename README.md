@@ -76,6 +76,30 @@ Tip: add a line "Lesson: <rule>" to teach me for next time.
 
 Accepted replies: `2`, `1) but say Saturday`, `discard` (a label), or any free text. A line starting `Lesson:` is saved as a lesson. Implement `ChannelAdapter` (`sendCard`, `parseReply`) to plug in any transport; pass it as `channel` to `Engine` and new cards are sent as runs pause. A visual UI can render the same `HumanCard`.
 
+## Connecting Telegram
+
+A native Telegram bot, no dependencies and no webhook server (Rufus polls).
+
+1. Message [@BotFather](https://t.me/BotFather), send `/newbot`, copy the token.
+2. Send your new bot any message, then find your chat id (for example the `chat.id` in `https://api.telegram.org/bot<token>/getUpdates`).
+3. Export them and run the bridge:
+
+```sh
+export RUFUS_TELEGRAM_TOKEN=...      # from BotFather; prefer env over config.json
+export RUFUS_TELEGRAM_CHAT_ID=...    # the only chat Rufus will read or write
+
+pnpm rufus bridge --once --channel telegram
+pnpm rufus bridge --channel telegram     # keep going (every 5s)
+```
+
+Or `config.json`: `"telegram": { "token": "...", "chatId": 123456789 }` (env vars win). Without `--channel`, Rufus uses whichever of Telegram (`RUFUS_TELEGRAM_TOKEN` or `config.telegram`) and Beeper (`config.beeper` or `RUFUS_BEEPER_*`) is set up, and asks you to pick if both are.
+
+- Cards arrive with a tap-to-answer button per option; typing `1`, free text or a `Lesson:` line works too.
+- **Only your chat is heard.** Messages from any other chat, and from bots, are ignored.
+- The `getUpdates` offset is saved in `<workspace>/telegram-state.json`, so a restart never re-handles a message.
+- If Telegram is unreachable the bridge reports it, keeps running, and delivers once it's back. The token is never printed in errors.
+- Voice notes are not transcribed by Telegram; send text.
+
 ## Connecting Beeper (or your own channel)
 
 `rufus bridge` texts every new "Your Turn" card to a chat and turns your replies back into answers. It remembers what it already sent in `<workspace>/bridge-state.json`, so restarts never double-text.
@@ -219,7 +243,7 @@ Rufus keeps **all state outside the repo**, in a workspace directory: `--dir <pa
 
 ```
 <workspace>/
-  config.json     provider settings
+  config.json     provider(s), telegram/beeper settings
   lessons.json    saved lessons
   scheduler.json  lastRunAt per flow (created by the first tick)
   cases/          saved human reviews, one file per flow (replay + prompt examples)
@@ -254,6 +278,31 @@ Set one in `config.json`:
 { "version": 1, "provider": { "type": "command", "command": "claude", "args": ["-p"] } }
 ```
 
+### Named providers (a different model per flow or step)
+
+Add `providers` next to the default `provider`. A flow picks one with `meta.provider`, a step with `ctx.ai(..., { provider })`; a step beats its flow, and no name means the default (`"default"` also works as a name). An unknown name fails the run with the list of configured names; it never silently uses another model.
+
+```json
+{
+  "version": 1,
+  "provider": { "type": "command", "command": "claude", "args": ["-p"] },
+  "providers": {
+    "claude": { "type": "command", "command": "claude", "args": ["-p"] },
+    "fast": { "type": "openai-compatible", "baseUrl": "https://api.openai.com/v1", "model": "your-small-model", "apiKeyEnv": "RUFUS_API_KEY" }
+  },
+  "chief": { "provider": "claude" }
+}
+```
+
+```ts
+defineFlow({ id: 'inbox', name: 'Inbox', description: '...', provider: 'claude' }, async (ctx) => {
+  const urgency = await ctx.ai('triage', { prompt: '...', provider: 'fast' }); // light model for the cheap step
+  const draft = await ctx.ai('draft', { prompt: '...' });                       // the flow's provider (claude)
+});
+```
+
+`chief.provider` sets the model for free-form Chief of Staff chat. Replay and `rufus compare` use the same routing. Library users pass `providers: { name: provider }` to `Engine`; `createProviders(config)` builds them from a config.
+
 ## Layout
 
 ```
@@ -261,7 +310,7 @@ src/engine/     defineFlow, Engine, step runner, AI verify loop, providers
 src/store/      atomic JSON file store (no native deps)
 src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay; compare (plain vs. assisted)
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop
-src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Beeper adapter
+src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Telegram and Beeper adapters
 src/chief/      ChiefOfStaff: fast code commands + code-assembled free-form chat
 src/cli.ts      the `rufus` command
 examples/       a generic triage-and-draft flow
