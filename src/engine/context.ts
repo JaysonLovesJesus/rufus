@@ -101,6 +101,8 @@ export class StepRunner<I = unknown> implements FlowContext<I> {
       stepName: name,
       includeExamples: opts.includeExamples,
     });
+    // Remember which lessons actually reach a prompt, so `lessons.prune` keeps the ones that matter.
+    await this.deps.lessons.markUsed(lessons.map((l) => l.id));
     const { value, attempts } = await runAiStep({
       provider: this.deps.provider,
       system: buildSystemPrompt(meta.role, lessons, examples),

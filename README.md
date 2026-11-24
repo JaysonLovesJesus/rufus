@@ -52,7 +52,7 @@ export const triage = defineFlow(
 
 1. A human answers a card and adds a lesson: `engine.answer(id, { choice, lesson: 'Never use exclamation marks.' })`.
 2. Future `ctx.ai` calls for that flow (or role) get the lesson in their prompt.
-3. If the same correction keeps coming back, its `count` rises and `lessons.candidatesForCode()` surfaces it: time to turn the rule into a `verify` function. Then `lessons.markHardened(id)`.
+3. If the same correction keeps coming back, its `count` rises and `lessons.candidatesForCode()` surfaces it: time to turn the rule into a `verify` function. Then `lessons.markHardened(id)`. See [Learning guardrails](#learning-guardrails-no-monkey-patching) for the cap, layers and the replay gate.
 
 Lesson scopes are `global`, `flow:<id>` and `role:<name>`.
 
@@ -149,6 +149,17 @@ When `engine.answer()` resolves a card that follows an AI draft, Rufus saves a c
 2. **Replay.** `rufus replay <flowId> [--limit N]` (or `engine.replay(flowId)`) re-runs each case against today's ai step: current prompt, `verify`/`parse`, lessons and examples (the case under test is left out of its own examples). It reports passed/failed/skipped, the exact `verify` reason for each failure, and, comparing with the draft saved in the case, how many `improved` (failed today's `verify` then, passes now) or `regressed` (the reverse). Exit code is 1 if any case fails.
 
 Replay never re-runs `ctx.code` steps (they may send things); it reuses the results saved in the original run, and stops at the reviewed ai step. It does call your provider once or more per case. The pass/fail signal is your `verify`, so a rule that is not in `verify` is not measured.
+## Learning guardrails: no monkey-patching
+
+Every correction is tempting to append as one more line in the prompt. Piled up, those lines contradict each other and the model ignores them. Four guardrails keep learning honest:
+
+1. **Hard cap, then consolidate.** Each scope (`global`, `flow:<id>`, `role:<name>`) holds at most 7 active (non-hardened) lessons; change it with `"learning": { "maxLessonsPerScope": 5 }` in `config.json` or the `learning` option of `Engine`. Adding a *new* lesson to a full scope throws `LessonCapError`, which lists the current lessons. Repeating an existing rule still just bumps its `count`. Make room with `lessons.consolidate(scope, { replaceIds, replacementRule })` (several lessons become one sharper principle, atomically), `lessons.markHardened(id)` (the rule now lives in code), or `lessons.prune({ olderThanDays, maxUnused })` / `rufus lessons --prune [--older-than <days>] [--max-unused <n>]`. Prune drops one-off lessons that nothing has used or updated in that long (default 30 days) and, with `maxUnused`, never-injected extras beyond that many per scope; hardened and recurring (count 2+) lessons are kept. Rufus stamps `lastUsedAt` on every lesson it injects into a `ctx.ai` prompt so this is based on use.
+2. **Fix the right layer.** Each lesson has a `layer`: `principle` (default; taste and tone in the prompt), `code` (an exact rule that belongs in `verify`) or `context` (a missing fact that code should fetch and pass as `context`). `suggestLayer(rule)` is a pure, deterministic helper: word/character limits, forbidden words or characters, required opening/closing strings and sender/domain filters suggest `code`; "check / look up / fetch / include the order number" suggests `context`; everything else is `principle`. `rufus lessons` shows the suggestion under any lesson that should not be a prompt line.
+3. **Scoped layered replay.** `engine.replayScope(scope, { samplePerFlow })` / `rufus replay --scope <scope> [--sample N]`: `flow:<id>` replays that flow's cases; `role:<name>` replays only flows whose `meta.role` matches; `global` replays a golden sample (default 2 per flow, edited cases first, then most recent) of every flow that has cases, so a broad check stays fast. The `ScopedReplayReport` has a per-flow breakdown plus `total`, `passed`, `failed`, `improved`, `regressed`, `skipped`.
+4. **Replay regression gate.** `engine.proposeLesson({ scope, rule, layer? }, { force?, samplePerFlow? })` / `rufus propose <scope> <rule...> [--layer ...] [--sample N] [--force]` replays the scope with the candidate lesson active in memory only. If any previously passing case now fails (`regressed > 0`) it returns `{ accepted: false, reason, report }` and `lessons.json` is untouched. Otherwise it saves the lesson and returns `{ accepted: true, lesson, suggestedLayer, report }`. A full scope throws `LessonCapError` before any AI call is spent.
+
+The gate is only as sharp as your `verify` checks and saved cases: a rule `verify` cannot see is not measured, and with no cases it measures nothing (the CLI says so). A human lesson added through `engine.answer()` that hits the cap does not stop the run: the answer is kept, the flow continues, and a warning explains why the lesson was not saved.
+
 ## Quickstart
 
 Requires Node 20+ and pnpm.
@@ -161,7 +172,7 @@ pnpm rufus answer <cardId> 1    # resume and finish
 pnpm rufus lessons
 ```
 
-Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `demo`, `tick`, `watch`, `emit`, `replay`.
+Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `propose <scope> <rule...>`, `demo`, `tick`, `watch`, `emit`, `replay`.
 
 ### Your own flows and your own data
 
@@ -209,7 +220,7 @@ Set one in `config.json`:
 ```
 src/engine/     defineFlow, Engine, step runner, AI verify loop, providers
 src/store/      atomic JSON file store (no native deps)
-src/learning/   lessons; cases (auto-captured reviews, prompt examples); replay
+src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop
 src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Beeper adapter
 src/cli.ts      the `rufus` command

@@ -90,7 +90,7 @@ export class CaseStore {
 
 /** Everything code hands the model besides the prompt: scoped lessons + recent human reviews. */
 export async function recallMemory(
-  deps: { lessons: LessonStore; cases: CaseStore },
+  deps: { lessons: Pick<LessonStore, 'forScope'>; cases: CaseStore },
   q: {
     flowId: string;
     role?: string;

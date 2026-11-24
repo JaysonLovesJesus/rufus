@@ -11,10 +11,18 @@ import type {
   VerifyResult,
 } from '../types';
 import { recallMemory, type ReplayCase } from './cases';
+import { byPriority, lessonApplies, normalizeRule, type Lesson } from './lessons';
 
 export interface ReplayOptions {
   /** Only the most recent N cases (each one costs a real AI call). Default: all. */
   limit?: number;
+  /**
+   * Golden sample: replay only this many cases per flow, edited cases first (the human's own words are the
+   * strongest signal), then the most recent. Keeps broad checks fast.
+   */
+  sample?: number;
+  /** Lessons to treat as active for this replay only. They are never written to `lessons.json`. */
+  withLessons?: Lesson[];
 }
 
 export interface ReplayCaseResult {
@@ -53,10 +61,11 @@ export async function replayFlow(engine: Engine, flowId: string, opts: ReplayOpt
   const flow = engine.getFlow(flowId);
   await engine.store.init();
   const all = await engine.cases.forFlow(flowId);
-  const cases = opts.limit && opts.limit > 0 ? all.slice(-opts.limit) : all;
+  let cases = opts.limit && opts.limit > 0 ? all.slice(-opts.limit) : all;
+  if (opts.sample !== undefined) cases = goldenSample(cases, opts.sample);
 
   const results: ReplayCaseResult[] = [];
-  for (const c of cases) results.push(await replayCase(engine, flow, c));
+  for (const c of cases) results.push(await replayCase(engine, flow, c, opts.withLessons ?? []));
 
   const count = (f: (r: ReplayCaseResult) => boolean) => results.filter(f).length;
   return {
@@ -72,7 +81,16 @@ export async function replayFlow(engine: Engine, flowId: string, opts: ReplayOpt
   };
 }
 
-async function replayCase(engine: Engine, flow: Flow, c: ReplayCase): Promise<ReplayCaseResult> {
+/** Edited cases first, then most recent first; at most `n`. */
+export function goldenSample(cases: ReplayCase[], n: number): ReplayCase[] {
+  return cases
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => Number(b.c.edited) - Number(a.c.edited) || b.i - a.i)
+    .slice(0, Math.max(0, n))
+    .map(({ c }) => c);
+}
+
+async function replayCase(engine: Engine, flow: Flow, c: ReplayCase, extra: Lesson[]): Promise<ReplayCaseResult> {
   const base = { caseId: c.id, stepName: c.stepName };
   const skip = (reason: string): ReplayCaseResult => ({ ...base, status: 'skipped', reason });
 
@@ -83,7 +101,19 @@ async function replayCase(engine: Engine, flow: Flow, c: ReplayCase): Promise<Re
     return skip(`The original run ${c.runId} is no longer in the workspace.`);
   }
 
-  const memory = await recallMemory(engine, {
+  // Candidate lessons are layered over the saved ones in memory only; nothing is written.
+  const deps = {
+    cases: engine.cases,
+    lessons: {
+      async forScope(q: { flowId?: string; role?: string }): Promise<Lesson[]> {
+        const saved = await engine.lessons.forScope(q);
+        const seen = new Set(saved.map((l) => `${l.scope}\n${normalizeRule(l.rule)}`));
+        const added = extra.filter((l) => lessonApplies(l.scope, q) && !seen.has(`${l.scope}\n${normalizeRule(l.rule)}`));
+        return [...saved, ...added].sort(byPriority);
+      },
+    },
+  };
+  const memory = await recallMemory(deps, {
     flowId: flow.meta.id,
     role: flow.meta.role,
     stepName: c.stepName,
@@ -110,6 +140,75 @@ async function replayCase(engine: Engine, flow: Flow, c: ReplayCase): Promise<Re
     attempts: o.attempts,
     before: o.before,
     change: o.before === 'failed' && passed ? 'improved' : o.before === 'passed' && !passed ? 'regressed' : 'unchanged',
+  };
+}
+
+export type ParsedScope = { kind: 'global' } | { kind: 'flow'; id: string } | { kind: 'role'; name: string };
+
+export function parseScope(scope: string): ParsedScope {
+  if (scope === 'global') return { kind: 'global' };
+  const m = /^(flow|role):(.+)$/.exec(scope.trim());
+  if (m) return m[1] === 'flow' ? { kind: 'flow', id: m[2]! } : { kind: 'role', name: m[2]! };
+  throw new Error(`Unknown scope "${scope}". Use "global", "flow:<id>" or "role:<name>".`);
+}
+
+export interface ScopedReplayOptions extends ReplayOptions {
+  /**
+   * Cases per flow for a golden sample. `global` defaults to 2 so a broad check never replays hundreds of
+   * cases; for `flow:` and `role:` scopes it applies only when given.
+   */
+  samplePerFlow?: number;
+}
+
+export interface ScopedReplayReport {
+  scope: string;
+  /** One report per flow that was replayed. `role:` and `global` leave out flows with no saved cases. */
+  flows: ReplayReport[];
+  total: number;
+  passed: number;
+  failed: number;
+  improved: number;
+  regressed: number;
+  skipped: number;
+  unchanged: number;
+}
+
+export const DEFAULT_GLOBAL_SAMPLE = 2;
+
+/**
+ * Replay only what a scope touches:
+ * `flow:<id>` -> that flow. `role:<name>` -> flows whose `meta.role` is that role.
+ * `global` -> a golden sample (default 2 cases) from every flow that has saved cases.
+ */
+export async function replayScope(engine: Engine, scope: string, opts: ScopedReplayOptions = {}): Promise<ScopedReplayReport> {
+  const parsed = parseScope(scope);
+  const { samplePerFlow, ...rest } = opts;
+  const sample = samplePerFlow ?? (parsed.kind === 'global' ? DEFAULT_GLOBAL_SAMPLE : undefined);
+  if (sample !== undefined && !(sample > 0)) throw new Error('samplePerFlow must be a positive number.');
+  const replayOpts: ReplayOptions = { ...rest, ...(sample !== undefined ? { sample } : {}) };
+
+  const flows: ReplayReport[] = [];
+  if (parsed.kind === 'flow') {
+    flows.push(await replayFlow(engine, parsed.id, replayOpts));
+  } else {
+    const chosen = engine.listFlows().filter((f) => parsed.kind === 'global' || f.meta.role === parsed.name);
+    for (const f of chosen) {
+      const report = await replayFlow(engine, f.meta.id, replayOpts);
+      if (report.total) flows.push(report);
+    }
+  }
+  const sum = (k: 'total' | 'passed' | 'failed' | 'improved' | 'regressed' | 'skipped' | 'unchanged') =>
+    flows.reduce((n, r) => n + r[k], 0);
+  return {
+    scope,
+    flows,
+    total: sum('total'),
+    passed: sum('passed'),
+    failed: sum('failed'),
+    improved: sum('improved'),
+    regressed: sum('regressed'),
+    skipped: sum('skipped'),
+    unchanged: sum('unchanged'),
   };
 }
 

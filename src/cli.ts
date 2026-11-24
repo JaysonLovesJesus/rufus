@@ -9,6 +9,8 @@ import { formatCardAsText, parseTextReply } from './channels/text';
 import { Engine } from './engine/engine';
 import { isFlow } from './engine/flow';
 import { createProvider } from './engine/providers';
+import { suggestLayer } from './learning/layers';
+import type { ScopedReplayReport } from './learning/replay';
 import { Scheduler, type TickResult } from './scheduler/scheduler';
 import { parseDuration } from './scheduler/triggers';
 import { FileStore } from './store';
@@ -26,12 +28,17 @@ Usage: rufus [--dir <workspace>] <command>
   answer <cardId> <reply...>   answer a card: a number, an option name, or your own words
   bridge [--once] [--interval <sec>]
                                text new cards to your chat (Beeper) and apply your replies
-  lessons                      show saved lessons and which are ready to become code
+  lessons [--prune [--older-than <days>] [--max-unused <n>]]
+                               show saved lessons (with the layer each belongs in), or prune stale ones
+  propose <scope> <rule...> [--layer code|context|principle] [--sample N] [--force]
+                               replay the scope with the rule on trial; save it only if nothing regresses
   demo [--reply <text>]        run the example flow (add --reply to answer it right away)
   tick                         one scheduler pass: start flows whose trigger is due (for cron/launchd)
   watch [--interval <30s>]     keep ticking in the foreground (default every 60s)
   emit <event> [payloadJson]   fire flows with an onEvent(<event>) trigger
   replay <flowId> [--limit N]  re-run saved human-reviewed cases against today's flow and verify checks
+  replay --scope <flow:id|role:name|global> [--sample N]
+                               replay a scope; global replays a small golden sample of every flow
 `;
 
 export interface Io {
@@ -84,6 +91,10 @@ function describe(result: RunResult, io: Io): void {
   }
 }
 
+function summarizeScoped(r: ScopedReplayReport): string {
+  return `Replayed ${r.total} case(s) across ${r.flows.length} flow(s) in "${r.scope}": ${r.passed} passed, ${r.failed} failed, ${r.skipped} skipped; ${r.improved} improved, ${r.regressed} regressed.`;
+}
+
 export interface MainOptions {
   /** Override the channel used by `bridge` (default: Beeper, from config.json / RUFUS_BEEPER_* env). */
   channel?: LiveChannel;
@@ -99,9 +110,16 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const args = [...argv];
   const once = args.includes('--once');
   if (once) args.splice(args.indexOf('--once'), 1);
+  const bool = (flag: string): boolean => {
+    const i = args.indexOf(flag);
+    if (i !== -1) args.splice(i, 1);
+    return i !== -1;
+  };
+  const prune = bool('--prune');
+  const force = bool('--force');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
-  for (const flag of ['--dir', '--reply', '--limit', '--interval']) {
+  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
@@ -122,7 +140,14 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     store,
     provider: cmd === 'demo' ? demoProvider() : createProvider(config.provider),
     flows: [triageDraft, ...(await loadWorkspaceFlows(store))],
+    learning: config.learning,
   });
+  const positive = (flag: string): number | undefined => {
+    const v = flags[flag];
+    if (v === undefined) return undefined;
+    if (!(Number(v) > 0)) throw new Error(`${flag} needs a positive number.`);
+    return Number(v);
+  };
 
   switch (cmd) {
     case 'init':
@@ -185,13 +210,51 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     }
 
     case 'lessons': {
+      if (prune) {
+        const num = (flag: string): number | undefined => (flags[flag] === undefined ? undefined : Number(flags[flag]));
+        const removed = await engine.lessons.prune({ olderThanDays: num('--older-than'), maxUnused: num('--max-unused') });
+        if (!removed.length) return io.out('Nothing to prune.');
+        io.out(`Pruned ${removed.length} stale lesson(s):`);
+        for (const l of removed) io.out(`  ${l.id}  x${l.count}  ${l.scope}  ${l.rule}`);
+        return;
+      }
       const lessons = await engine.lessons.all();
       if (!lessons.length) return io.out('No lessons yet. Reply to a card with a "Lesson: <rule>" line to add one.');
       const ready = new Set((await engine.lessons.candidatesForCode()).map((l) => l.id));
+      const cap = engine.lessons.maxLessonsPerScope;
+      const activeByScope = new Map<string, number>();
+      for (const l of lessons) if (!l.hardened) activeByScope.set(l.scope, (activeByScope.get(l.scope) ?? 0) + 1);
       for (const l of lessons) {
         const tag = l.hardened ? ' [in code]' : ready.has(l.id) ? ' [ready to harden into code]' : '';
-        io.out(`${l.id}  x${l.count}  ${l.scope}  ${l.rule}${tag}`);
+        const layer = l.layer === 'principle' ? '' : `  [${l.layer}]`;
+        io.out(`${l.id}  x${l.count}  ${l.scope}${layer}  ${l.rule}${tag}`);
+        if (!l.hardened) {
+          const s = suggestLayer(l.rule);
+          if (s.layer !== l.layer && s.layer !== 'principle') io.out(`    suggested layer: ${s.layer}. ${s.reason}`);
+        }
       }
+      for (const [scope, n] of activeByScope) if (n >= cap) io.out(`Scope ${scope} is at its cap (${n}/${cap}): consolidate or harden before adding more.`);
+      return;
+    }
+
+    case 'propose': {
+      const [scope, ...words] = rest;
+      if (!scope || !words.length) throw new Error('Usage: rufus propose <scope> <rule...> [--layer code|context|principle] [--sample N] [--force]');
+      const layer = flags['--layer'];
+      if (layer !== undefined && !['code', 'context', 'principle'].includes(layer)) throw new Error('--layer must be code, context or principle.');
+      const result = await engine.proposeLesson(
+        { scope, rule: words.join(' '), layer: layer as 'code' | 'context' | 'principle' | undefined },
+        { force, samplePerFlow: positive('--sample') },
+      );
+      const { report } = result;
+      io.out(report.total ? summarizeScoped(report) : `No saved cases in ${scope}, so nothing was checked.`);
+      if (!result.accepted) {
+        io.err(result.reason);
+        process.exitCode = 1;
+        return;
+      }
+      io.out(`Saved lesson ${result.lesson.id}${report.regressed ? ' (forced past regressions)' : ''}.`);
+      if (result.suggestedLayer.layer !== 'principle') io.out(`Tip: this looks like a ${result.suggestedLayer.layer} rule. ${result.suggestedLayer.reason}`);
       return;
     }
 
@@ -244,10 +307,21 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     }
 
     case 'replay': {
+      const limit = positive('--limit');
+      const scope = flags['--scope'];
+      if (scope !== undefined) {
+        const report = await engine.replayScope(scope, { limit, samplePerFlow: positive('--sample') });
+        if (!report.total) return io.out(`No saved cases for "${scope}" yet. They are saved when a human answers a card.`);
+        io.out(summarizeScoped(report));
+        for (const f of report.flows) {
+          io.out(`  ${f.flowId}: ${f.total} case(s), ${f.passed} passed, ${f.failed} failed, ${f.skipped} skipped, ${f.regressed} regressed`);
+          for (const r of f.results) if (r.status !== 'passed') io.out(`    ${r.status.toUpperCase()} ${r.caseId} (${r.stepName}): ${r.reason}`);
+        }
+        if (report.failed) process.exitCode = 1;
+        return;
+      }
       const [flowId] = rest;
-      if (!flowId) throw new Error('Usage: rufus replay <flowId> [--limit N]');
-      const limit = flags['--limit'] ? Number(flags['--limit']) : undefined;
-      if (limit !== undefined && !(limit > 0)) throw new Error('--limit needs a positive number.');
+      if (!flowId) throw new Error('Usage: rufus replay <flowId> [--limit N]  or  rufus replay --scope <scope> [--sample N]');
       const report = await engine.replay(flowId, { limit });
       if (!report.total) return io.out(`No saved cases for "${flowId}" yet. They are saved when a human answers a card.`);
       io.out(`Replayed ${report.total} case(s) for "${flowId}": ${report.passed} passed, ${report.failed} failed, ${report.skipped} skipped.`);

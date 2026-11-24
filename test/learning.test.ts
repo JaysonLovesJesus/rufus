@@ -19,7 +19,7 @@ describe('LessonStore', () => {
   });
 
   it('survives concurrent adds without losing writes', async () => {
-    const lessons = new LessonStore(new FileStore(await tempDir()));
+    const lessons = new LessonStore(new FileStore(await tempDir()), { maxLessonsPerScope: 10 });
     await Promise.all(Array.from({ length: 10 }, (_, i) => lessons.add({ scope: 'global', rule: `rule ${i}` })));
     expect(await lessons.all()).toHaveLength(10);
   });

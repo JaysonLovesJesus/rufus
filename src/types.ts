@@ -173,10 +173,17 @@ export interface BeeperConfig {
   selfChat?: boolean;
 }
 
+/** Guardrails against piling up prompt rules. */
+export interface LearningConfig {
+  /** Most active (non-hardened) lessons per scope. Default 7. */
+  maxLessonsPerScope?: number;
+}
+
 export interface RufusConfig {
   version: 1;
   provider?: ProviderConfig;
   beeper?: BeeperConfig;
   /** The scheduler stays silent in this window unless a trigger is `urgent`. */
   quietHours?: QuietHours;
+  learning?: LearningConfig;
 }

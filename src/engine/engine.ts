@@ -1,7 +1,9 @@
 import { FileStore } from '../store';
 import { CaseStore, captureCase } from '../learning/cases';
 import { LessonStore, scopes } from '../learning/lessons';
-import { replayFlow, type ReplayOptions, type ReplayReport } from '../learning/replay';
+import { replayFlow, replayScope, type ReplayOptions, type ReplayReport, type ScopedReplayOptions, type ScopedReplayReport } from '../learning/replay';
+import { proposeLesson, type ProposeInput, type ProposeOptions, type ProposeResult } from '../learning/propose';
+import { LessonCapError } from '../learning/lessons';
 import type { ChannelAdapter } from '../channels/text';
 import { StepRunner } from './context';
 import type {
@@ -10,6 +12,7 @@ import type {
   HumanAnswer,
   HumanCard,
   HumanReply,
+  LearningConfig,
   RunRecord,
   RunResult,
 } from '../types';
@@ -22,6 +25,8 @@ export interface EngineOptions {
   flows?: Flow[];
   /** If set, new human cards are sent through it as soon as a run pauses. */
   channel?: ChannelAdapter;
+  /** Lesson guardrails. See `RufusConfig.learning`. */
+  learning?: LearningConfig;
 }
 
 const noProvider: AiProvider = {
@@ -41,7 +46,7 @@ export class Engine {
 
   constructor(opts: EngineOptions) {
     this.store = typeof opts.store === 'string' ? new FileStore(opts.store) : opts.store;
-    this.lessons = new LessonStore(this.store);
+    this.lessons = new LessonStore(this.store, opts.learning);
     this.cases = new CaseStore(this.store);
     this.provider = opts.provider ?? noProvider;
     this.channel = opts.channel;
@@ -64,6 +69,19 @@ export class Engine {
   /** Re-run saved human-reviewed cases against today's ai step, verify check and lessons. */
   replay(flowId: string, opts?: ReplayOptions): Promise<ReplayReport> {
     return replayFlow(this, flowId, opts);
+  }
+
+  /** Replay by scope: `flow:<id>`, `role:<name>`, or `global` (a small golden sample of every flow). */
+  replayScope(scope: string, opts?: ScopedReplayOptions): Promise<ScopedReplayReport> {
+    return replayScope(this, scope, opts);
+  }
+
+  /**
+   * Regression gate for a new lesson: replay its scope with the lesson temporarily active, and only save it
+   * if no previously passing case now fails.
+   */
+  proposeLesson(input: ProposeInput, opts?: ProposeOptions): Promise<ProposeResult> {
+    return proposeLesson(this, input, opts);
   }
 
   private init(): Promise<void> {
@@ -147,11 +165,17 @@ export class Engine {
 
     if (reply.lesson) {
       const l = typeof reply.lesson === 'string' ? { rule: reply.lesson } : reply.lesson;
-      await this.lessons.add({
-        scope: l.scope ?? scopes.flow(run.flowId),
-        rule: l.rule,
-        sourceRunId: run.id,
-      });
+      try {
+        await this.lessons.add({
+          scope: l.scope ?? scopes.flow(run.flowId),
+          rule: l.rule,
+          sourceRunId: run.id,
+        });
+      } catch (err) {
+        // The answer is already saved; a full lesson scope must not strand the run.
+        if (!(err instanceof LessonCapError)) throw err;
+        console.warn(`[rufus] lesson not saved: ${err.message}`);
+      }
     }
     return this.execute(run, flow);
   }
