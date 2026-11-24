@@ -157,7 +157,17 @@ export type ProviderConfig =
   | { type: 'openai-compatible'; baseUrl: string; model: string; apiKeyEnv?: string }
   | { type: 'command'; command: string; args?: string[] };
 
+/** Beeper Desktop API settings. Env vars (RUFUS_BEEPER_*) override these; prefer env for the token. */
+export interface BeeperConfig {
+  url?: string;
+  token?: string;
+  chatId?: string;
+  /** The chat is a note-to-self, so your own messages count as replies. */
+  selfChat?: boolean;
+}
+
 export interface RufusConfig {
   version: 1;
   provider?: ProviderConfig;
+  beeper?: BeeperConfig;
 }

@@ -3,6 +3,8 @@ import { promises as fs, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createBeeperChannel } from './channels/beeper';
+import { CardBridge, type LiveChannel, type TickReport } from './channels/bridge';
 import { formatCardAsText, parseTextReply } from './channels/text';
 import { Engine } from './engine/engine';
 import { isFlow } from './engine/flow';
@@ -20,6 +22,8 @@ Usage: rufus [--dir <workspace>] <command>
   run <flowId> [inputJson]     start a flow
   pending                      show cards waiting for you ("Your Turn")
   answer <cardId> <reply...>   answer a card: a number, an option name, or your own words
+  bridge [--once] [--interval <sec>]
+                               text new cards to your chat (Beeper) and apply your replies
   lessons                      show saved lessons and which are ready to become code
   demo [--reply <text>]        run the example flow (add --reply to answer it right away)
 `;
@@ -61,17 +65,32 @@ function describe(result: RunResult, io: Io): void {
   }
 }
 
-export async function main(argv: string[], io: Io = consoleIo): Promise<void> {
+export interface MainOptions {
+  /** Override the channel used by `bridge` (default: Beeper, from config.json / RUFUS_BEEPER_* env). */
+  channel?: LiveChannel;
+}
+
+function describeTick(r: TickReport): string[] {
+  const lines = r.delivered.map((id) => `sent card ${id}`);
+  lines.push(...r.answered.map((id) => `answered card ${id}`));
+  return lines;
+}
+
+export async function main(argv: string[], io: Io = consoleIo, options: MainOptions = {}): Promise<void> {
   const args = [...argv];
+  const once = args.includes('--once');
+  if (once) args.splice(args.indexOf('--once'), 1);
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   let reply: string | undefined;
-  for (const flag of ['--dir', '--reply']) {
+  let intervalSec = 5;
+  for (const flag of ['--dir', '--reply', '--interval']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
     if (value === undefined) throw new Error(`${flag} needs a value.`);
     args.splice(i, 2);
     if (flag === '--dir') dir = path.resolve(value);
+    else if (flag === '--interval') intervalSec = Number(value);
     else reply = value;
   }
 
@@ -119,6 +138,31 @@ export async function main(argv: string[], io: Io = consoleIo): Promise<void> {
       const parsed = parseTextReply(words.join(' '), card);
       if (!parsed) throw new Error(`Could not read that as an answer. This card only takes: ${card.options.map((o, i) => `${i + 1} (${o.label})`).join(', ')}.`);
       return describe(await engine.answer(card.id, parsed), io);
+    }
+
+    case 'bridge': {
+      if (!(intervalSec > 0)) throw new Error('--interval needs a number of seconds above 0.');
+      const channel = options.channel ?? createBeeperChannel(config.beeper);
+      const bridge = new CardBridge({ engine, channel });
+      let lastError: string | undefined;
+      const report = (r: TickReport): void => {
+        for (const line of describeTick(r)) io.out(line);
+        if (r.error && r.error !== lastError) io.err(`Channel problem (will keep retrying): ${r.error}`);
+        if (!r.error && lastError) io.out('Channel is back.');
+        lastError = r.error;
+      };
+      if (once) {
+        const r = await bridge.tick();
+        report(r);
+        if (r.error) process.exitCode = 1;
+        else if (!describeTick(r).length) io.out('Nothing new.');
+        return;
+      }
+      io.out(`Bridge running (every ${intervalSec}s). Ctrl+C to stop.`);
+      const stop = new AbortController();
+      process.once('SIGINT', () => stop.abort());
+      process.once('SIGTERM', () => stop.abort());
+      return bridge.run({ intervalMs: intervalSec * 1000, signal: stop.signal, onTick: report });
     }
 
     case 'lessons': {

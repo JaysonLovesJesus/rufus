@@ -6,3 +6,5 @@ export { FileStore } from './store';
 export { LessonStore, scopes, type Lesson } from './learning/lessons';
 export { formatCardAsText, parseTextReply, PlainTextChannel, type ChannelAdapter } from './channels/text';
 export type * from './types';
+export { CardBridge, type CardBridgeOptions, type IncomingMessage, type LiveChannel, type TickReport } from './channels/bridge';
+export { BeeperChannel, BeeperOfflineError, BeeperApiError, createBeeperChannel, resolveBeeperOptions, type BeeperOptions } from './channels/beeper';

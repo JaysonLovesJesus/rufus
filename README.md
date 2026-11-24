@@ -76,6 +76,40 @@ Tip: add a line "Lesson: <rule>" to teach me for next time.
 
 Accepted replies: `2`, `1) but say Saturday`, `discard` (a label), or any free text. A line starting `Lesson:` is saved as a lesson. Implement `ChannelAdapter` (`sendCard`, `parseReply`) to plug in any transport; pass it as `channel` to `Engine` and new cards are sent as runs pause. A visual UI can render the same `HumanCard`.
 
+## Connecting Beeper (or your own channel)
+
+`rufus bridge` texts every new "Your Turn" card to a chat and turns your replies back into answers. It remembers what it already sent in `<workspace>/bridge-state.json`, so restarts never double-text.
+
+```sh
+export RUFUS_BEEPER_TOKEN=...      # Beeper Desktop > Settings > Integrations > Approved connections (+)
+export RUFUS_BEEPER_CHAT_ID=...    # the chat Rufus should use
+# optional: RUFUS_BEEPER_URL (default http://localhost:23373)
+
+pnpm rufus bridge --once           # one pass: send new cards, apply new replies
+pnpm rufus bridge                  # keep going (every 5s; --interval <sec>)
+```
+
+The same settings can live in `config.json` as `"beeper": { "url", "token", "chatId" }`; env vars win. Prefer env for the token.
+
+Reply `1`, `2) but say Friday`, an option name, free text, or a voice note (Beeper's transcript is used). Add a `Lesson: <rule>` line to teach Rufus. With several open cards, start your reply with the card ref: `c_1234 1`. Rufus answers with a one-line confirmation, or the next card if the flow pauses again.
+
+- Only messages from the other side are read. If your chat is a note-to-self (you and Rufus share one account), set `RUFUS_BEEPER_SELF_CHAT=1`; Rufus still ignores echoes of its own texts.
+- If Beeper Desktop isn't running, the bridge reports it, keeps running, and delivers once it's back.
+- Only messages sent after the bridge first starts are treated as replies.
+
+**Any other channel** is two methods:
+
+```ts
+import { CardBridge, Engine, type LiveChannel } from './src';
+
+const channel: LiveChannel = {
+  async send(text) { /* post text to your chat */ },
+  async poll(since) { return [{ id: 'unique-id', text: 'what they typed', at: '2026-01-01T00:00:00Z' }]; }, // optional
+};
+const bridge = new CardBridge({ engine, channel });
+await bridge.tick();          // or: bridge.run({ intervalMs: 5000 })
+```
+
 ## Quickstart
 
 Requires Node 20+ and pnpm.
@@ -88,7 +122,7 @@ pnpm rufus answer <cardId> 1    # resume and finish
 pnpm rufus lessons
 ```
 
-Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `lessons`, `demo`.
+Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `demo`.
 
 ### Your own flows and your own data
 
@@ -135,7 +169,7 @@ Set one in `config.json`:
 src/engine/     defineFlow, Engine, step runner, AI verify loop, providers
 src/store/      atomic JSON file store (no native deps)
 src/learning/   lessons: add, forScope, candidatesForCode, markHardened
-src/channels/   ChannelAdapter, text formatter + reply parser
+src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Beeper adapter
 src/cli.ts      the `rufus` command
 examples/       a generic triage-and-draft flow
 test/           vitest suite
