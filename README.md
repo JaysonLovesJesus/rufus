@@ -110,6 +110,29 @@ const bridge = new CardBridge({ engine, channel });
 await bridge.tick();          // or: bridge.run({ intervalMs: 5000 })
 ```
 
+## Chief of Staff: text it any time
+
+The bridge used to listen only while a card was open. `ChiefOfStaff` (`handleMessage(text)`) answers any time you text or voice-note it, and `CardBridge` wires it in:
+
+- A message that answers an open card (it starts with the card's ref, or exactly one card is open and the text reads as an answer) still answers that card, as before.
+- Anything else (nothing is open, a choice-only card can't take the text, or it is an explicit command) goes to the chief and the reply is texted back. With several open cards, a number with no ref still asks for a ref; other messages go to the chief.
+
+**Fast commands: plain code, the chief makes no AI call.**
+
+| You send | You get |
+| --- | --- |
+| `status`, `pending`, `what needs me?` | open cards and running flows |
+| `flows` | the flows you can run |
+| `lessons` | lessons, and which ones keep coming back and are ready to become code |
+| `run <flowId> [json]` | starts the flow now; the card if it pauses, the result if it finishes |
+| `learn <scope>: <rule>` | the v3 gate (`proposeLesson`): saved or rejected, plus the layer it belongs in. `<scope>` is `global`, `flow:<id>`, `role:<name>`, or a bare flow id |
+
+`run` and `learn` start flows and replay saved cases, so *those* use your provider if the flow (or a replay) has an `ai` step. The chief itself adds nothing.
+
+**Everything else is free-form.** Code assembles a compact live snapshot (flows, open cards with their refs and options, lessons, the last five runs) and asks your provider for one short plain-words reply. The chief can only reply with text: it cannot start a run, answer a card or save a lesson. If you ask it to draft a new AI + Code + Human flow, or to do something, it says what it would do and the exact command, and nothing happens until you send it. With no provider configured it says so and points at the fast commands.
+
+From the terminal: `rufus chat status`, `rufus chat run triage-draft '{"from":"Sam","body":"Can we move Thursday?"}'`, `rufus chat "anything waiting on me?"`.
+
 ## Heartbeat: code decides, AI only when it matters
 
 Give a flow a trigger. Most ticks end in plain code at $0.00; the AI is only called when a `when` gate says something changed or crossed a threshold.
@@ -149,6 +172,22 @@ When `engine.answer()` resolves a card that follows an AI draft, Rufus saves a c
 2. **Replay.** `rufus replay <flowId> [--limit N]` (or `engine.replay(flowId)`) re-runs each case against today's ai step: current prompt, `verify`/`parse`, lessons and examples (the case under test is left out of its own examples). It reports passed/failed/skipped, the exact `verify` reason for each failure, and, comparing with the draft saved in the case, how many `improved` (failed today's `verify` then, passes now) or `regressed` (the reverse). Exit code is 1 if any case fails.
 
 Replay never re-runs `ctx.code` steps (they may send things); it reuses the results saved in the original run, and stops at the reviewed ai step. It does call your provider once or more per case. The pass/fail signal is your `verify`, so a rule that is not in `verify` is not measured.
+## Compare: how much does Code help the AI?
+
+`rufus compare <flowId> [--limit N]` (or `engine.compare(flowId, { limit })`) replays your saved human-reviewed cases twice, graded by the exact same `verify`/`parse`:
+
+- **plain**: the step's raw prompt plus the case's raw input, in a bare system prompt. No code-assembled `context`, no lessons, no examples, `maxRetries: 0`: one shot.
+- **assisted**: the step as the flow runs it today: `context`, scoped lessons, recent examples (the case under test left out) and the `verify` retry loop.
+
+```
+Compared 6 case(s) for "triage-draft", graded by the same verify:
+  plain AI       2/6 passed (33%), avg attempts 1.0
+  code-assisted  5/6 passed (83%), avg attempts 1.3
+Code lift: +3 case(s) (+50 points).
+```
+
+`CompareReport` has `plain` and `assisted` (`passed`, `failed`, `passRate`, `avgAttempts`), `delta` (`assisted.passed - plain.passed`, negative if the extra scaffolding hurt), `deltaRate`, per-case results, and `skipped` / `errored` counts. Like replay, it never re-runs `ctx.code` steps (it reuses the original run's saved results), and it only measures what `verify` can check. It costs at least two provider calls per case; use `--limit`. A case where the provider itself failed (offline, no key) is left out of the rates and reported, never scored as a wrong answer, and the CLI exits 1.
+
 ## Learning guardrails: no monkey-patching
 
 Every correction is tempting to append as one more line in the prompt. Piled up, those lines contradict each other and the model ignores them. Four guardrails keep learning honest:
@@ -172,7 +211,7 @@ pnpm rufus answer <cardId> 1    # resume and finish
 pnpm rufus lessons
 ```
 
-Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `propose <scope> <rule...>`, `demo`, `tick`, `watch`, `emit`, `replay`.
+Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `propose <scope> <rule...>`, `demo`, `tick`, `watch`, `emit`, `replay`, `compare <flowId>`, `chat <message...>`.
 
 ### Your own flows and your own data
 
@@ -220,9 +259,10 @@ Set one in `config.json`:
 ```
 src/engine/     defineFlow, Engine, step runner, AI verify loop, providers
 src/store/      atomic JSON file store (no native deps)
-src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay
+src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay; compare (plain vs. assisted)
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop
 src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Beeper adapter
+src/chief/      ChiefOfStaff: fast code commands + code-assembled free-form chat
 src/cli.ts      the `rufus` command
 examples/       a generic triage-and-draft flow
 test/           vitest suite

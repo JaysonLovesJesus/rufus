@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { ChiefOfStaff } from '../chief/chief';
 import type { Engine } from '../engine/engine';
 import type { HumanCard, HumanReply, RunResult } from '../types';
 import { formatCardAsText, parseTextReply } from './text';
@@ -48,6 +49,11 @@ export interface CardBridgeOptions {
   /** Where `bridge-state.json` lives. Defaults to the engine's workspace. */
   workspaceDir?: string;
   now?: () => Date;
+  /**
+   * Answers anything that is not a reply to an open card (status, flows, lessons, run, learn, or free-form chat).
+   * Defaults to a `ChiefOfStaff` on the same engine; pass `false` to keep the bridge card-only.
+   */
+  chief?: ChiefOfStaff | false;
 }
 
 const STATE_FILE = 'bridge-state.json';
@@ -74,6 +80,7 @@ export class CardBridge {
   private readonly channel: LiveChannel;
   private readonly stateFile: string;
   private readonly now: () => Date;
+  private readonly chief?: ChiefOfStaff;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(opts: CardBridgeOptions) {
@@ -81,6 +88,7 @@ export class CardBridge {
     this.channel = opts.channel;
     this.stateFile = path.join(opts.workspaceDir ?? opts.engine.store.dir, STATE_FILE);
     this.now = opts.now ?? (() => new Date());
+    this.chief = opts.chief === false ? undefined : (opts.chief ?? new ChiefOfStaff({ engine: this.engine }));
   }
 
   /** One pass: read replies, then send any cards the human hasn't seen. Never throws on channel errors. */
@@ -148,10 +156,22 @@ export class CardBridge {
     }
   }
 
+  /**
+   * A message that is not an answer to a card goes to the Chief of Staff, who can always reply.
+   * `hint` is what to say instead when the chief can't think (no AI configured) and a card is waiting.
+   */
+  private async chat(state: BridgeState, text: string, hint?: string): Promise<void> {
+    const reply = await this.chief?.handle(text);
+    if (!reply || (reply.unavailable && hint)) return void (await this.say(state, hint ?? 'Nothing is waiting on you right now.'));
+    // The card is already in the reply, so mark it delivered or the next deliver pass would text it again.
+    for (const card of reply.cards) if (!state.delivered.includes(card.id)) state.delivered.push(card.id);
+    if (reply.cards.length) await this.save(state);
+    await this.say(state, reply.text);
+  }
+
   private async handleReply(state: BridgeState, raw: string, report: TickReport): Promise<void> {
     const pendingIds = new Set(state.delivered);
     const open = (await this.engine.pending()).filter((c) => pendingIds.has(c.id));
-    if (!open.length) return void (await this.say(state, 'Nothing is waiting on you right now.'));
 
     let card: HumanCard | undefined;
     let body = raw;
@@ -163,16 +183,21 @@ export class CardBridge {
       }
       card = hits[0];
       body = raw.slice(ref[0].length);
+    } else if (!open.length || this.chief?.isCommand(raw)) {
+      return this.chat(state, raw);
     } else if (open.length === 1) {
       card = open[0];
-    } else {
+    } else if (/^\d/.test(raw)) {
       return void (await this.say(state, `${open.length} cards are open. Start your reply with a ref, like "${open[0]!.id.slice(0, 6)} 1".`));
+    } else {
+      return this.chat(state, raw, `${open.length} cards are open. Start your reply with a ref, like "${open[0]!.id.slice(0, 6)} 1".`);
     }
 
     const parsed = parseTextReply(body, card!);
     if (!parsed) {
       const options = card!.options.map((o, i) => `${i + 1} (${o.label})`).join(', ');
-      return void (await this.say(state, `Couldn't read that as an answer.${options ? ` Reply ${options}.` : ''}`));
+      // A choice-only card can't take this text. It may be a question for the chief instead.
+      return this.chat(state, raw, `Couldn't read that as an answer.${options ? ` Reply ${options}.` : ''}`);
     }
 
     let result: RunResult;

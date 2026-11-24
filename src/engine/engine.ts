@@ -2,6 +2,7 @@ import { FileStore } from '../store';
 import { CaseStore, captureCase } from '../learning/cases';
 import { LessonStore, scopes } from '../learning/lessons';
 import { replayFlow, replayScope, type ReplayOptions, type ReplayReport, type ScopedReplayOptions, type ScopedReplayReport } from '../learning/replay';
+import { compareFlow, type CompareOptions, type CompareReport } from '../learning/compare';
 import { proposeLesson, type ProposeInput, type ProposeOptions, type ProposeResult } from '../learning/propose';
 import { LessonCapError } from '../learning/lessons';
 import type { ChannelAdapter } from '../channels/text';
@@ -69,6 +70,11 @@ export class Engine {
   /** Re-run saved human-reviewed cases against today's ai step, verify check and lessons. */
   replay(flowId: string, opts?: ReplayOptions): Promise<ReplayReport> {
     return replayFlow(this, flowId, opts);
+  }
+
+  /** Plain AI vs. code-assisted AI on saved cases, graded by the same `verify`. */
+  compare(flowId: string, opts?: CompareOptions): Promise<CompareReport> {
+    return compareFlow(this, flowId, opts);
   }
 
   /** Replay by scope: `flow:<id>`, `role:<name>`, or `global` (a small golden sample of every flow). */

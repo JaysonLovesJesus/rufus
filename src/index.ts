@@ -4,6 +4,8 @@ export { AiVerificationError } from './engine/ai';
 export { FakeProvider, OpenAiCompatibleProvider, CommandProvider, createProvider } from './engine/providers';
 export { FileStore } from './store';
 export { CaseStore, captureCase, formatExamples, type ReplayCase } from './learning/cases';
+export { compareFlow, formatCompare, type CompareOptions, type CompareReport, type CompareArm, type CompareCaseResult } from './learning/compare';
+export { ChiefOfStaff, type ChiefCommand, type ChiefOfStaffOptions, type ChiefReply } from './chief/chief';
 export { replayFlow, replayScope, goldenSample, type ReplayOptions, type ReplayReport, type ReplayCaseResult, type ScopedReplayOptions, type ScopedReplayReport } from './learning/replay';
 export { proposeLesson, type ProposeInput, type ProposeOptions, type ProposeResult } from './learning/propose';
 export { suggestLayer, type LessonLayer, type LayerSuggestion } from './learning/layers';

@@ -6,9 +6,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createBeeperChannel } from './channels/beeper';
 import { CardBridge, type LiveChannel, type TickReport } from './channels/bridge';
 import { formatCardAsText, parseTextReply } from './channels/text';
+import { ChiefOfStaff } from './chief/chief';
 import { Engine } from './engine/engine';
 import { isFlow } from './engine/flow';
 import { createProvider } from './engine/providers';
+import { formatCompare } from './learning/compare';
 import { suggestLayer } from './learning/layers';
 import type { ScopedReplayReport } from './learning/replay';
 import { Scheduler, type TickResult } from './scheduler/scheduler';
@@ -39,6 +41,9 @@ Usage: rufus [--dir <workspace>] <command>
   replay <flowId> [--limit N]  re-run saved human-reviewed cases against today's flow and verify checks
   replay --scope <flow:id|role:name|global> [--sample N]
                                replay a scope; global replays a small golden sample of every flow
+  compare <flowId> [--limit N] plain AI vs. code-assisted AI on your saved cases, same verify
+  chat <message...>            talk to your chief of staff: status, flows, lessons, run <flow> [json],
+                               learn <scope>: <rule>, or ask anything in your own words
 `;
 
 export interface Io {
@@ -330,6 +335,21 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         if (r.status !== 'passed') io.out(`  ${r.status.toUpperCase()} ${r.caseId} (${r.stepName}): ${r.reason}`);
       }
       if (report.failed) process.exitCode = 1;
+      return;
+    }
+
+    case 'compare': {
+      const [flowId] = rest;
+      if (!flowId) throw new Error('Usage: rufus compare <flowId> [--limit N]');
+      const report = await engine.compare(flowId, { limit: positive('--limit') });
+      for (const line of formatCompare(report)) io.out(line);
+      if (report.errored) process.exitCode = 1;
+      return;
+    }
+
+    case 'chat': {
+      if (!rest.length) throw new Error('Usage: rufus chat <message...>');
+      io.out(await new ChiefOfStaff({ engine }).handleMessage(rest.join(' ')));
       return;
     }
 

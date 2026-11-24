@@ -185,7 +185,7 @@ describe('CardBridge replies', () => {
     expect(await engine.pending()).toHaveLength(1);
   });
 
-  it('says so when a reply cannot be read or nothing is open', async () => {
+  it('says so when a reply cannot be read, and hands non-answers to the chief once nothing is open', async () => {
     const { engine, channel, bridge } = await setup();
     const r = await engine.start('strict');
     if (r.status !== 'waiting_human') throw new Error('expected pause');
@@ -201,7 +201,9 @@ describe('CardBridge replies', () => {
     await b.tick();
     channel.human('anything');
     await b.tick();
-    expect(channel.sent.at(-1)).toBe('Nothing is waiting on you right now.');
+    // No card is open any more, so this goes to the chief; with no AI configured it points at the quick commands.
+    expect(channel.sent.at(-1)).toMatch(/^I can't think that one through right now/);
+    expect(channel.sent.at(-1)).toContain('status, flows, lessons');
   });
 
   it("never answers itself when the channel echoes the bot's own texts back", async () => {

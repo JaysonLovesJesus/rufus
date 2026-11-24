@@ -33,6 +33,8 @@ export interface ReplayCaseResult {
   /** Exact `verify()` failure reason (or the provider/skip reason). */
   reason?: string;
   attempts?: number;
+  /** The provider threw (offline, no key, rate limit): not a verdict on the output. `reason` has the error. */
+  providerError?: boolean;
   /** Did the draft saved in the case pass today's `verify`? */
   before?: 'passed' | 'failed';
   /** improved: failed before, passes now. regressed: passed before, fails now. */
@@ -90,7 +92,14 @@ export function goldenSample(cases: ReplayCase[], n: number): ReplayCase[] {
     .map(({ c }) => c);
 }
 
-async function replayCase(engine: Engine, flow: Flow, c: ReplayCase, extra: Lesson[]): Promise<ReplayCaseResult> {
+/**
+ * `assisted` (default): the flow's real ai step, with scoped lessons, recent examples, `context` and retries.
+ * `plain`: the same step with only its raw prompt + the case's raw input, no `context`, lessons or examples, and a
+ * single shot (`maxRetries: 0`). The `verify`/`parse` are identical, which is what makes `rufus compare` fair.
+ */
+export type ReplayMode = 'assisted' | 'plain';
+
+export async function replayCase(engine: Engine, flow: Flow, c: ReplayCase, extra: Lesson[], mode: ReplayMode = 'assisted'): Promise<ReplayCaseResult> {
   const base = { caseId: c.id, stepName: c.stepName };
   const skip = (reason: string): ReplayCaseResult => ({ ...base, status: 'skipped', reason });
 
@@ -113,13 +122,12 @@ async function replayCase(engine: Engine, flow: Flow, c: ReplayCase, extra: Less
       },
     },
   };
-  const memory = await recallMemory(deps, {
-    flowId: flow.meta.id,
-    role: flow.meta.role,
-    stepName: c.stepName,
-    excludeCaseId: c.id,
-  });
-  const ctx = new ReplayContext(engine, flow, c, original, buildSystemPrompt(flow.meta.role, memory.lessons, memory.examples));
+  const memory =
+    mode === 'plain'
+      ? { lessons: [], examples: [] }
+      : await recallMemory(deps, { flowId: flow.meta.id, role: flow.meta.role, stepName: c.stepName, excludeCaseId: c.id });
+  const system = buildSystemPrompt(mode === 'plain' ? undefined : flow.meta.role, memory.lessons, memory.examples);
+  const ctx = new ReplayContext(engine, flow, c, original, system, mode);
 
   let flowError: string | undefined;
   try {
@@ -130,7 +138,7 @@ async function replayCase(engine: Engine, flow: Flow, c: ReplayCase, extra: Less
 
   const o = ctx.outcome;
   if (!o) return skip(flowError ?? `The flow no longer reaches step "${c.stepKey}".`);
-  if (o.kind === 'error') return { ...base, status: 'failed', reason: `AI provider error: ${o.message}`, before: o.before };
+  if (o.kind === 'error') return { ...base, status: 'failed', reason: `AI provider error: ${o.message}`, providerError: true, before: o.before };
 
   const passed = o.kind === 'passed';
   return {
@@ -235,6 +243,7 @@ class ReplayContext implements FlowContext<any> {
     private readonly c: ReplayCase,
     private readonly original: RunRecord,
     private readonly system: string,
+    private readonly mode: ReplayMode = 'assisted',
   ) {
     this.runId = `replay_${c.id}`;
     this.input = c.input;
@@ -274,7 +283,7 @@ class ReplayContext implements FlowContext<any> {
         provider: this.engine.provider,
         system: this.system,
         step: name,
-        opts,
+        opts: this.mode === 'plain' ? plainOpts(opts, this.input) : opts,
         meta: { runId: this.runId, flowId: this.flow.meta.id },
       });
       this.outcome = { kind: 'passed', value, attempts, before };
@@ -286,6 +295,12 @@ class ReplayContext implements FlowContext<any> {
     }
     throw new StopReplay();
   }
+}
+
+/** The bare question: raw prompt + raw input. Nothing code assembled, no retries; same verify and parse. */
+function plainOpts<T>(opts: AiStepOptions<T>, input: unknown): AiStepOptions<T> {
+  const raw = input === undefined || input === null ? '' : `\n\nInput:\n\`\`\`json\n${JSON.stringify(input, null, 2)}\n\`\`\``;
+  return { ...opts, prompt: `${opts.prompt}${raw}`, context: undefined, maxRetries: 0, includeExamples: false };
 }
 
 async function check(opts: AiStepOptions<any>, value: unknown): Promise<VerifyResult> {
