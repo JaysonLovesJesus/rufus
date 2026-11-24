@@ -110,6 +110,45 @@ const bridge = new CardBridge({ engine, channel });
 await bridge.tick();          // or: bridge.run({ intervalMs: 5000 })
 ```
 
+## Heartbeat: code decides, AI only when it matters
+
+Give a flow a trigger. Most ticks end in plain code at $0.00; the AI is only called when a `when` gate says something changed or crossed a threshold.
+
+```ts
+import { defineFlow, at, every, onEvent } from './src';
+
+defineFlow(
+  {
+    id: 'inbox-watch', name: 'Inbox watch', description: 'Summarize new mail',
+    trigger: every('30m', {                      // or at('08:00'), or onEvent('mail.arrived')
+      when: async (ctx) => {                     // pure code, free. false = no run, no AI call
+        const n = await countUnread();
+        const changed = n !== ctx.state.unread;  // ctx.state is saved in scheduler.json
+        ctx.state.unread = n;
+        return changed && n > 0;
+      },
+      // urgent: true,                           // run even during quiet hours
+      // input: { ... }                          // run input (events default to their payload)
+      // allowOverlap: true,                     // default: skip while the last run still waits on a human
+    }),
+  },
+  async (ctx) => { /* ... ctx.ai(...) ... */ },
+);
+```
+
+- `tick(now?)` is one deterministic pass (`rufus tick`, ideal for cron/launchd). `startLoop({ intervalMs })` keeps ticking (`rufus watch [--interval 30s]`). `emit(name, payload)` fires `onEvent` flows (`rufus emit <event> [json]`).
+- `every` fires on the first tick, then once per interval. `at` fires once a day at a local `HH:MM`; a late tick still fires it once. The `when` gate is checked once per due slot, not on every tick.
+- `scheduler.json` stores `lastRunAt` per flow (written *before* the run starts), so a restart never double-fires.
+- Quiet hours live in `config.json`: `{ "quietHours": { "start": "22:00", "end": "07:00" } }` (wraps midnight). A due `at`/`every` trigger inside the window is held until it ends; `urgent: true` bypasses it. An event during quiet hours is dropped, not queued.
+
+## Replay: iterate in seconds, not days
+
+When `engine.answer()` resolves a card that follows an AI draft, Rufus saves a case in `cases/<flowId>.json`: `{ id, flowId, runId, at, input, stepKey, stepName, aiDraft, humanChoice, humanText, edited }`. Two things use it:
+
+1. **Examples in the prompt.** Every `ctx.ai` call gets, in its system prompt, the flow's scoped Lessons plus the last 3 human reviews of that same step (draft, and whether the human chose, rewrote or discarded). Each is truncated, and the block is plain text you can read in the request. Set `includeExamples: 5` or `false` per step.
+2. **Replay.** `rufus replay <flowId> [--limit N]` (or `engine.replay(flowId)`) re-runs each case against today's ai step: current prompt, `verify`/`parse`, lessons and examples (the case under test is left out of its own examples). It reports passed/failed/skipped, the exact `verify` reason for each failure, and, comparing with the draft saved in the case, how many `improved` (failed today's `verify` then, passes now) or `regressed` (the reverse). Exit code is 1 if any case fails.
+
+Replay never re-runs `ctx.code` steps (they may send things); it reuses the results saved in the original run, and stops at the reviewed ai step. It does call your provider once or more per case. The pass/fail signal is your `verify`, so a rule that is not in `verify` is not measured.
 ## Quickstart
 
 Requires Node 20+ and pnpm.
@@ -122,7 +161,7 @@ pnpm rufus answer <cardId> 1    # resume and finish
 pnpm rufus lessons
 ```
 
-Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `demo`.
+Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `demo`, `tick`, `watch`, `emit`, `replay`.
 
 ### Your own flows and your own data
 
@@ -132,6 +171,8 @@ Rufus keeps **all state outside the repo**, in a workspace directory: `--dir <pa
 <workspace>/
   config.json     provider settings
   lessons.json    saved lessons
+  scheduler.json  lastRunAt per flow (created by the first tick)
+  cases/          saved human reviews, one file per flow (replay + prompt examples)
   runs/           one readable JSON file per run
   flows/          your *.flow.ts files, loaded by the CLI
 ```
@@ -168,7 +209,8 @@ Set one in `config.json`:
 ```
 src/engine/     defineFlow, Engine, step runner, AI verify loop, providers
 src/store/      atomic JSON file store (no native deps)
-src/learning/   lessons: add, forScope, candidatesForCode, markHardened
+src/learning/   lessons; cases (auto-captured reviews, prompt examples); replay
+src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop
 src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Beeper adapter
 src/cli.ts      the `rufus` command
 examples/       a generic triage-and-draft flow

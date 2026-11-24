@@ -1,4 +1,5 @@
 import { newId, type FileStore } from '../store';
+import { recallMemory, type CaseStore } from '../learning/cases';
 import type { LessonStore } from '../learning/lessons';
 import { buildSystemPrompt, runAiStep } from './ai';
 import type {
@@ -43,6 +44,7 @@ export function normalizeOptions(options: HumanStepSpec['options']): HumanOption
 export interface RunnerDeps {
   store: FileStore;
   lessons: LessonStore;
+  cases: CaseStore;
   provider: AiProvider;
 }
 
@@ -93,10 +95,15 @@ export class StepRunner<I = unknown> implements FlowContext<I> {
     if (cached?.done) return cached.result;
 
     const { meta } = this.flow;
-    const lessons = await this.deps.lessons.forScope({ flowId: meta.id, role: meta.role });
+    const { lessons, examples } = await recallMemory(this.deps, {
+      flowId: meta.id,
+      role: meta.role,
+      stepName: name,
+      includeExamples: opts.includeExamples,
+    });
     const { value, attempts } = await runAiStep({
       provider: this.deps.provider,
-      system: buildSystemPrompt(meta.role, lessons),
+      system: buildSystemPrompt(meta.role, lessons, examples),
       step: name,
       opts,
       meta: { runId: this.run.id, flowId: meta.id },

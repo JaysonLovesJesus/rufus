@@ -1,5 +1,7 @@
 import { FileStore } from '../store';
+import { CaseStore, captureCase } from '../learning/cases';
 import { LessonStore, scopes } from '../learning/lessons';
+import { replayFlow, type ReplayOptions, type ReplayReport } from '../learning/replay';
 import type { ChannelAdapter } from '../channels/text';
 import { StepRunner } from './context';
 import type {
@@ -31,14 +33,16 @@ const noProvider: AiProvider = {
 export class Engine {
   readonly store: FileStore;
   readonly lessons: LessonStore;
+  readonly cases: CaseStore;
+  readonly provider: AiProvider;
   private readonly flows = new Map<string, Flow>();
-  private readonly provider: AiProvider;
   private readonly channel?: ChannelAdapter;
   private ready?: Promise<void>;
 
   constructor(opts: EngineOptions) {
     this.store = typeof opts.store === 'string' ? new FileStore(opts.store) : opts.store;
     this.lessons = new LessonStore(this.store);
+    this.cases = new CaseStore(this.store);
     this.provider = opts.provider ?? noProvider;
     this.channel = opts.channel;
     this.register(...(opts.flows ?? []));
@@ -51,6 +55,15 @@ export class Engine {
 
   listFlows(): Flow[] {
     return [...this.flows.values()];
+  }
+
+  getFlow(id: string): Flow {
+    return this.flow(id);
+  }
+
+  /** Re-run saved human-reviewed cases against today's ai step, verify check and lessons. */
+  replay(flowId: string, opts?: ReplayOptions): Promise<ReplayReport> {
+    return replayFlow(this, flowId, opts);
   }
 
   private init(): Promise<void> {
@@ -121,6 +134,17 @@ export class Engine {
     run.steps[key] = step;
     await this.store.saveRun(run);
 
+    // Every human review of an AI draft becomes a replay case and a future prompt example.
+    const saved = captureCase(run, card, answer);
+    if (saved) {
+      try {
+        await this.cases.add(saved);
+      } catch (err) {
+        // The answer is already saved; losing a learning case must not block the flow.
+        console.warn(`[rufus] could not save replay case: ${(err as Error).message}`);
+      }
+    }
+
     if (reply.lesson) {
       const l = typeof reply.lesson === 'string' ? { rule: reply.lesson } : reply.lesson;
       await this.lessons.add({
@@ -134,7 +158,7 @@ export class Engine {
 
   private async execute(run: RunRecord, flow: Flow): Promise<RunResult> {
     const runner = new StepRunner(
-      { store: this.store, lessons: this.lessons, provider: this.provider },
+      { store: this.store, lessons: this.lessons, cases: this.cases, provider: this.provider },
       run,
       flow,
     );

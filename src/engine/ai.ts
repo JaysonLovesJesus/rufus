@@ -1,3 +1,4 @@
+import { formatExamples, type ReplayCase } from '../learning/cases';
 import type { Lesson } from '../learning/lessons';
 import type { AiMessage, AiProvider, AiStepOptions } from '../types';
 
@@ -13,7 +14,7 @@ export class AiVerificationError extends Error {
   }
 }
 
-export function buildSystemPrompt(role: string | undefined, lessons: Lesson[]): string {
+export function buildSystemPrompt(role: string | undefined, lessons: Lesson[], examples: ReplayCase[] = []): string {
   const parts = ['You are a careful assistant inside a workflow engine. Follow the instructions exactly.'];
   if (role) parts.push(`Your role: ${role}.`);
   if (lessons.length) {
@@ -22,6 +23,8 @@ export function buildSystemPrompt(role: string | undefined, lessons: Lesson[]): 
       ...lessons.slice(0, 20).map((l) => `- ${l.rule}`),
     );
   }
+  const block = formatExamples(examples);
+  if (block) parts.push(block);
   return parts.join('\n');
 }
 

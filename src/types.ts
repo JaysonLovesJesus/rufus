@@ -1,5 +1,7 @@
 /** Shared types for flows, runs, human cards and AI providers. */
 
+import type { QuietHours, Trigger } from './scheduler/triggers';
+
 // ---------- Human ----------
 
 export interface HumanOption {
@@ -86,6 +88,11 @@ export interface AiStepOptions<T = string> {
   model?: string;
   /** Turn raw model text into `T`. A throw counts as a failed verification. */
   parse?: (raw: string) => T;
+  /**
+   * How many recent human-reviewed examples of this step to show the model. Default 3.
+   * `false` (or 0) turns them off.
+   */
+  includeExamples?: number | false;
 }
 
 // ---------- Flows ----------
@@ -96,8 +103,8 @@ export interface FlowMeta {
   description: string;
   /** Lessons scoped to this role are injected into every `ai` step. */
   role?: string;
-  /** Informational: how this flow is meant to start. */
-  trigger?: { type: 'manual' | 'cron' | 'event'; value?: string };
+  /** How this flow starts. See `at()`, `every()` and `onEvent()` in src/scheduler. Default: manual. */
+  trigger?: Trigger;
 }
 
 export interface FlowContext<I = unknown> {
@@ -170,4 +177,6 @@ export interface RufusConfig {
   version: 1;
   provider?: ProviderConfig;
   beeper?: BeeperConfig;
+  /** The scheduler stays silent in this window unless a trigger is `urgent`. */
+  quietHours?: QuietHours;
 }
