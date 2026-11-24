@@ -1,3 +1,4 @@
+import { validateTrigger } from '../scheduler/triggers';
 import type { Flow, FlowContext, FlowMeta } from '../types';
 
 /**
@@ -11,6 +12,7 @@ export function defineFlow<I = unknown, O = unknown>(
   if (!/^[a-z0-9][a-z0-9._-]*$/i.test(meta.id)) {
     throw new Error(`Invalid flow id "${meta.id}": use letters, numbers, ".", "_" or "-".`);
   }
+  if (meta.trigger) validateTrigger(meta.trigger);
   return Object.freeze({ meta: Object.freeze({ ...meta }), run });
 }
 

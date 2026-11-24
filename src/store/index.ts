@@ -7,7 +7,7 @@ export const newId = (prefix: string): string => `${prefix}_${randomBytes(4).toS
 
 /**
  * Plain, readable JSON files inside a workspace directory:
- *   runs/<runId>.json   lessons.json   config.json
+ *   runs/<runId>.json   lessons.json   config.json   scheduler.json   cases/<flowId>.json
  * Writes are atomic (temp file + rename).
  */
 export class FileStore {
@@ -24,6 +24,15 @@ export class FileStore {
   }
   get flowsDir(): string {
     return path.join(this.dir, 'flows');
+  }
+  get schedulerFile(): string {
+    return path.join(this.dir, 'scheduler.json');
+  }
+  get casesDir(): string {
+    return path.join(this.dir, 'cases');
+  }
+  casesFile(flowId: string): string {
+    return path.join(this.casesDir, `${flowId}.json`);
   }
 
   /** Idempotent: creates the workspace layout if missing. */
