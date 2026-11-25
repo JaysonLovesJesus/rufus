@@ -279,14 +279,15 @@ describe('analyzeHistory: deterministic, offline, exact', () => {
     expect(a.voice.signOffs.rate.count).toBe(0);
   });
 
-  it('derives candidate rules straight from the numbers, each with its exact support', () => {
-    const byId = Object.fromEntries(a.rules.map((r) => [r.id, r]));
-    expect(byId['short-replies']).toMatchObject({ layer: 'principle', support: { count: 19, of: 20 } });
-    expect(byId['word-cap']).toMatchObject({ layer: 'code', rule: 'Keep replies to at most 5 words.', support: { count: 19, of: 20 } });
+  it('derives invariants straight from the numbers, each with its exact support, and only at >= 98%', () => {
+    const byId = Object.fromEntries(a.invariants.map((r) => [r.id, r]));
+    expect(byId['word-cap']).toMatchObject({ layer: 'code', rule: 'Keep replies to at most 30 words.', support: { count: 20, of: 20 } });
     expect(byId['no-em-dash']).toMatchObject({ layer: 'code', support: { count: 20, of: 20 } });
-    expect(byId['no-trailing-period']).toMatchObject({ layer: 'code', support: { count: 19, of: 20 } });
     expect(byId['lowercase-start']).toMatchObject({ layer: 'code', support: { count: 20, of: 20 } });
     expect(byId['no-greeting'].layer).toBe('principle');
+    // 19 of 20 (95%) is a norm with an exception, not a wall.
+    expect(byId['short-replies']).toBeUndefined();
+    expect(byId['no-trailing-period']).toBeUndefined();
     expect(byId['no-em-dash']!.evidence).toBe('20 of 20 replies (100%): no em dash');
   });
 
@@ -294,13 +295,14 @@ describe('analyzeHistory: deterministic, offline, exact', () => {
     const mixed = voicePairs().map((p, i) => (i % 2 ? { ...p, reply: `Okay — sure!` } : p));
     const m = analyzeHistory(mixed);
     expect(m.voice.emDashes).toMatchObject({ total: 10, repliesWith: { count: 10, pct: 50 } });
-    expect(m.rules.map((r) => r.id)).not.toContain('no-em-dash');
-    expect(m.rules.map((r) => r.id)).not.toContain('no-exclamation');
+    expect(m.invariants.map((r) => r.id)).not.toContain('no-em-dash');
+    expect(m.invariants.map((r) => r.id)).not.toContain('no-exclamation');
 
     const few = analyzeHistory(voicePairs().slice(0, 5));
-    expect(few.rules).toEqual([]);
+    expect(few.invariants).toEqual([]);
+    expect(few.conditionalRules).toEqual([]);
     expect(few.notes[0]).toMatch(/at least 10 are needed/);
-    expect(analyzeHistory(voicePairs().slice(0, 5), { minPairs: 3 }).rules.length).toBeGreaterThan(0);
+    expect(analyzeHistory(voicePairs().slice(0, 5), { minPairs: 3 }).invariants.length).toBeGreaterThan(0);
   });
 
   it('detects greetings, sign-offs, em dashes and lowercase style', () => {
@@ -342,7 +344,7 @@ describe('analyzeHistory: deterministic, offline, exact', () => {
 
   it('handles an empty history', () => {
     const e = analyzeHistory([]);
-    expect(e).toMatchObject({ total: 0, rules: [], clusters: [], byChannel: [] });
+    expect(e).toMatchObject({ total: 0, invariants: [], conditionalRules: [], clusters: [], byChannel: [] });
   });
 });
 
@@ -500,7 +502,10 @@ describe('rufus seed / mine (CLI)', () => {
     expect(text).toContain('16 real reply pair(s)');
     expect(text).toContain('How you write:');
     expect(text).toContain('Scheduling: 6 (37.5%)');
-    expect(text).toContain('[code] Do not use em dashes.  (16/16)');
+    expect(text).toContain('Invariants (safe as hard code/verify checks, ≥98%):');
+    expect(text).toContain('[invariant] Do not use em dashes.  (16/16 = 100%)');
+    expect(text).toContain('Conditional logic (real exceptions — use branching logic, not walls):');
+    expect(text).toContain('Out-of-sample holdout check');
     expect(text).toContain('Add --ai for workflow blueprints');
     expect(text).toContain(`Saved ${path.join(dir, 'history', 'mine-report.json')}`);
     const saved = JSON.parse(await readFile(path.join(dir, 'history', 'mine-report.json'), 'utf8'));
@@ -550,12 +555,17 @@ describe('rufus seed / mine (CLI)', () => {
   it('config.mine buckets and thresholds are honoured', async () => {
     const dir = await tempDir();
     await new FileStore(dir).writeText(path.join(dir, 'history', 'pairs.jsonl'), voicePairs().map((p) => JSON.stringify(p)).join('\n') + '\n');
-    await writeFile(path.join(dir, 'config.json'), JSON.stringify({ version: 1, mine: { buckets: [{ id: 'pizza', label: 'Pizza talk', pattern: 'PIZZA' }], minShare: 1 } }));
+    await writeFile(path.join(dir, 'config.json'), JSON.stringify({ version: 1, mine: { buckets: [{ id: 'pizza', label: 'Pizza talk', pattern: 'PIZZA' }], invariantMinShare: 0.9 } }));
     const c = capture();
     await main(['--dir', dir, 'mine'], c.io);
     const text = c.lines.join('\n');
     expect(text).toContain('Pizza talk: 1 (5%)');
-    expect(text).not.toContain('Keep replies to at most'); // 19/20 < 100%
-    expect(text).toContain('[code] Do not use em dashes.');
+    expect(text).toContain('[invariant] Do not end a reply with a period.'); // 19/20 = 95% >= the configured 90%
+    expect(text).toContain('[invariant] Do not use em dashes.');
+    const strict = capture();
+    await writeFile(path.join(dir, 'config.json'), JSON.stringify({ version: 1, mine: { invariantMinShare: 0.99 } }));
+    await main(['--dir', dir, 'mine'], strict.io);
+    expect(strict.lines.join('\n')).not.toContain('Do not end a reply with a period.'); // 95% < 99%
+    expect(strict.lines.join('\n')).toContain('[invariant] Do not use em dashes.');
   });
 });

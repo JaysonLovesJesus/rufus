@@ -201,8 +201,14 @@ export interface MineConfig {
   buckets?: Array<{ id: string; label?: string; pattern: string }>;
   /** Fewest pairs before rules are proposed (default 10). */
   minPairs?: number;
-  /** Share of replies a rule must hold for, 0-1 (default 0.9). */
+  /** @deprecated Use `invariantMinShare`. */
   minShare?: number;
+  /** Share of replies a behavior must hold for to be a hard invariant (default 0.98). Below that it has real exceptions and is reported as conditional logic instead of a wall. */
+  invariantMinShare?: number;
+  /** Fewest exception cases before contrast (the `if / else` search) runs (default 5). */
+  minExceptions?: number;
+  /** A trigger's exception rate must be at least this many times the rest (default 2). */
+  minLift?: number;
   /** Fewest replies a situation (channel, closeness, DM/group, ...) needs before it can become a generalized rule (default 30). */
   minSlicePairs?: number;
   /** ... and fewest different contacts in it (default 5). */

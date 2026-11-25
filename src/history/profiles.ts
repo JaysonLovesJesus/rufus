@@ -50,6 +50,57 @@ export function rhythmOf(p: Pick<HistoryPair, 'gapSincePreviousMs' | 'priorMessa
   return Array.isArray(p.priorMessages) && p.priorMessages.length === 0 ? 'cold' : undefined;
 }
 
+// ---------- Deterministic features of an incoming message ----------
+
+/** Incoming-message features that can explain when your behavior changes. `undefined` = unknown (not enough data on the pair). */
+export interface IncomingFeatures {
+  /** The incoming message opens with a greeting ("hi", "hey", "good morning", ...). */
+  theyGreeted: boolean;
+  /** At least 24 h since the previous turn (or the incoming message opened the thread). */
+  coldRestart?: boolean;
+  /** Under 10 min since the previous turn. */
+  liveChat?: boolean;
+  /** The sender is a `new` or `occasional` contact. */
+  newOrOccasional?: boolean;
+  /** The incoming message is 30 words or more. */
+  longIncoming: boolean;
+  /** Two or more question marks, or two or more list items. */
+  multiQuestion: boolean;
+  isGroup?: boolean;
+  isDm?: boolean;
+}
+
+export const LONG_INCOMING_WORDS = 30;
+const LIST_ITEM = /^\s*(?:[-*\u2022]|\d+[.)])\s+\S/gm;
+
+/** How many separate asks an incoming message makes: its question marks, or its list items when there are more of those. */
+export function questionCount(text: string): { count: number; kind: 'questions' | 'items' } {
+  const marks = text.match(/\?/g)?.length ?? 0;
+  const items = text.match(LIST_ITEM)?.length ?? 0;
+  return items > marks ? { count: items, kind: 'items' } : { count: marks, kind: 'questions' };
+}
+
+export interface FeatureInput {
+  incoming: string;
+  isGroup?: boolean;
+  gapSincePreviousMs?: number;
+  priorMessages?: unknown[];
+}
+
+/** Pure, deterministic. `tier` is the sender's closeness tier (leave `undefined` when unknown). */
+export function incomingFeatures(x: FeatureInput, tier?: ClosenessTier): IncomingFeatures {
+  const opener = Array.isArray(x.priorMessages) && x.priorMessages.length === 0;
+  const gap = x.gapSincePreviousMs;
+  return {
+    theyGreeted: GREETING.test(x.incoming.trim()),
+    ...(gap !== undefined ? { coldRestart: gap >= COLD_GAP_MS, liveChat: gap < LIVE_GAP_MS } : opener ? { coldRestart: true, liveChat: false } : {}),
+    ...(tier ? { newOrOccasional: tier === 'new' || tier === 'occasional' } : {}),
+    longIncoming: words(x.incoming) >= LONG_INCOMING_WORDS,
+    multiQuestion: questionCount(x.incoming).count >= 2,
+    ...(x.isGroup !== undefined ? { isGroup: x.isGroup, isDm: !x.isGroup } : {}),
+  };
+}
+
 // ---------- Style slices ----------
 
 /** Exact style statistics over a group of your replies. Rates are 0-1 (three decimals). */
@@ -346,8 +397,46 @@ export interface SituationalContext {
   styleBasis: StyleBasis;
   /** Past exchanges that look most like this one. */
   examples: SituationExample[];
-  /** One compact line for a prompt. */
+  /** Deterministic facts about the incoming message that drive the hints below. */
+  features: IncomingFeatures;
+  /** Whether to open with a greeting, decided in code from the incoming message and the rhythm. */
+  greetHint: GreetHint;
+  greetReason: string;
+  /** How long the reply should be, decided in code from the incoming message and your own style. */
+  lengthBand: LengthBand;
+  lengthReason: string;
+  /** Rough target for `brief`; the 90th percentile for `detailed`. Only when there is history to base it on. */
+  approxWords?: number;
+  /** One compact line for a prompt: who, the style to imitate, and the greeting / length cues. */
   voiceHint: string;
+}
+
+export type GreetHint = 'greet' | 'optional' | 'skip';
+export type LengthBand = 'brief' | 'medium' | 'detailed';
+
+/** Greet only when it is a cold restart and they opened with a greeting; skip in a live exchange they did not open with one. */
+export function greetDecision(f: IncomingFeatures, style?: Pick<StyleSlice, 'greetingRate'>): { hint: GreetHint; reason: string } {
+  if (f.coldRestart && f.theyGreeted) return { hint: 'greet', reason: 'cold restart (>24h) + they greeted → brief greeting fits' };
+  if (f.liveChat && !f.theyGreeted) return { hint: 'skip', reason: "live back-and-forth, they didn't greet → skip" };
+  if (f.theyGreeted) return { hint: 'optional', reason: f.liveChat ? 'live chat, but they greeted → a quick mirror is fine, not needed' : 'they greeted, not a cold restart → mirror only if it feels natural' };
+  if (f.coldRestart) return { hint: 'optional', reason: "cold restart (>24h), but they didn't greet → greeting optional" };
+  if (style && style.greetingRate >= 0.5) return { hint: 'optional', reason: "they didn't greet, but you usually greet this kind of contact → optional" };
+  return { hint: 'skip', reason: "they didn't greet → skip" };
+}
+
+/** Detailed for a multi-question or long incoming message, brief for a short ping, medium otherwise. */
+export function lengthDecision(input: { incoming: string }, f: IncomingFeatures, style?: Pick<StyleSlice, 'medianWords' | 'p90Words'>): { band: LengthBand; reason: string; approxWords?: number } {
+  const inWords = words(input.incoming);
+  const asks = questionCount(input.incoming);
+  const p90 = style && style.p90Words > style.medianWords ? Math.round(style.p90Words) : undefined;
+  if (f.multiQuestion) return { band: 'detailed', reason: `incoming has ${asks.count} ${asks.kind} (${inWords} words) → detailed`, ...(p90 ? { approxWords: p90 } : {}) };
+  if (f.longIncoming) return { band: 'detailed', reason: `long incoming (${inWords} words) → detailed`, ...(p90 ? { approxWords: p90 } : {}) };
+  const median = style ? Math.max(1, Math.round(style.medianWords)) : undefined;
+  if (inWords <= 12 && !f.coldRestart) {
+    if (median !== undefined && median > 20) return { band: 'medium', reason: `short message, but you usually write ~${median} words to them → medium` };
+    return { band: 'brief', reason: `short ${f.liveChat ? 'live ping' : 'message'} (${inWords} words) → brief${median !== undefined ? ` (~${median} words)` : ''}`, ...(median !== undefined ? { approxWords: median } : {}) };
+  }
+  return { band: 'medium', reason: `ordinary ${f.coldRestart ? 'cold-restart ' : ''}message (${inWords} words) → medium` };
 }
 
 export interface SituationOptions extends ProfileOptions {
@@ -465,6 +554,9 @@ export function buildSituationalContext(input: SituationInput, pairs: HistoryPai
         return '';
     }
   };
+  const features = incomingFeatures(input, tier);
+  const greet = greetDecision(features, style);
+  const length = lengthDecision(input, features, style);
   let voiceHint: string;
   if (!style) voiceHint = `${who}${rhythmText ? `, ${rhythmText}` : ''}: no history to learn from yet.`;
   else {
@@ -472,6 +564,7 @@ export function buildSituationalContext(input: SituationInput, pairs: HistoryPai
     const thin = style.count < minSlice ? ' (thin evidence)' : '';
     voiceHint = `${who}${rhythmText ? `, ${rhythmText}` : ''}: ${describeStyle(style)}${from}${thin}`;
   }
+  voiceHint += `; greeting: ${greet.reason}; length: ${length.reason}`;
 
   return {
     tier,
@@ -483,6 +576,12 @@ export function buildSituationalContext(input: SituationInput, pairs: HistoryPai
     ...(style ? { style } : {}),
     styleBasis,
     examples,
+    features,
+    greetHint: greet.hint,
+    greetReason: greet.reason,
+    lengthBand: length.band,
+    lengthReason: length.reason,
+    ...(length.approxWords !== undefined ? { approxWords: length.approxWords } : {}),
     voiceHint,
   };
 }

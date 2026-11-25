@@ -352,7 +352,7 @@ describe('buildSituationalContext', () => {
     );
     expect(ctx).toMatchObject({ tier: 'inner-circle', known: true, contactPairs: 10, chatKind: 'dm', rhythm: 'live', rhythmLabel: 'live back-and-forth', intent: 'confirmation', styleBasis: 'contact+rhythm' });
     expect(ctx.style).toMatchObject({ count: 10, medianWords: 6, greetingRate: 0, lowercaseRate: 1 });
-    expect(ctx.voiceHint).toBe('Inner-circle WhatsApp DM (10 past exchanges), live chat: median 6 words, casual, lowercase, no greeting/sign-off');
+    expect(ctx.voiceHint).toBe("Inner-circle WhatsApp DM (10 past exchanges), live chat: median 6 words, casual, lowercase, no greeting/sign-off; greeting: live back-and-forth, they didn't greet → skip; length: short live ping (4 words) → brief (~6 words)");
     expect(ctx.examples).toHaveLength(3);
     expect(ctx.examples.every((e) => e.because[0] === 'same sender')).toBe(true);
     expect(ctx.examples.every((e) => e.channel === 'whatsapp' && e.incoming === 'are you coming tonight?')).toBe(true); // same intent ranks first
@@ -363,7 +363,7 @@ describe('buildSituationalContext', () => {
     const fresh = buildSituationalContext({ channel: 'sms', sender: 'Casey Morgan', isGroup: false, incoming: 'any update on the invoice?', gapSincePreviousMs: 4 * DAY }, pairs);
     expect(fresh).toMatchObject({ tier: 'new', known: false, contactPairs: 0, chatKind: 'dm', rhythm: 'cold', intent: 'follow-up', styleBasis: 'channel+chat+intent' });
     expect(fresh.style).toMatchObject({ count: 4, medianWords: 30, greetingRate: 1 });
-    expect(fresh.voiceHint).toBe('New contact on SMS DM (no history with them), cold restart: median 30 words, more formal, usually greets (from 4 similar follow-up SMS DMs)');
+    expect(fresh.voiceHint).toBe("New contact on SMS DM (no history with them), cold restart: median 30 words, more formal, usually greets (from 4 similar follow-up SMS DMs); greeting: cold restart (>24h), but they didn't greet → greeting optional; length: ordinary cold-restart message (5 words) → medium");
     expect(fresh.examples.length).toBeGreaterThanOrEqual(2);
     expect(fresh.examples.length).toBeLessThanOrEqual(4);
     expect(fresh.examples.some((e) => e.because.includes('same sender'))).toBe(false);

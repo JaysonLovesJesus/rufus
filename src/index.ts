@@ -24,6 +24,13 @@ export { pairHash, normalizePair, type HistoryPair, type PriorMessage } from './
 export {
   buildContactProfiles,
   buildSituationalContext,
+  incomingFeatures,
+  greetDecision,
+  lengthDecision,
+  questionCount,
+  type IncomingFeatures,
+  type GreetHint,
+  type LengthBand,
   closenessTier,
   tierBySender,
   styleOf,
@@ -75,3 +82,5 @@ export {
   type WorkflowBlueprint,
   type CandidateLesson,
 } from './history/mine';
+export { evaluateHoldout, splitHoldout, formatHoldout, invariantHolds, type HoldoutEvaluation, type HoldoutResult, type HoldoutOptions, type HoldoutSplit } from './history/eval';
+export { conditionalAnalysis, describeTrigger, DEFAULT_CONTRAST, FEATURE_LABELS, LONG_REPLY_WORDS, type ConditionalRule, type ContrastOptions, type Trigger as ConditionalTrigger, type FeatureId, type BehaviorId } from './history/contrast';

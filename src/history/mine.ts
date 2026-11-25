@@ -4,10 +4,13 @@ import type { LessonLayer } from '../learning/layers';
 import type { AiProvider, MineConfig, RufusConfig } from '../types';
 import { loadPairs } from './seed';
 import type { HistoryPair } from './types';
+import { evaluateHoldout, formatHoldout, type HoldoutOptions, type HoldoutResult } from './eval';
+import { conditionalAnalysis, contrastOptionsFrom, isInvariantShare, type ConditionalRule, type ContrastOptions } from './contrast';
 import { DEFAULT_SLICE_GATE, RHYTHM_LABELS, TIERS, buildContactProfiles, sliceGateIssue, styleOf as styleOfPairs, tierBySender, channelName, chatKindOf, rhythmOf, type ClosenessTier, type ContactProfiles, type SliceGate, type StyleSlice } from './profiles';
 import { DEFAULT_BUCKETS, EMOJI, GREETING, OTHER_BUCKET, SHORT_WORDS, SIGN_OFF, classify, median, percentile, round1, snippet, tally, top, words, type IntentBucket } from './stats';
 
 export { DEFAULT_BUCKETS, OTHER_BUCKET, SHORT_WORDS, classify, type IntentBucket };
+export type { ConditionalRule };
 
 // ---------- Deterministic analysis (no AI, $0.00) ----------
 
@@ -82,7 +85,12 @@ export interface HistoryAnalysis {
   topContacts: Array<{ sender: string; count: number; channels: string[] }>;
   topThreads: Array<{ threadId: string; channel: string; count: number }>;
   voice: VoiceFingerprint;
-  rules: CandidateRule[];
+  /** True invariants (>= `invariantMinShare`, default 98%): safe as hard `verify` checks. Behaviors with real exceptions are NOT here; see `conditionalRules`. */
+  invariants: CandidateRule[];
+  /** The share a behavior needed to be an invariant. */
+  invariantMinShare: number;
+  /** Behaviors with real exceptions (2-45% of replies): the `if / else` found by comparing the exception group with the norm group. Use branching logic, not a wall. */
+  conditionalRules: ConditionalRule[];
   /** Situational rules (layer `context`): only where a situation's style differs meaningfully from your overall style. */
   contextRules: CandidateRule[];
   /** Situations that differ from your overall style but were NOT turned into a rule: too few replies, too few contacts, dominated by one or two people, or only a minority of contacts agree. Handled per contact instead. */
@@ -101,8 +109,14 @@ export interface AnalyzeOptions {
   buckets?: IntentBucket[];
   /** Below this many pairs no rule is proposed (too little evidence). Default 10. */
   minPairs?: number;
-  /** A rule needs at least this share of replies (0-1). Default 0.9. */
+  /** @deprecated No longer a wall threshold: a rule is a hard invariant only at `invariantMinShare`. Kept so old configs load. */
   minShare?: number;
+  /** A behavior is a true invariant (safe as a hard check) only at this share of replies (0-1). Default 0.98. */
+  invariantMinShare?: number;
+  /** Contrast needs at least this many exception cases. Default 5. */
+  minExceptions?: number;
+  /** A trigger's exception rate must be at least this many times the rest. Default 2. */
+  minLift?: number;
   /** Samples kept per cluster. Default 3. */
   samplesPerCluster?: number;
   topN?: number;
@@ -157,21 +171,23 @@ function voiceOf(pairs: HistoryPair[]): VoiceFingerprint {
   };
 }
 
-/** Rules that are exactly true of at least `minShare` of the human's own replies. Pure arithmetic. */
-function rulesFrom(pairs: HistoryPair[], v: VoiceFingerprint, minShare: number): CandidateRule[] {
+/**
+ * True invariants: exactly true of at least `invariantMinShare` (default 98%) of the human's own replies. Pure arithmetic.
+ * Anything below that has real exceptions and is NOT a wall: see `conditionalAnalysis` for the `if / else` instead.
+ */
+function invariantsFrom(pairs: HistoryPair[], v: VoiceFingerprint, share: number): CandidateRule[] {
   const n = v.replies;
   const replies = pairs.map((p) => p.reply.trim());
   const out: CandidateRule[] = [];
   const add = (id: string, layer: LessonLayer, rule: string, count: number, evidence: string): void => {
-    if (count / n >= minShare) out.push({ id, layer, rule, support: { count, of: n }, evidence: `${count} of ${n} replies (${round1((count / n) * 100)}%): ${evidence}` });
+    if (isInvariantShare(count, n, share)) out.push({ id, layer, rule, support: { count, of: n }, evidence: `${count} of ${n} replies (${round1((count / n) * 100)}%): ${evidence}` });
   };
 
   add('short-replies', 'principle', `Keep replies short and direct (the median reply is ${v.words.median} words).`, v.shortReplies.count, `under ${SHORT_WORDS} words`);
-  const cap = Math.ceil(Math.max(v.words.p90, 1) / 5) * 5;
-  if (cap <= 100) {
-    const within = replies.filter((r) => words(r) <= cap).length;
-    add('word-cap', 'code', `Keep replies to at most ${cap} words.`, within, `at most ${cap} words`);
-  }
+  // A cap is a wall, so it sits at the point where `share` of replies fit under it, never at a lower percentile.
+  const counts = replies.map(words).sort((a, b) => a - b);
+  const cap = Math.ceil(Math.max(percentile(counts, share), 1) / 5) * 5;
+  if (cap <= 100) add('word-cap', 'code', `Keep replies to at most ${cap} words.`, counts.filter((w) => w <= cap).length, `at most ${cap} words`);
   add('no-em-dash', 'code', 'Do not use em dashes.', n - v.emDashes.repliesWith.count, 'no em dash');
   add('no-trailing-period', 'code', 'Do not end a reply with a period.', n - v.trailingPeriod.count, 'no trailing period');
   add('no-exclamation', 'code', 'Do not use exclamation marks.', n - v.exclamation.count, 'no exclamation mark');
@@ -330,7 +346,7 @@ export function situationalAnalysis(pairs: HistoryPair[], profiles: ContactProfi
 export function analyzeHistory(pairs: HistoryPair[], opts: AnalyzeOptions = {}): HistoryAnalysis {
   const buckets = opts.buckets ?? DEFAULT_BUCKETS;
   const minPairs = opts.minPairs ?? 10;
-  const minShare = opts.minShare ?? 0.9;
+  const contrast = contrastOptionsFrom({ invariantMinShare: opts.invariantMinShare, minExceptions: opts.minExceptions, minLift: opts.minLift });
   const per = opts.samplesPerCluster ?? 3;
   const topN = opts.topN ?? 10;
   const total = pairs.length;
@@ -357,9 +373,13 @@ export function analyzeHistory(pairs: HistoryPair[], opts: AnalyzeOptions = {}):
   const dated = pairs.map((p) => p.incomingAt ?? p.replyAt).filter((d): d is string => !!d && Number.isFinite(Date.parse(d))).sort();
 
   const voice = voiceOf(pairs);
-  let rules: CandidateRule[] = [];
+  let invariants: CandidateRule[] = [];
+  let conditionalRules: ConditionalRule[] = [];
   if (total < minPairs) notes.push(`Only ${total} pair(s): at least ${minPairs} are needed before proposing rules from your style.`);
-  else rules = rulesFrom(pairs, voice, minShare);
+  else {
+    invariants = invariantsFrom(pairs, voice, contrast.invariantMinShare);
+    conditionalRules = conditionalAnalysis(pairs, tierBySender(pairs), contrast);
+  }
 
   const profiles = buildContactProfiles(pairs, { buckets });
   const { contacts, ...rest } = profiles;
@@ -400,7 +420,9 @@ export function analyzeHistory(pairs: HistoryPair[], opts: AnalyzeOptions = {}):
     topContacts,
     topThreads,
     voice,
-    rules,
+    invariants,
+    invariantMinShare: contrast.invariantMinShare,
+    conditionalRules,
     contextRules,
     suppressedSlices,
     context,
@@ -470,11 +492,16 @@ export function formatAnalysis(a: HistoryAnalysis): string[] {
   }
   lines.push(...formatContext(a.context));
   lines.push('');
-  if (a.rules.length || a.contextRules.length) {
-    lines.push('Candidate rules from your own replies (exact support):');
-    for (const r of [...a.rules, ...a.contextRules]) lines.push(`  [${r.layer}] ${r.rule}  (${r.support.count}/${r.support.of})`);
-  } else {
-    lines.push('No candidate rules: nothing was true of enough replies.');
+  const pctOf = (r: CandidateRule): string => `${r.support.count}/${r.support.of} = ${round1((r.support.count / r.support.of) * 100)}%`;
+  lines.push('', `Invariants (safe as hard code/verify checks, ≥${round1(a.invariantMinShare * 100)}%):`);
+  if (a.invariants.length) for (const r of a.invariants) lines.push(`  [invariant] ${r.rule}  (${pctOf(r)})`);
+  else lines.push('  none: nothing was true of nearly every reply.');
+  lines.push('', 'Conditional logic (real exceptions — use branching logic, not walls):');
+  if (a.conditionalRules.length) for (const r of a.conditionalRules) lines.push(`  [logic] ${r.rule}`);
+  else lines.push('  none: no behavior has enough real exceptions to contrast.');
+  if (a.contextRules.length) {
+    lines.push('', 'Situational context rules (diverse multi-contact slices):');
+    for (const r of a.contextRules) lines.push(`  [${r.layer}] ${r.rule}  (${r.support.count}/${r.support.of})`);
   }
   if (a.suppressedSlices?.length) {
     lines.push('', 'Not generalized (differs from your overall style, but too thin, too concentrated, or only a few contacts agree):');
@@ -611,7 +638,10 @@ export async function synthesizeHistory(
     channels: analysis.byChannel,
     topContactShares: analysis.topContacts.slice(0, 5).map((c, i) => ({ contact: `contact ${i + 1}`, count: c.count })),
     voice: analysis.voice,
-    candidateRules: [...analysis.rules, ...analysis.contextRules].map(({ id, layer, rule, support }) => ({ id, layer, rule, support })),
+    // True invariants (>= 98%): safe as hard checks. Behaviors with real exceptions are NOT walls: they are conditional logic.
+    invariants: analysis.invariants.map(({ id, layer, rule, support }) => ({ id, layer, rule, support })),
+    conditionalRules: analysis.conditionalRules.map(({ id, behavior, layer, rule, exceptions, explained, triggers }) => ({ id, behavior, layer, rule, exceptions, explained, triggers: triggers.map(({ feature, whenTrue, whenFalse, lift }) => ({ feature, whenTrue, whenFalse, lift })) })),
+    contextRules: analysis.contextRules.map(({ id, layer, rule, support }) => ({ id, layer, rule, support })),
     // Differences that were deliberately NOT generalized (confounded by one or two people). Do not turn these into rules.
     notGeneralized: analysis.suppressedSlices,
     // Situational slices, anonymized: tiers are counts of contacts, never names.
@@ -630,7 +660,8 @@ export async function synthesizeHistory(
     `Return JSON: {"blueprints":[{"name","frequency","trigger","code","ai","human"}],"lessons":[{"rule","layer","support"}]}.`,
     `- At most ${MAX_BLUEPRINTS} blueprints, the most frequent first. "frequency" quotes counts from the stats. "trigger" says what starts it. "code" is what exact code does (lookups, parsing, checks, and situational lookups such as the sender's closeness tier, DM vs. group, channel and conversation rhythm). "ai" is what the model does (drafting or judging only). "human" is where the person approves.`,
     `- Reply style depends on the situation, not one global average. "stats.situations" splits the same replies by closeness tier (inner-circle, regular, occasional, new), DM vs. group, channel and conversation rhythm (live < 10 min, same-day, cold > 24 h). Make blueprints and lessons situation-aware where those slices clearly differ, and quote their exact numbers. Do not invent a situation the slices do not show.`,
-    `- At most ${MAX_LESSONS} lessons. Each is one short imperative rule about how to reply. "layer" is "code" (exactly checkable, belongs in a verify function), "context" (the model needs a fact that code should fetch), or "principle" (taste or tone). Prefer the candidate rules in the stats; "support" quotes their counts.`,
+    `- At most ${MAX_LESSONS} lessons. Each is one short imperative rule about how to reply. "layer" is "code" (exactly checkable, belongs in a verify function), "context" (the model needs a fact that code should fetch), or "principle" (taste or tone). Prefer the rules in the stats; "support" quotes their counts.`,
+    `- "stats.invariants" are true for nearly every reply (>= 98%) and may become "code" lessons. "stats.conditionalRules" are behaviors with real exceptions: write each as an if / else lesson (layer "context") that names the trigger and quotes its rates. NEVER turn a conditional rule into a blanket ban or cap ("never greet", "max 35 words"): that breaks its real exceptions. When a conditional rule has no trigger (explained: false), keep it flexible and do not make a lesson of it.`,
   ].join('\n');
 
   const providerName = opts.providerName ?? 'default';
@@ -646,7 +677,7 @@ export async function synthesizeHistory(
 
 // ---------- Orchestration ----------
 
-export interface MineOptions extends AnalyzeOptions {
+export interface MineOptions extends AnalyzeOptions, Pick<HoldoutOptions, 'holdoutFraction'> {
   /** Also ask a provider for blueprints and lessons. */
   ai?: boolean;
   /** Named provider for the AI pass (e.g. `smart`). */
@@ -660,6 +691,8 @@ export interface MineReport {
   generatedAt: string;
   pairsAnalyzed: number;
   analysis: HistoryAnalysis;
+  /** Learned from your older pairs, scored on your newest (never seen while learning). */
+  holdout?: HoldoutResult;
   ai?: Synthesis;
 }
 
@@ -674,6 +707,7 @@ export async function mineHistory(engine: Engine, opts: MineOptions = {}): Promi
   if (opts.limit !== undefined) pairs = pairs.slice(-Math.floor(opts.limit));
   const analysis = analyzeHistory(pairs, opts);
   const report: MineReport = { generatedAt: new Date().toISOString(), pairsAnalyzed: pairs.length, analysis };
+  if (pairs.length) report.holdout = evaluateHoldout(pairs, opts);
   if (opts.ai && pairs.length) {
     // Resolve the provider first so an unknown name fails before any work.
     const provider = engine.providerFor(opts.provider);
@@ -691,6 +725,7 @@ export function proposeCommand(l: Pick<CandidateLesson, 'rule' | 'layer'>, scope
 
 export function formatMine(r: MineReport, opts: { scope?: string } = {}): string[] {
   const lines = formatAnalysis(r.analysis);
+  if (r.holdout) lines.push(...formatHoldout(r.holdout));
   if (!r.ai) return lines;
   const scope = opts.scope ?? 'global';
   lines.push('', `Workflow blueprints (AI, ${r.ai.provider} provider):`);
