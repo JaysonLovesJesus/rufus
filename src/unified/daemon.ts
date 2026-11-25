@@ -23,6 +23,8 @@ import { buildBreakDigest } from './digest';
 import { speakableTitle } from './heartbeat';
 import { nowSummary } from './now';
 import { assignNumbers, loadStartState, saveStartState, takeCheckinRequest, type StartState } from './state';
+import { formatMissionDelivery, listMissions, loadMission, runMission, saveMission, type MissionRecord } from './missions';
+import { MISSION_START_TOOL, missionTools } from '../tools/mission-tools';
 
 /**
  * `rufus start`: ONE daemon for everything.
@@ -72,7 +74,21 @@ export interface UnifiedDaemonOptions {
    * something is actionable. Off unless set (`rufus start` turns it on).
    */
   selfReview?: SelfReviewOptions | false;
+  /**
+   * v22: durable background missions. Queued missions (`mission.start` from chat, or `rufus missions start`) run in the
+   * background with read-only tools only, and the result is sent to you once when done. Default on; `false`: off.
+   */
+  missions?: MissionDaemonOptions | false;
   now?: () => Date;
+}
+
+export interface MissionDaemonOptions {
+  /** Missions running at the same time. Default 1. */
+  concurrency?: number;
+  /** Named provider for missions. Default: the `smart` tier (or the default provider). */
+  provider?: string;
+  /** Per tool call inside a mission. Default 30s. */
+  toolTimeoutMs?: number;
 }
 
 export interface DayPlannerOptions extends PlannerOptions {
@@ -120,6 +136,8 @@ export interface StartTickReport {
   digest?: string;
   /** v18: what the daily self-review did this pass: `noted`, `silent`, or `skipped: <why>`. */
   reviewed?: string;
+  /** v22: missions started in the background, and finished ones announced, this pass. */
+  missions?: { started: string[]; delivered: string[] };
   /** Problems this pass; the next pass retries. */
   errors: string[];
 }
@@ -192,6 +210,9 @@ export class UnifiedDaemon {
   private readonly planner: DayPlannerOptions | false;
   private readonly digestOpts: BreakDigestOptions | false;
   private readonly reviewOpts: SelfReviewOptions | false;
+  private readonly missionOpts: Required<Pick<MissionDaemonOptions, 'concurrency'>> & MissionDaemonOptions | false;
+  /** v22: missions running in this process right now, by id. */
+  private readonly inflight = new Map<string, Promise<MissionRecord | undefined>>();
   private readonly pendingTtlMs: number;
   private readonly bubblePauseMs: number;
   private readonly now: () => Date;
@@ -219,12 +240,15 @@ export class UnifiedDaemon {
     this.planner = opts.planner ? opts.planner : false;
     this.digestOpts = opts.breakDigest ? opts.breakDigest : false;
     this.reviewOpts = opts.selfReview ? opts.selfReview : false;
+    this.missionOpts = opts.missions === false ? false : { ...opts.missions, concurrency: Math.max(1, Math.floor(opts.missions?.concurrency ?? 1)) };
     this.pendingTtlMs = opts.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
     this.bubblePauseMs = Math.max(0, opts.bubblePauseMs ?? 350);
     // Your schedule and goals are editable from chat ("remove the study block"): private and local, so no Verify item.
     if (!this.loop.tools.has(ANCHOR_TOOL)) this.loop.tools.register(anchorUpdateTool());
     // Corrections, preferences and facts said in chat are saved as feedback the next triage/chat pass learns from.
     if (!this.loop.tools.has(REMEMBER_TOOL)) this.loop.tools.register(rememberTool());
+    // v22: chat can hand deep research to a background mission ("research X and get back to me").
+    if (this.missionOpts && !this.loop.tools.has(MISSION_START_TOOL)) for (const t of missionTools()) if (!this.loop.tools.has(t.name)) this.loop.tools.register(t);
     this.chief = opts.chief === false ? undefined : (opts.chief ?? new ChiefOfStaff({ engine: this.engine, loop: this.loop, tools: this.loop.tools, ...(opts.now ? { now: opts.now } : {}) }));
     // Side effects asked for in chat become Verify items; phone context signals are recorded silently.
     if (!this.loop.listHandlers().some((h) => h.id === chiefActionHandler.id)) this.loop.addHandler(chiefActionHandler);
@@ -267,7 +291,80 @@ export class UnifiedDaemon {
     }
   }
 
+  /**
+   * v22: waits for every background mission running in this process to finish (for tests and a clean shutdown). Returns
+   * the missions that finished. Their results are announced on the next tick.
+   */
+  async drainMissions(): Promise<MissionRecord[]> {
+    const done: MissionRecord[] = [];
+    while (this.inflight.size) for (const r of await Promise.all([...this.inflight.values()])) if (r) done.push(r);
+    return done;
+  }
+
+  /** v22: ids of the missions running in this process right now. */
+  runningMissions(): string[] {
+    return [...this.inflight.keys()];
+  }
+
   // ---------- internals ----------
+
+  /**
+   * v22: announces finished missions once (quiet hours hold them unless urgent), then starts queued ones in the
+   * background, up to `concurrency` at a time. A `running` mission no process is running (left by a crash) resumes.
+   * Never waits for a mission to finish.
+   */
+  private async missionPass(report: StartTickReport, opts: MissionDaemonOptions & { concurrency: number }): Promise<void> {
+    const dir = this.loop.dir;
+    const now = this.now();
+    const started: string[] = [];
+    const delivered: string[] = [];
+    const finished = (await listMissions(dir, { status: ['completed', 'failed'] })).filter((m) => !m.delivered && !this.inflight.has(m.id)).reverse();
+    const quiet = finished.length ? inQuietHours(now, this.quietHours()) : false;
+    for (const m of finished) {
+      if (quiet && !m.urgent) continue;
+      const fresh = await loadMission(dir, m.id);
+      if (!fresh || fresh.delivered) continue;
+      // Marked BEFORE it is said: a crash between the two can drop a message, never send it twice.
+      await saveMission(dir, { ...fresh, delivered: true });
+      const text = formatMissionDelivery(fresh);
+      try {
+        await this.say(text, false, true, true);
+      } catch (err) {
+        await saveMission(dir, { ...fresh, delivered: false }).catch(() => undefined);
+        throw err;
+      }
+      delivered.push(m.id);
+      report.proactive = [...(report.proactive ?? []), text];
+    }
+    const waiting = (await listMissions(dir, { status: ['queued', 'running'] })).reverse(); // oldest first
+    for (const m of waiting) {
+      if (this.inflight.size >= opts.concurrency) break;
+      if (this.inflight.has(m.id)) continue;
+      this.startMission(m.id, opts);
+      started.push(m.id);
+    }
+    if (started.length || delivered.length) report.missions = { started, delivered };
+  }
+
+  private startMission(id: string, opts: MissionDaemonOptions): void {
+    const dir = this.loop.dir;
+    let provider;
+    try {
+      provider = this.engine.routeProvider(opts.provider ? { provider: opts.provider } : { tier: 'smart' });
+    } catch {
+      provider = undefined; // runMission records why it cannot run
+    }
+    const run = runMission({ dir, id, engine: this.engine, tools: this.loop.tools, now: this.now, ...(provider ? { provider } : {}), ...(opts.toolTimeoutMs !== undefined ? { toolTimeoutMs: opts.toolTimeoutMs } : {}) })
+      .catch(async (err: unknown) => {
+        const m = await loadMission(dir, id).catch(() => undefined);
+        if (!m || m.status === 'cancelled' || m.status === 'completed' || m.status === 'failed') return m;
+        const failed: MissionRecord = { ...m, status: 'failed', error: oneLine(message(err)), finishedAt: this.now().toISOString() };
+        await saveMission(dir, failed).catch(() => undefined);
+        return failed;
+      })
+      .finally(() => this.inflight.delete(id));
+    this.inflight.set(id, run);
+  }
 
   private async runTick(): Promise<StartTickReport> {
     const report: StartTickReport = { sentNow: [], batched: [], checkin: [], decided: [], errors: [] };
@@ -323,6 +420,13 @@ export class UnifiedDaemon {
           await this.deliver(state, report);
         } catch (err) {
           report.errors.push(`loop: ${message(err)}`);
+        }
+      }
+      if (this.missionOpts) {
+        try {
+          await this.missionPass(report, this.missionOpts);
+        } catch (err) {
+          report.errors.push(`missions: ${message(err)}`);
         }
       }
       if (this.heartbeat) {

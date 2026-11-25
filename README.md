@@ -762,9 +762,20 @@ It always appends one structured record to `<workspace>/self-review.jsonl`. Only
 
 The gate lives in `start-state.json` (`selfReview.lastDate`): once per local day, after `19:00`, never in quiet hours, never in an Anchor `protect_time` window (a Sabbath) or a protected block, never mid-conversation. Configure it with `"start": { "selfReview": { "after": "19:30", "repeatRejections": 3 } }`, or turn it off with `"selfReview": false`.
 
+### Background missions (v22)
+
+Some asks take more than one look: "research standing desks under $500 and get back to me", "prep a brief for tomorrow's meeting". Chat hands those to a **mission** with the `mission.start` tool and answers right away ("On it — I'll dig into that and ping you when I have options ready"); `rufus start` does the work in the background and texts you the result when it is done.
+
+- **Durable.** Each mission is one file, `<workspace>/missions/<id>.json` (`queued` → `running` → `completed` / `failed` / `cancelled`), saved after every step with the tool, args, ok and a short preview. A `running` mission left behind by a crash or restart is picked up again on the next pass.
+- **Read-only, enforced in code.** A mission's tool registry is rebuilt from `readOnly: true` tools alone (`web.search`, `web.fetch`, `calendar.read`, `gmail.read`, `beeper.read`, ...), and every call runs in the `execute` stage where the registry refuses side effects anyway. Whatever the model asks for, `beeper.send`, `shell.run` or `calendar.write` are never run: the step is recorded as `blocked`.
+- **Bounded.** At most `maxSteps` tool calls (default 6, max 12), then the model finishes with `{"done":true,"summary":"...","card":{...}}`. A card goes through v19's `buildDecisionCard` / `formatDecisionCard`, so the result is plain chat text (at most 900 characters) that reads the same in Beeper, iMessage or Telegram.
+- **Delivered once.** A finished (or failed) mission is announced proactively on the next pass, marked `delivered: true` first so it is never sent twice; quiet hours hold it until morning unless it was started `urgent`. One mission runs at a time by default (`"start": { "missions": { "concurrency": 2, "provider": "smart" } }`, or `"missions": false` to turn them off).
+- **$0 chat commands.** `missions` / `what are you working on?` lists what is running and what finished lately; `cancel mission <id>` (or `stop the mission` when only one is open) stops it before its next step.
+- **Terminal.** `rufus missions [list | start <goal...> [--context <text>] | show <id> | cancel <id>]`. Library: `createMission`, `listMissions`, `loadMission`, `cancelMission`, `runMission`, `missionTools`.
+
 ### What is primary and what is legacy
 
-`rufus --help` is the Jarvis core: eight **primary commands**, `start`, `now`, `anchor`, `trust`, `decide`, `chat`, `collect`, `embed`, with their options. Everything else (`init`, `bridge`, `loop`, `signal`, `run`/`pending`/`answer`, `tick`/`watch`/`emit`, `lessons`/`propose`, `seed`, `mine`, `replay`/`compare`, `backtest`, `context`, `demo`) still works exactly as before, listed one line each under **Advanced / Legacy**; `rufus --help --all` spells out their options. `rufus bridge` and `rufus loop` are each half of what `rufus start` does.
+`rufus --help` is the Jarvis core: nine **primary commands**, `start`, `now`, `anchor`, `trust`, `decide`, `chat`, `missions`, `collect`, `embed`, with their options. Everything else (`init`, `bridge`, `loop`, `signal`, `run`/`pending`/`answer`, `tick`/`watch`/`emit`, `lessons`/`propose`, `seed`, `mine`, `replay`/`compare`, `backtest`, `context`, `demo`) still works exactly as before, listed one line each under **Advanced / Legacy**; `rufus --help --all` spells out their options. `rufus bridge` and `rufus loop` are each half of what `rufus start` does.
 
 ## The One Master Loop (v11)
 

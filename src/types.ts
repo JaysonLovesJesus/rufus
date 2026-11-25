@@ -524,6 +524,8 @@ export interface StartConfig {
    * Default on; `false` turns it off.
    */
   selfReview?: false | { after?: string; quietHours?: string | false; repeatRejections?: number; repeatToolFailures?: number };
+  /** v22: background missions (read-only research and prep). Default on; `false` turns them off. */
+  missions?: false | { concurrency?: number; provider?: string };
 }
 
 /** Guardrails against piling up prompt rules. */

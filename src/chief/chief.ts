@@ -14,6 +14,8 @@ import { REMEMBER_TOOL, rememberNote } from './learning';
 import { DEFAULT_CHAT_TURNS, appendChatTurns, formatChatHistory, loadChatHistory } from './history';
 import { clearPendingPlan, commitPendingPlan, loadPendingPlan, PLAN_APPROVE, PLAN_DECLINE, PLAN_REQUEST, proposeDayPlan, savePendingPlan } from '../unified/planner';
 import { buildBreakDigest, DIGEST_REQUEST } from '../unified/digest';
+import { cancelMission, describeMission, formatMissionList, isActiveMission, listMissions } from '../unified/missions';
+import { MISSION_START_TOOL } from '../tools/mission-tools';
 
 /** What the Chief of Staff says back, plus any cards whose full text is already in that reply. */
 export interface ChiefReply {
@@ -65,7 +67,14 @@ export type ChiefCommand =
   | { kind: 'learn'; scope: string; rule: string }
   | { kind: 'remember'; text: string }
   | { kind: 'plan' }
-  | { kind: 'digest' };
+  | { kind: 'digest' }
+  | { kind: 'missions' }
+  | { kind: 'cancelMission'; id?: string };
+
+/** v22, $0: "missions", "what are you working on?" */
+export const MISSIONS_REQUEST = /^(?:missions?|my missions|background missions|any missions|what(?:'?re| are) you working on|whatcha working on|what are you doing in the background)[?.!\s]*$/i;
+/** v22, $0: "cancel mission m-3fa9c1", "stop the mission". */
+export const CANCEL_MISSION = /^(?:cancel|stop|kill|abort)\s+(?:the\s+|that\s+)?mission(?:\s+#?([a-z0-9-]{4,20}))?[.!\s]*$/i;
 
 export interface ChiefOfStaffOptions {
   engine: Engine;
@@ -149,6 +158,11 @@ function systemWithTools(tools: ToolRegistry, maxSteps: number): string {
       ? [
           'When they ask about the outside world (prices, flights, gear, how-tos, docs, news), research before you answer: web.search, then web.fetch the best result or two if the snippets are not enough. Never guess facts you could look up.',
           'When they are choosing between options, end with a clear pick in plain lines (no tables): Option A vs Option B, your pick and why in one line, then the next step. Fit it to their goals and boundaries.',
+        ]
+      : []),
+    ...(tools.has(MISSION_START_TOOL)
+      ? [
+          `When they ask for deep multi-step research or prep that takes a while ("research X and get back to me", "prep a brief for tomorrow's meeting", "compare a few options and let me know"), start a background mission with ${MISSION_START_TOOL} (goal in their words, plus any context that matters), then reply naturally that you're on it and will ping them when it's ready. Missions only read; nothing is sent. Quick questions you can answer now don't need one.`,
         ]
       : []),
     'A side-effect tool that reaches the outside (sending a message, running a command) is never run from chat: it is queued for their approval, so in your final reply say exactly what is ready and that they can reply 1 to do it.',
@@ -314,6 +328,9 @@ export class ChiefOfStaff {
     if (word === 'lessons') return { kind: 'lessons' };
     if (PLAN_REQUEST.test(trimmed)) return { kind: 'plan' };
     if (DIGEST_REQUEST.test(trimmed)) return { kind: 'digest' };
+    if (MISSIONS_REQUEST.test(trimmed)) return { kind: 'missions' };
+    const cancel = CANCEL_MISSION.exec(trimmed);
+    if (cancel) return { kind: 'cancelMission', ...(cancel[1] ? { id: cancel[1] } : {}) };
 
     const known = new Set(this.engine.listFlows().map((f) => f.meta.id));
     const run = /^run\s+(\S+)(?:\s+([\s\S]+))?$/i.exec(trimmed);
@@ -364,6 +381,10 @@ export class ChiefOfStaff {
         return reply(await this.planDay());
       case 'digest':
         return reply(await this.breakDigest());
+      case 'missions':
+        return reply(await formatMissionList(this.loop?.dir ?? this.dir));
+      case 'cancelMission':
+        return reply(await this.cancelMission(c.id));
     }
   }
 
@@ -393,6 +414,21 @@ export class ChiefOfStaff {
     const dir = this.loop?.dir ?? this.dir;
     const ai = this.optionalProvider();
     return (await buildBreakDigest({ dir, now: this.now(), ...(ai ? { ai } : {}) })).text;
+  }
+
+  /** v22 "cancel mission <id>": stops a queued or running mission. Without an id, the only open one. */
+  private async cancelMission(id?: string): Promise<string> {
+    const dir = this.loop?.dir ?? this.dir;
+    let ref = id;
+    if (!ref) {
+      const open = (await listMissions(dir)).filter(isActiveMission);
+      if (!open.length) return 'Nothing is running right now.';
+      if (open.length > 1) return `A few are going: ${open.map((m) => m.id).join(', ')}. Which one? Say "cancel mission <id>".`;
+      ref = open[0]!.id;
+    }
+    const r = await cancelMission(dir, ref, this.now());
+    if (!r.cancelled) return `That one already ended: ${describeMission(r.record)}.`;
+    return `Stopped: ${describeMission({ ...r.record, status: 'cancelled' })}.`;
   }
 
   // ---------- commands (all plain code) ----------

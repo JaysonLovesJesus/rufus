@@ -50,6 +50,7 @@ import { REMEMBER_TOOL, rememberTool } from './chief/learning';
 import { startSignalWebhook } from './unified/webhook';
 import { nowSummary } from './unified/now';
 import { assignNumbers, loadStartState, requestCheckin, saveStartState } from './unified/state';
+import { cancelMission, createMission, describeMission, formatMissionList, resolveMission } from './unified/missions';
 import { demoInput, demoProvider, triageDraft } from '../examples/triage-draft.flow';
 
 const PRIMARY_USAGE = `rufus - your AI + Code + Human chief of staff
@@ -71,6 +72,9 @@ Primary commands:
   decide <runId|#n> accept|edit|reject [note...] [--output <your version>]
                                your verdict from the terminal: updates trust, applies, and becomes an example
   chat <message...>            talk to your chief of staff (status, flows, lessons, run, learn, or anything)
+  missions [list | start <goal...> [--context <text>] | show <id> | cancel <id>]
+                               background research and prep: \`rufus start\` runs them with read-only tools and
+                               texts you the result when done
   collect <source> <path...> [--limit N] [--dry-run] [--ignore a,b] [--me addr,addr]
                                add local activity to your life corpus: files, calendar, browser, email, ai-prompts,
                                reactions (a Beeper messages export: what you only answered with an emoji)
@@ -228,6 +232,7 @@ function describeStartTick(r: StartTickReport): string[] {
   if (r.batched.length) lines.push(`${r.batched.length} item(s) waiting for the next check-in`);
   if (r.calendar?.changed) lines.push(`calendar: ${r.calendar.synced} event(s) today (+${r.calendar.added.length} / -${r.calendar.removed.length} / ~${r.calendar.updated.length})${r.calendar.conflicts.length ? `, ${r.calendar.conflicts.length} conflict(s)` : ''}`);
   for (const p of r.proactive ?? []) lines.push(`said: ${p.split('\n')[0]}`);
+  if (r.missions?.started.length) lines.push(`missions: started ${r.missions.started.join(', ')}`);
   if (r.expired?.length) lines.push(`${r.expired.length} item(s) expired unanswered (nothing was sent)`);
   if (r.bridge) lines.push(...describeBridgeTick(r.bridge));
   return lines;
@@ -260,7 +265,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const showAll = bool('--all');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
-  for (const flag of ['--dir', '--checkin', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data']) {
+  for (const flag of ['--dir', '--checkin', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data', '--context']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
@@ -786,6 +791,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
           planner: config.start?.planner === false ? false : (config.start?.planner ?? {}),
           breakDigest: config.start?.breakDigest === false ? false : (config.start?.breakDigest ?? {}),
           selfReview: config.start?.selfReview === false ? false : { ...(config.start?.selfReview ?? {}) },
+          ...(config.start?.missions !== undefined ? { missions: config.start.missions } : {}),
           ...(now ? { now } : {}),
         });
         const report = (r: StartTickReport): void => {
@@ -794,6 +800,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         };
         if (once) {
           const r = await daemon.tick();
+          await daemon.drainMissions(); // a mission started this pass finishes (its result goes out on the next pass)
           report(r);
           if (r.errors.length) process.exitCode = 1;
           return;
@@ -883,6 +890,37 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         });
       }
       return;
+    }
+
+    case 'missions': {
+      const [sub = 'list', ...words] = rest;
+      const now = options.now?.() ?? new Date();
+      if (sub === 'list') {
+        for (const line of (await formatMissionList(dir, { recent: 10 })).split('\n')) io.out(line);
+        return;
+      }
+      if (sub === 'start') {
+        const goal = words.join(' ').trim();
+        if (!goal) throw new Error('Usage: rufus missions start <goal...> [--context <text>]');
+        const m = await createMission(dir, { goal, ...(flags['--context'] ? { context: flags['--context'] } : {}) }, now);
+        io.out(`Queued mission ${m.id}: ${m.goal}. A running \`rufus start\` picks it up and texts you the result.`);
+        return;
+      }
+      if (sub === 'show' && words[0]) {
+        const m = await resolveMission(dir, words[0]);
+        io.out(describeMission(m));
+        if (m.context) io.out(`Context: ${m.context}`);
+        for (const s of m.steps) io.out(`  ${s.ok ? 'ok ' : 'NO '} ${s.tool} ${JSON.stringify(s.args)}: ${s.preview}`);
+        if (m.resultText) io.out(`\n${m.resultText}`);
+        if (m.error) io.err(`Error: ${m.error}`);
+        return;
+      }
+      if (sub === 'cancel' && words[0]) {
+        const r = await cancelMission(dir, words[0], now);
+        io.out(r.cancelled ? `Cancelled ${r.record.id}.` : `${r.record.id} already ended (${r.record.status}).`);
+        return;
+      }
+      throw new Error('Usage: rufus missions [list | start <goal...> [--context <text>] | show <id> | cancel <id>]');
     }
 
     case 'chat': {
