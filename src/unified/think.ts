@@ -1,4 +1,5 @@
 import { loadAnchor, localDate, protectedNow, type Anchor } from '../anchor/anchor';
+import { formatMemoryForPrompt, loadMarkdownMemory } from '../memory/markdown-memory';
 import { parseChatShape, concise } from '../chief/chief';
 import { formatChatHistory, loadChatHistory } from '../chief/history';
 import { loadHumanNotes } from '../chief/learning';
@@ -154,7 +155,12 @@ export async function think(opts: { provider: AiProvider; dir: string; loop: Mas
   const anchor = await loadAnchor(opts.dir, opts.now);
   const board = await gatherBoard({ ...opts, anchor });
   const soul = await loadSoul(opts.dir).catch(() => undefined);
-  const system = withPersona('You are Rufus, a calm, capable chief of staff, a bit like Jarvis: warm, natural and brief. You only speak up when it genuinely helps.', buildPersona({ ...(soul ? { soul } : {}) }));
+  // v24b: USER.md, MEMORY.md and the recent daily notes, when the workspace has them.
+  const memory = await loadMarkdownMemory(opts.dir, opts.now)
+    .then((m) => formatMemoryForPrompt(m, 3000))
+    .catch(() => '');
+  const persona = [buildPersona({ ...(soul ? { soul } : {}) }), memory].filter(Boolean).join('\n\n');
+  const system = withPersona('You are Rufus, a calm, capable chief of staff, a bit like Jarvis: warm, natural and brief. You only speak up when it genuinely helps.', persona);
   const raw = await opts.provider.complete({
     system,
     messages: [{ role: 'user', content: `Live board (exact data gathered by code):\n${board}\n\n${THINK_PROMPT}` }],

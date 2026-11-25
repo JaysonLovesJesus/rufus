@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { CardBridge, type IncomingMessage, type LiveChannel, type TickReport } from '../channels/bridge';
-import { loadAnchor, localDate, protectedNow } from '../anchor/anchor';
+import { loadAnchor, localDate, protectedNow, toMinutes } from '../anchor/anchor';
 import { chiefActionHandler } from '../chief/actions';
 import { ChiefOfStaff } from '../chief/chief';
 import { appendChatTurns } from '../chief/history';
@@ -14,7 +14,7 @@ import { loadAudit } from './audit';
 import { clip } from '../corpus/types';
 import { REMEMBER_TOOL, rememberTool } from '../chief/learning';
 import { draftOf, formatCheckin, formatLoopItem, isBareVerdict, parseLoopReply, recipientOf, refOf, type LoopReply } from './loop-text';
-import { runSelfReview, type SelfReviewOptions } from './review';
+import { DEFAULT_REVIEW_AFTER, runSelfReview, type SelfReviewOptions } from './review';
 import { freshThinkState, think, thinkSkipReason, type ThinkOptions } from './think';
 import { acceptNudge, blocksToNudge, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, formatMorningBrief, formatNudge, inQuietHours, isMorning, markNudged, nudgePrompt, phoneSignalHandler, type HeartbeatOptions } from './heartbeat';
 import type { BlockKind, ScheduleBlock } from '../anchor/anchor';
@@ -31,6 +31,8 @@ import { parseAutonomyCommand, runAutonomyCommand } from './autonomy';
 import { commandSynthesizer, resolveVoiceReplyMode, shouldSpeakReply, type Synthesizer } from '../channels/voice';
 import type { TtsCommandConfig, VoiceReplyMode } from '../types';
 import { loadChatHistory } from '../chief/history';
+import { curateMemoryDream, describeDream, MEMORY_WRITE_TOOL, memoryWriteTool } from '../memory/markdown-memory';
+import { SKILL_LIST_TOOL, skillTools } from '../skills/skills';
 import type { HubAuditEntry, HubBackend, HubBlock, HubDecision, HubItem, HubMission, HubState, HubTrust } from './hub';
 
 /**
@@ -86,6 +88,12 @@ export interface UnifiedDaemonOptions {
    * background with read-only tools only, and the result is sent to you once when done. Default on; `false`: off.
    */
   missions?: MissionDaemonOptions | false;
+  /**
+   * v24b: the evening "dreaming" pass over `memory/YYYY-MM-DD.md`: once a day after `after` (default 19:00), repeated
+   * notes the human said are promoted into USER.md / MEMORY.md and repeats there are folded. Silent; code only unless
+   * `ai: true` (one fast-tier call). Default on; `false`: off.
+   */
+  memoryDream?: { after?: string; ai?: boolean } | false;
   /**
    * v20: spoken replies. With `tts` set (a local command, or a function in tests), a chat reply to a voice note comes
    * back as a voice note too (`replyMode: 'match'`, the default), or every chat reply does (`'always'`). Loop items,
@@ -149,6 +157,8 @@ export interface StartTickReport {
   digest?: string;
   /** v18: what the daily self-review did this pass: `noted`, `silent`, or `skipped: <why>`. */
   reviewed?: string;
+  /** v24b: what the evening memory curation did this pass. */
+  dreamed?: string;
   /** v22: missions started in the background, and finished ones announced, this pass. */
   missions?: { started: string[]; delivered: string[] };
   /** v21: runs that acted on their own at `auto_notify` and were announced this pass. */
@@ -233,6 +243,7 @@ export class UnifiedDaemon {
   private readonly planner: DayPlannerOptions | false;
   private readonly digestOpts: BreakDigestOptions | false;
   private readonly reviewOpts: SelfReviewOptions | false;
+  private readonly dreamOpts: { after?: string; ai?: boolean } | false;
   private readonly missionOpts: Required<Pick<MissionDaemonOptions, 'concurrency'>> & MissionDaemonOptions | false;
   /** v22: missions running in this process right now, by id. */
   private readonly inflight = new Map<string, Promise<MissionRecord | undefined>>();
@@ -267,6 +278,7 @@ export class UnifiedDaemon {
     this.planner = opts.planner ? opts.planner : false;
     this.digestOpts = opts.breakDigest ? opts.breakDigest : false;
     this.reviewOpts = opts.selfReview ? opts.selfReview : false;
+    this.dreamOpts = opts.memoryDream === false ? false : (opts.memoryDream ?? {});
     this.missionOpts = opts.missions === false ? false : { ...opts.missions, concurrency: Math.max(1, Math.floor(opts.missions?.concurrency ?? 1)) };
     this.pendingTtlMs = opts.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
     this.bubblePauseMs = Math.max(0, opts.bubblePauseMs ?? 350);
@@ -278,6 +290,9 @@ export class UnifiedDaemon {
     // Corrections, preferences and facts said in chat are saved as feedback the next triage/chat pass learns from.
     if (!this.loop.tools.has(REMEMBER_TOOL)) this.loop.tools.register(rememberTool());
     // v22: chat can hand deep research to a background mission ("research X and get back to me").
+    // v24b: plain-markdown memory (USER.md, MEMORY.md, daily notes) and the read-only skill tools.
+    if (!this.loop.tools.has(MEMORY_WRITE_TOOL)) this.loop.tools.register(memoryWriteTool());
+    if (!this.loop.tools.has(SKILL_LIST_TOOL)) for (const t of skillTools()) if (!this.loop.tools.has(t.name)) this.loop.tools.register(t);
     if (this.missionOpts && !this.loop.tools.has(MISSION_START_TOOL)) for (const t of missionTools()) if (!this.loop.tools.has(t.name)) this.loop.tools.register(t);
     this.chief = opts.chief === false ? undefined : (opts.chief ?? new ChiefOfStaff({ engine: this.engine, loop: this.loop, tools: this.loop.tools, ...(opts.now ? { now: opts.now } : {}) }));
     // Side effects asked for in chat become Verify items; phone context signals are recorded silently.
@@ -495,6 +510,13 @@ export class UnifiedDaemon {
           report.errors.push(`self-review: ${message(err)}`);
         }
       }
+      if (this.dreamOpts) {
+        try {
+          await this.dreamPass(state, report, this.dreamOpts);
+        } catch (err) {
+          report.errors.push(`memory dream: ${message(err)}`);
+        }
+      }
       if (this.thinkOpts) {
         try {
           await this.thinkPass(state, report, this.thinkOpts);
@@ -654,6 +676,22 @@ export class UnifiedDaemon {
     if (state.think) state.think.lastAt = now.toISOString(); // that was the beat
     report.reviewed = 'noted';
     report.proactive = [...(report.proactive ?? []), r.note];
+  }
+
+  /**
+   * v24b: the evening dreaming pass. Once per local date, after `after` (default 19:00): curates the daily notes into
+   * USER.md / MEMORY.md. Silent (nothing is said). A workspace with no notes and no memory files is left untouched.
+   */
+  private async dreamPass(state: StartState, report: StartTickReport, opts: { after?: string; ai?: boolean }): Promise<void> {
+    const now = this.now();
+    const today = localDate(now);
+    if (state.memoryDream?.lastDate === today) return;
+    if (now.getHours() * 60 + now.getMinutes() < toMinutes(opts.after ?? DEFAULT_REVIEW_AFTER)) return;
+    const ai = opts.ai ? this.engine.routeProvider({ tier: 'fast' }) : undefined;
+    const r = await curateMemoryDream(this.loop.dir, { now, ...(ai ? { ai } : {}) });
+    if (!r.scanned && !r.duplicatesRemoved) return;
+    state.memoryDream = { lastDate: today };
+    report.dreamed = describeDream(r);
   }
 
   /** Expires Verify items that reached you more than `pendingTtlMs` ago. Undelivered items wait for their check-in. */

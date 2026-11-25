@@ -592,6 +592,8 @@ export interface StartConfig {
   selfReview?: false | { after?: string; quietHours?: string | false; repeatRejections?: number; repeatToolFailures?: number };
   /** v22: background missions (read-only research and prep). Default on; `false` turns them off. */
   missions?: false | { concurrency?: number; provider?: string };
+  /** v24b: the evening memory curation over `memory/YYYY-MM-DD.md` ("dreaming"). Default on; `false` turns it off. */
+  memoryDream?: false | { after?: string; ai?: boolean };
 }
 
 /** Guardrails against piling up prompt rules. */

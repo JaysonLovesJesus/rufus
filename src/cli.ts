@@ -56,6 +56,8 @@ import { synthesizeSpeech, toSpeakableText } from './channels/voice';
 import { nowSummary } from './unified/now';
 import { assignNumbers, loadStartState, requestCheckin, saveStartState } from './unified/state';
 import { cancelMission, createMission, describeMission, formatMissionList, resolveMission } from './unified/missions';
+import { curateMemoryDream, describeDream, formatMemoryForPrompt, loadMarkdownMemory } from './memory/markdown-memory';
+import { listSkills, loadSkill } from './skills/skills';
 import { demoInput, demoProvider, triageDraft } from '../examples/triage-draft.flow';
 
 const PRIMARY_USAGE = `rufus - your AI + Code + Human chief of staff
@@ -82,6 +84,9 @@ Primary commands:
   missions [list | start <goal...> [--context <text>] | show <id> | cancel <id>]
                                background research and prep: \`rufus start\` runs them with read-only tools and
                                texts you the result when done
+  memory [show | dream]        your plain-markdown memory: USER.md, MEMORY.md and memory/YYYY-MM-DD.md daily notes;
+                               dream = curate repeated notes into long-term memory now ($0)
+  skills [list | show <name>]  portable skills in skills/<name>/SKILL.md (matched into chat and mission prompts)
   say <text...> [--out <file>] speak text with your local voice.tts command (a $0 test; writes the audio file)
   collect <source> <path...> [--limit N] [--dry-run] [--ignore a,b] [--me addr,addr]
                                add local activity to your life corpus: files, calendar, browser, email, ai-prompts,
@@ -243,6 +248,7 @@ function describeStartTick(r: StartTickReport): string[] {
   if (r.calendar?.changed) lines.push(`calendar: ${r.calendar.synced} event(s) today (+${r.calendar.added.length} / -${r.calendar.removed.length} / ~${r.calendar.updated.length})${r.calendar.conflicts.length ? `, ${r.calendar.conflicts.length} conflict(s)` : ''}`);
   for (const p of r.proactive ?? []) lines.push(`said: ${p.split('\n')[0]}`);
   if (r.missions?.started.length) lines.push(`missions: started ${r.missions.started.join(', ')}`);
+  if (r.dreamed) lines.push(`memory: ${r.dreamed}`);
   if (r.expired?.length) lines.push(`${r.expired.length} item(s) expired unanswered (nothing was sent)`);
   if (r.bridge) lines.push(...describeBridgeTick(r.bridge));
   return lines;
@@ -848,6 +854,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
             breakDigest: config.start?.breakDigest === false ? false : (config.start?.breakDigest ?? {}),
             selfReview: config.start?.selfReview === false ? false : { ...(config.start?.selfReview ?? {}) },
             ...(config.start?.missions !== undefined ? { missions: config.start.missions } : {}),
+            ...(config.start?.memoryDream !== undefined ? { memoryDream: config.start.memoryDream } : {}),
             ...(config.voice?.tts ? { voice: { tts: config.voice.tts, ...(config.voice.replyMode ? { replyMode: config.voice.replyMode } : {}) } } : {}),
             ...(now ? { now } : {}),
           });
@@ -1004,6 +1011,41 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         return;
       }
       throw new Error('Usage: rufus missions [list | start <goal...> [--context <text>] | show <id> | cancel <id>]');
+    }
+
+    case 'memory': {
+      const [sub = 'show'] = rest;
+      const now = options.now?.() ?? new Date();
+      if (sub === 'show') {
+        const text = formatMemoryForPrompt(await loadMarkdownMemory(dir, now), 20_000);
+        for (const line of (text || 'No memory yet. Rufus writes USER.md, MEMORY.md and memory/YYYY-MM-DD.md as you talk; you can edit them too.').split('\n')) io.out(line);
+        return;
+      }
+      if (sub === 'dream') {
+        io.out(`Memory curation: ${describeDream(await curateMemoryDream(dir, { now }))}.`);
+        return;
+      }
+      throw new Error('Usage: rufus memory [show | dream]');
+    }
+
+    case 'skills': {
+      const [sub = 'list', name] = rest;
+      if (sub === 'list') {
+        const skills = await listSkills(dir);
+        if (!skills.length) io.out(`No skills yet. Add one as ${path.join(dir, 'skills', '<name>', 'SKILL.md')} (frontmatter: name, description, triggers).`);
+        for (const s of skills) io.out(`${s.name} - ${s.description}${s.triggers.length ? ` (triggers: ${s.triggers.join(', ')})` : ''}`);
+        return;
+      }
+      if (sub === 'show' && name) {
+        const skill = await loadSkill(dir, name);
+        if (!skill) throw new Error(`No skill called "${name}". See: rufus skills list`);
+        io.out(`${skill.name} - ${skill.description}`);
+        if (skill.triggers.length) io.out(`Triggers: ${skill.triggers.join(', ')}`);
+        io.out('');
+        for (const line of skill.body.split('\n')) io.out(line);
+        return;
+      }
+      throw new Error('Usage: rufus skills [list | show <name>]');
     }
 
     case 'say': {

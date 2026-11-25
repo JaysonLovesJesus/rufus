@@ -23,6 +23,11 @@ export interface ToolContext {
   stage?: 'plan' | 'execute' | 'verify' | 'commit';
   /** True when a human said yes to this run (accept or edit on Verify). */
   approved?: boolean;
+  /**
+   * v24b: where the content driving this call came from. `external` when the turn already read outside content (another
+   * person's chat, a web page, an email), so a memory write may not trust it as the human's own words.
+   */
+  provenance?: 'user' | 'external';
 }
 
 export interface ToolDefinition<A = Record<string, unknown>, R = unknown> {

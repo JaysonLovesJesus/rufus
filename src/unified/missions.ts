@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { relevantSkillsSection } from '../skills/skills';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { loadAnchor } from '../anchor/anchor';
@@ -410,7 +411,9 @@ export async function runMission(opts: RunMissionOptions): Promise<MissionRecord
     ...(resumed ? [`Steps already done before a restart (results not kept, redo any you still need):\n${m.steps.map((s) => `- ${s.tool} ${JSON.stringify(s.args)}: ${s.ok ? 'ok' : 'failed'}: ${s.preview}`).join('\n')}`] : []),
   ];
   const messages: AiMessage[] = [{ role: 'user', content: facts.join('\n\n') }];
-  const system = missionSystem(tools, budget);
+  // v24b: the one or two SKILL.md files that fit this mission, when the workspace has any.
+  const skills = await relevantSkillsSection(dir, [m.goal, m.context ?? ''].join(' '));
+  const system = skills ? `${missionSystem(tools, budget)}\n\n${skills}` : missionSystem(tools, budget);
 
   try {
     for (let step = 0; ; step++) {

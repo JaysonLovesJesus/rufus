@@ -822,6 +822,33 @@ Some asks take more than one look: "research standing desks under $500 and get b
 }
 ```
 
+### Markdown memory and portable skills (v24b)
+
+Rufus keeps what it knows about you in plain markdown you can open, read and edit:
+
+```
+<workspace>/USER.md                 who you are: preferences, communication style, routines, people
+<workspace>/MEMORY.md               durable facts: active projects, machine and tool setup, decisions
+<workspace>/memory/YYYY-MM-DD.md    append-only daily notes: "- 14:05 [user] Prefers short replies"
+<workspace>/skills/<name>/SKILL.md  portable skills: frontmatter (name, description, triggers) + instructions
+```
+
+- **In every chat.** `USER.md`, `MEMORY.md` and today's and yesterday's daily notes go into the Chief of Staff and think-beat prompts, each kept to a small char budget (`loadMarkdownMemory`, `formatMemoryForPrompt`). A workspace without these files gets exactly the old prompts.
+- **`memory.write`** (local, like `remember`): when you tell Rufus something durable in chat, it saves it to `USER.md` (about you), `MEMORY.md` (durable facts) or today's daily note.
+- **Provenance guard.** Each daily line records who said it: `user`, `assistant`, `system` or `external`. `updateLongTermMemory` only accepts `user` or `curation` as the source. It refuses anything else, and anything that reads like an injected instruction. Once a chat turn has read outside content (another person's chat, a web page, an email), a long-term `memory.write` only becomes an `[external]` daily note. A message from someone else can't change what Rufus believes about you.
+- **Dreaming.** Each evening (after 19:00, once a day) `rufus start` runs `curateMemoryDream`, which is plain code and costs $0. A note *you* made two or more times in the last week moves up into `USER.md` or `MEMORY.md`, and duplicate bullets there are merged into one. `external`, `assistant` and `system` lines never move up. With `"start": { "memoryDream": { "ai": true } }`, one fast-tier call can also suggest facts. It only sees your own lines, and code drops any suggestion that isn't grounded in one of them. Turn it off with `"memoryDream": false`. To run it by hand: `rufus memory dream`. To see what Rufus reads: `rufus memory show`.
+- **Skills.** `rufus skills list` / `rufus skills show <name>`. Code scores each skill against your message at $0: trigger phrases, the skill's name, and words from its description. Only the 1-2 best matches go into chat and mission prompts (`matchSkills`). Chat and missions can also look skills up themselves with the read-only `skill.list` and `skill.read` tools. `saveSkill` writes a clean `SKILL.md` under a safe slug name: a name like `../x` can never read or write outside `skills/`. Frontmatter is a small YAML subset, parsed without any dependency: `triggers: a, b`, `[a, b]`, or one `- item` per line.
+
+```markdown
+---
+name: trip-prep
+description: Prepare a short travel brief before a trip
+triggers: trip, flight, travel brief
+---
+1. Check the calendar for the travel day and the flight time.
+2. List what to pack and when to leave, in 3 short lines.
+```
+
 ### Any app over MCP, inside Rufus's guardrails (v24c)
 
 Rufus has a built-in, zero-dependency **MCP (Model Context Protocol) client**, so any MCP server (GitHub, Linear, Notion, a calendar, Slack, your own) plugs straight into the tool registry instead of needing a bespoke script per app. Pure Node (`child_process` + `fetch`), no new packages.
