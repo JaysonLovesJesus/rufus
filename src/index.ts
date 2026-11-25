@@ -409,6 +409,26 @@ export {
   type RunMissionOptions,
 } from './unified/missions';
 export { missionTools, MISSION_START_TOOL, MISSION_LIST_TOOL, MISSION_CANCEL_TOOL } from './tools/mission-tools';
+export {
+  McpClient,
+  McpError,
+  registerMcpTools,
+  mcpToolDefinition,
+  mcpToolName,
+  classifyMcpTool,
+  mcpResultValue,
+  parseSseEvents,
+  MCP_PROTOCOL_VERSION,
+  DEFAULT_MCP_TIMEOUT_MS,
+  type McpTool,
+  type McpToolAnnotations,
+  type McpContent,
+  type McpCallResult,
+  type McpInitializeResult,
+  type McpClientOptions,
+  type RegisterMcpToolsOptions,
+  type RegisterMcpToolsResult,
+} from './tools/mcp-client';
 export { acceptNudge, blocksToNudge, clock12, formatNudge, formatMorningBrief, nudgePrompt, speakableTitle, inQuietHours, isMorning, phoneSignalHandler, PHONE_KINDS, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, type HeartbeatOptions } from './unified/heartbeat';
 export { startSignalWebhook, validateWebhookSignal, handleSignalRequest, requireWebhookToken, DEFAULT_WEBHOOK_PORT, MIN_WEBHOOK_TOKEN_LENGTH, type SignalWebhook, type SignalWebhookOptions } from './unified/webhook';
 export { startJarvisHub, createHubHandler, hubSessionValue, audioExt, HUB_COOKIE, HUB_APK_FILE, APK_MIME, type HubTrust, type HubTrustAction, type HubMission, type HubAuditEntry, type HubBackend, type HubChatReply, type HubState, type HubItem, type HubBlock, type HubDecision, type JarvisHub, type JarvisHubOptions } from './unified/hub';

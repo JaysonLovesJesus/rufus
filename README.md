@@ -822,6 +822,24 @@ Some asks take more than one look: "research standing desks under $500 and get b
 }
 ```
 
+### Any app over MCP, inside Rufus's guardrails (v24c)
+
+Rufus has a built-in, zero-dependency **MCP (Model Context Protocol) client**, so any MCP server (GitHub, Linear, Notion, a calendar, Slack, your own) plugs straight into the tool registry instead of needing a bespoke script per app. Pure Node (`child_process` + `fetch`), no new packages.
+
+- **Two transports.** `command` spawns a local server and speaks newline-delimited JSON-RPC 2.0 on stdin/stdout (stderr is kept for error messages; log lines on stdout are ignored). `url` POSTs JSON-RPC to an HTTP endpoint with `Accept: application/json, text/event-stream`, reads either a plain JSON answer or the `data:` events of an SSE stream, and sends the server's `Mcp-Session-Id` back on every later request (and a `DELETE` on shutdown).
+- **`mcp.<server>.<tool>`.** On `rufus start` (and `loop`, `decide`, `chat`, `tools`) each server is connected (`initialize`, `notifications/initialized`, `tools/list`) and every tool is registered as `mcp.<server>.<tool>`. A server that is offline or broken is logged and skipped; Rufus keeps running. Connections are closed on shutdown, and stdio servers are stopped.
+- **Default-safe.** A tool is read-only **only** when the server says `annotations.readOnlyHint: true` or you list it in `readOnlyTools`. Everything else is `readOnly: false` and `external`, so it gets the same treatment as `gmail.send`: it never runs while planning, executing, verifying or in a mission; from chat it is queued as a Verify item; it starts at `check` on the Earned Trust ladder; the kill switch makes it ask again; and every run is written to `audit.jsonl`. `denyTools` hides a tool from Rufus completely.
+- **See what you got.** `rufus tools` lists every tool with its flags (`read-only`, or `acts, external`), plus any server that could not be reached. Library: `McpClient`, `registerMcpTools(registry, servers)`, `classifyMcpTool`.
+
+```json
+{
+  "tools": { "mcp": {
+    "github": { "command": "github-mcp-server", "args": ["stdio"], "env": { "GITHUB_TOKEN": "..." }, "denyTools": ["delete_repository"] },
+    "notes":  { "url": "http://127.0.0.1:8808/mcp", "headers": { "authorization": "Bearer ..." }, "readOnlyTools": ["search"], "timeoutMs": 15000 }
+  } }
+}
+```
+
 ### What is primary and what is legacy
 
 `rufus --help` is the Jarvis core: ten **primary commands**, `start`, `now`, `anchor`, `trust`, `decide`, `chat`, `missions`, `say`, `collect`, `embed`, with their options. Everything else (`init`, `bridge`, `loop`, `signal`, `run`/`pending`/`answer`, `tick`/`watch`/`emit`, `lessons`/`propose`, `seed`, `mine`, `replay`/`compare`, `backtest`, `context`, `demo`) still works exactly as before, listed one line each under **Advanced / Legacy**; `rufus --help --all` spells out their options. `rufus bridge` and `rufus loop` are each half of what `rufus start` does.

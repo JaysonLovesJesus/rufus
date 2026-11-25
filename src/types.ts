@@ -475,6 +475,29 @@ export interface ToolsConfig {
   beeper?: boolean;
   /** `false` turns off the built-in read-only `web.search` / `web.fetch` (v19). On by default; no API key needed. */
   web?: boolean;
+  /**
+   * v24c: MCP servers by name. Each tool they offer is registered as `mcp.<name>.<tool>`. Read-only only when the server
+   * says so (`annotations.readOnlyHint`) or you list it in `readOnlyTools`; everything else is an `external` write tool
+   * that waits for your yes on Verify, starts at `check` on the Earned Trust ladder and is written to `audit.jsonl`.
+   */
+  mcp?: Record<string, McpServerConfig>;
+}
+
+/** v24c: one MCP (Model Context Protocol) server (`config.tools.mcp.<name>`). Give either `command` or `url`. */
+export interface McpServerConfig {
+  /** Stdio transport: spawn a local MCP server process. */
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  /** HTTP JSON-RPC transport: connect to a local/remote MCP endpoint. */
+  url?: string;
+  headers?: Record<string, string>;
+  /** Tool names explicitly allowed as read-only (overrides default-safe write classification). */
+  readOnlyTools?: string[];
+  /** Tool names to block/hide from Rufus completely. */
+  denyTools?: string[];
+  /** Per request (initialize, tools/list, tools/call). Default 30s. */
+  timeoutMs?: number;
 }
 
 /** The Beeper sensor: new incoming messages from people, across your chats. */

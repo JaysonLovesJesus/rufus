@@ -43,7 +43,9 @@ import { formatLoopReport, formatLoopRun, MasterLoop, type Sensor, type SignalHa
 import { appendSignal, inboxSensor, scheduleBlockHandler } from './engine/loop-builtins';
 import { configuredChannels } from './channels/select';
 import { initSoul } from './soul/soul';
-import { buildTools } from './tools/tools';
+import { buildTools, formatTools, type ToolRegistry } from './tools/tools';
+import { registerMcpTools } from './tools/mcp-client';
+import type { RufusConfig } from './types';
 import { buildSensors, messageTriageHandler } from './sensors';
 import { UnifiedDaemon, type StartTickReport } from './unified/daemon';
 import { DEFAULT_THINK_EVERY } from './unified/think';
@@ -107,6 +109,7 @@ Advanced / Legacy:                (still supported; \`rufus --help --all\` shows
   backtest [--count N]         time-travel check against your real past replies
   context [query]              the life context snapshot
   demo                         run the example flow
+  tools                        every tool (built-in, commands, MCP servers) and its safety flags
 `;
 
 const LEGACY_FULL = `
@@ -131,6 +134,7 @@ Advanced / Legacy:                (all options)
                                time-travel check against your real past replies (offline is free)
   context [query] [--source a,b] [--since <days>] [--limit N] [--half-life <days>] [--json]
   demo [--reply <text>]        run the example flow
+  tools                        every tool (built-in, commands, MCP servers) and its safety flags
 `;
 
 /** \`rufus --help\`: the Jarvis core first, legacy one line each. \`--all\` spells out every legacy option. */
@@ -248,6 +252,19 @@ function describeBridgeTick(r: TickReport): string[] {
   const lines = r.delivered.map((id) => `sent card ${id}`);
   lines.push(...r.answered.map((id) => `answered card ${id}`));
   return lines;
+}
+
+/**
+ * v24c: connects the MCP servers in `config.tools.mcp` and registers their tools on `registry`. A server that is down is
+ * reported and skipped; Rufus keeps going. Returns the `close()` to call on shutdown (a no-op without MCP servers).
+ */
+async function attachMcp(registry: ToolRegistry, config: RufusConfig, io: Io, opts: { quiet?: boolean } = {}): Promise<() => Promise<void>> {
+  const servers = config.tools?.mcp;
+  if (!servers || !Object.keys(servers).length) return async () => undefined;
+  const r = await registerMcpTools(registry, servers);
+  if (!opts.quiet && r.servers.length) io.out(`MCP: ${r.servers.map((s) => `${s.name} (${s.transport}, ${s.tools} tool${s.tools === 1 ? '' : 's'})`).join(', ')}.`);
+  for (const e of r.errors) io.err(`MCP server skipped (Rufus keeps running without it): ${e}`);
+  return r.close;
 }
 
 export async function main(argv: string[], io: Io = consoleIo, options: MainOptions = {}): Promise<void> {
@@ -796,160 +813,166 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
       const triage = messageTriageHandler();
       if (cmd !== 'loop' && !parts.handlers.some((h) => h.id === triage.id)) loop.addHandler(triage);
 
-      if (cmd === 'now') {
-        const state = await loadStartState(dir);
-        assignNumbers(state, await loop.pending());
-        await saveStartState(dir, state);
-        for (const line of await nowSummary({ loop, engine, numbers: state.numbers, ...(now ? { now: now() } : {}) })) io.out(line);
-        await requestCheckin(dir);
-        return;
-      }
-
-      if (cmd === 'start') {
-        const intervalMs = parseDuration(flags['--interval'] ?? config.start?.interval ?? '30s');
-        const checkinEveryMs = parseDuration(flags['--checkin'] ?? config.start?.checkinEvery ?? '2h');
-        const thinkEvery = String(config.start?.thinkEvery ?? DEFAULT_THINK_EVERY).trim();
-        const thinkEveryMs = /^0+\s*[smhd]?$/.test(thinkEvery) ? 0 : parseDuration(thinkEvery);
-        if (config.embeddings && !loop.tools.has(REMEMBER_TOOL)) loop.tools.register(rememberTool({ embeddings: createEmbeddingProvider(config.embeddings) }));
-        const channelName = flags['--channel'] ?? config.start?.channel;
-        const channel = options.channel ?? (channelName !== undefined || configuredChannels(config).length ? selectChannel(config, { channel: channelName, workspaceDir: dir }).channel : undefined);
-        const daemon = new UnifiedDaemon({
-          loop,
-          engine,
-          ...(channel ? { channel } : {}),
-          output: (t) => io.out(t),
-          chief: new ChiefOfStaff({ engine, provider: config.chief?.provider, ...(config.voice?.provider ? { voiceProvider: config.voice.provider } : {}), loop, tools: loop.tools, ...(now ? { now } : {}) }),
-          checkinEveryMs,
-          ...(config.start?.heartbeat !== undefined ? { heartbeat: config.start.heartbeat } : {}),
-          ...(thinkEveryMs > 0 ? { think: { everyMs: thinkEveryMs, ...(config.start?.think?.tools ? { tools: config.start.think.tools } : {}), ...(config.start?.think?.provider ? { provider: config.start.think.provider } : {}), ...(config.start?.think?.quietHours !== undefined ? { quietHours: config.start.think.quietHours } : {}) } } : {}),
-          pendingTtlMs: parseDuration(config.start?.pendingTtl ?? '60m'),
-          calendarSync: config.start?.calendarSync === false ? false : { everyMs: parseDuration(config.start?.calendarSync?.every ?? '20m') },
-          planner: config.start?.planner === false ? false : (config.start?.planner ?? {}),
-          breakDigest: config.start?.breakDigest === false ? false : (config.start?.breakDigest ?? {}),
-          selfReview: config.start?.selfReview === false ? false : { ...(config.start?.selfReview ?? {}) },
-          ...(config.start?.missions !== undefined ? { missions: config.start.missions } : {}),
-          ...(config.voice?.tts ? { voice: { tts: config.voice.tts, ...(config.voice.replyMode ? { replyMode: config.voice.replyMode } : {}) } } : {}),
-          ...(now ? { now } : {}),
-        });
-        const report = (r: StartTickReport): void => {
-          for (const line of describeStartTick(r)) io.out(line);
-          for (const e of r.errors) io.err(`problem (will retry): ${e}`);
-        };
-        if (once) {
-          const r = await daemon.tick();
-          await daemon.drainMissions(); // a mission started this pass finishes (its result goes out on the next pass)
-          report(r);
-          if (r.errors.length) process.exitCode = 1;
+      // v24c: MCP tools join the registry (not for `now`, which only reads state). Closed on the way out.
+      const closeMcp = cmd === 'now' ? async () => undefined : await attachMcp(loop.tools, config, io, { quiet: cmd === 'decide' });
+      try {
+        if (cmd === 'now') {
+          const state = await loadStartState(dir);
+          assignNumbers(state, await loop.pending());
+          await saveStartState(dir, state);
+          for (const line of await nowSummary({ loop, engine, numbers: state.numbers, ...(now ? { now: now() } : {}) })) io.out(line);
+          await requestCheckin(dir);
           return;
         }
-        const sensors = loop.listSensors().map((x) => x.id).join(', ');
-        io.out(`Rufus is running (every ${flags['--interval'] ?? config.start?.interval ?? '30s'}; check-ins every ${flags['--checkin'] ?? config.start?.checkinEvery ?? '2h'}). Sensors: ${sensors}. Tools: ${loop.tools.list().map((t) => t.name).join(', ') || 'none'}. ${channel ? 'Talking through your chat.' : 'No chat configured: items print here; answer with rufus decide.'} Ctrl+C to stop.`);
+
+        if (cmd === 'start') {
+          const intervalMs = parseDuration(flags['--interval'] ?? config.start?.interval ?? '30s');
+          const checkinEveryMs = parseDuration(flags['--checkin'] ?? config.start?.checkinEvery ?? '2h');
+          const thinkEvery = String(config.start?.thinkEvery ?? DEFAULT_THINK_EVERY).trim();
+          const thinkEveryMs = /^0+\s*[smhd]?$/.test(thinkEvery) ? 0 : parseDuration(thinkEvery);
+          if (config.embeddings && !loop.tools.has(REMEMBER_TOOL)) loop.tools.register(rememberTool({ embeddings: createEmbeddingProvider(config.embeddings) }));
+          const channelName = flags['--channel'] ?? config.start?.channel;
+          const channel = options.channel ?? (channelName !== undefined || configuredChannels(config).length ? selectChannel(config, { channel: channelName, workspaceDir: dir }).channel : undefined);
+          const daemon = new UnifiedDaemon({
+            loop,
+            engine,
+            ...(channel ? { channel } : {}),
+            output: (t) => io.out(t),
+            chief: new ChiefOfStaff({ engine, provider: config.chief?.provider, ...(config.voice?.provider ? { voiceProvider: config.voice.provider } : {}), loop, tools: loop.tools, ...(now ? { now } : {}) }),
+            checkinEveryMs,
+            ...(config.start?.heartbeat !== undefined ? { heartbeat: config.start.heartbeat } : {}),
+            ...(thinkEveryMs > 0 ? { think: { everyMs: thinkEveryMs, ...(config.start?.think?.tools ? { tools: config.start.think.tools } : {}), ...(config.start?.think?.provider ? { provider: config.start.think.provider } : {}), ...(config.start?.think?.quietHours !== undefined ? { quietHours: config.start.think.quietHours } : {}) } } : {}),
+            pendingTtlMs: parseDuration(config.start?.pendingTtl ?? '60m'),
+            calendarSync: config.start?.calendarSync === false ? false : { everyMs: parseDuration(config.start?.calendarSync?.every ?? '20m') },
+            planner: config.start?.planner === false ? false : (config.start?.planner ?? {}),
+            breakDigest: config.start?.breakDigest === false ? false : (config.start?.breakDigest ?? {}),
+            selfReview: config.start?.selfReview === false ? false : { ...(config.start?.selfReview ?? {}) },
+            ...(config.start?.missions !== undefined ? { missions: config.start.missions } : {}),
+            ...(config.voice?.tts ? { voice: { tts: config.voice.tts, ...(config.voice.replyMode ? { replyMode: config.voice.replyMode } : {}) } } : {}),
+            ...(now ? { now } : {}),
+          });
+          const report = (r: StartTickReport): void => {
+            for (const line of describeStartTick(r)) io.out(line);
+            for (const e of r.errors) io.err(`problem (will retry): ${e}`);
+          };
+          if (once) {
+            const r = await daemon.tick();
+            await daemon.drainMissions(); // a mission started this pass finishes (its result goes out on the next pass)
+            report(r);
+            if (r.errors.length) process.exitCode = 1;
+            return;
+          }
+          const sensors = loop.listSensors().map((x) => x.id).join(', ');
+          io.out(`Rufus is running (every ${flags['--interval'] ?? config.start?.interval ?? '30s'}; check-ins every ${flags['--checkin'] ?? config.start?.checkinEvery ?? '2h'}). Sensors: ${sensors}. Tools: ${loop.tools.list().map((t) => t.name).join(', ') || 'none'}. ${channel ? 'Talking through your chat.' : 'No chat configured: items print here; answer with rufus decide.'} Ctrl+C to stop.`);
+          const stop = new AbortController();
+          process.once('SIGINT', () => stop.abort());
+          process.once('SIGTERM', () => stop.abort());
+          const hook = config.start?.webhook;
+          const hookToken = hook?.token ?? process.env.RUFUS_WEBHOOK_TOKEN;
+          // The phone webhook is a bonus sense: if it cannot bind (network not up yet at boot), Rufus still runs.
+          // v20: the Jarvis Hub takes the webhook's place (same port by default) and keeps answering /signal.
+          const hubCfg = config.start?.hub;
+          const hubOpts = hubCfg && typeof hubCfg === 'object' ? hubCfg : {};
+          const hubToken = hubOpts.token ?? process.env.RUFUS_HUB_TOKEN ?? hookToken;
+          const stt = config.voice?.stt ?? config.telegram?.transcribe;
+          const webhook = hubCfg
+            ? await startJarvisHub({
+                dir,
+                token: hubToken ?? '',
+                ...(hookToken ? { signalToken: hookToken } : {}),
+                backend: daemon.hubBackend(),
+                ...((hubOpts.port ?? hook?.port) !== undefined ? { port: (hubOpts.port ?? hook?.port)! } : {}),
+                ...((hubOpts.host ?? hook?.host) ? { host: (hubOpts.host ?? hook?.host)! } : {}),
+                ...(stt?.command ? { transcribe: stt } : {}),
+                ...(config.voice?.tts ? { tts: config.voice.tts } : {}),
+                ...(now ? { now } : {}),
+              }).catch((err: unknown) => {
+                io.err(`Jarvis Hub not started (Rufus keeps running without it): ${err instanceof Error ? err.message : String(err)}`);
+                return undefined;
+              })
+            : hook || process.env.RUFUS_WEBHOOK_TOKEN
+              ? await startSignalWebhook({ dir, token: hookToken ?? '', ...(hook?.port !== undefined ? { port: hook.port } : {}), ...(hook?.host ? { host: hook.host } : {}), ...(now ? { now } : {}) }).catch((err: unknown) => {
+                  io.err(`Signal webhook not started (Rufus keeps running without it): ${err instanceof Error ? err.message : String(err)}`);
+                  return undefined;
+                })
+              : undefined;
+          if (webhook && hubCfg) {
+            io.out(`Jarvis Hub: ${webhook.url}/ (open it once with ?token=<your hub token>; for the phone mic, put it behind HTTPS, e.g. tailscale serve). Voice: ${stt?.command ? 'speech-to-text on' : 'no speech-to-text'}, ${config.voice?.tts ? 'local voice on' : 'browser voice'}.`);
+            io.out(`Signal webhook listening on ${webhook.url}/signal (Bearer token required).`);
+          } else if (webhook) io.out(`Signal webhook listening on ${webhook.url}/signal (Bearer token required).`);
+          try {
+            return await daemon.run({ intervalMs, signal: stop.signal, onTick: report });
+          } finally {
+            await webhook?.close();
+          }
+        }
+
+        if (cmd === 'decide') {
+          const [ref, verdict, ...words] = rest;
+          if (!ref || !verdict || !['accept', 'edit', 'reject'].includes(verdict)) throw new Error('Usage: rufus decide <runId|#n> accept|edit|reject [note...] [--output <your version>]');
+          let runId = ref;
+          const short = ref !== undefined ? /^#?(\d{1,4})$/.exec(ref) : null;
+          if (short) {
+            const state = await loadStartState(dir);
+            const numbers = assignNumbers(state, await loop.pending());
+            const hit = Object.entries(numbers).find(([, n]) => n === Number(short[1]));
+            if (!hit) throw new Error(`Nothing is waiting as #${short[1]}. See rufus now.`);
+            runId = hit[0];
+          }
+          const output = flags['--output'];
+          const editedOutput = output === undefined ? undefined : (() => {
+            try {
+              return JSON.parse(output) as unknown;
+            } catch {
+              return output;
+            }
+          })();
+          const note = words.join(' ').trim();
+          const r = await loop.resolveHumanDecision(runId, { verdict: verdict as 'accept' | 'edit' | 'reject', ...(editedOutput !== undefined ? { editedOutput } : {}), ...(note ? { note } : {}) });
+          io.out(`Recorded ${verdict} on ${runId}: now ${r.run.status}${r.run.committed ? ' (applied)' : ''}.`);
+          if (r.held) io.out(`Draft updated; nothing was sent. Send it with: rufus decide ${ref} accept`);
+          if (r.run.commitError) io.err(`Not applied: ${r.run.commitError}`);
+          if (r.trust) io.out(`Trust for ${r.trust.record.actionType}: ${r.trust.record.autonomy}, clean streak ${r.trust.record.consecutiveClean}/${r.trust.record.promotionThreshold}${r.trust.demoted ? ' (demoted back to check)' : ''}.`);
+          if (r.promotionHint) io.out(r.promotionHint);
+          if (r.run.status !== 'accepted' && r.run.status !== 'edited' && r.run.status !== 'rejected') for (const line of formatLoopRun(r.run)) io.out(line);
+          io.out(`Saved as an example (${r.example.id}).`);
+          return;
+        }
+
+        if (rest[0] === 'status') {
+          const waiting = await loop.pending();
+          if (!waiting.length) return io.out('No loop runs waiting on you.');
+          io.out(`Waiting on you (${waiting.length}):`);
+          for (const run of waiting) for (const line of formatLoopRun(run)) io.out(line);
+          return;
+        }
+        if (once) {
+          const report = await loop.runOnce();
+          for (const line of formatLoopReport(report)) io.out(line);
+          if (report.errors.length) process.exitCode = 1;
+          return;
+        }
+        const intervalMs = parseDuration(flags['--interval'] ?? '60s');
+        io.out(`Master Loop running every ${flags['--interval'] ?? '60s'}. Ctrl+C to stop.`);
         const stop = new AbortController();
         process.once('SIGINT', () => stop.abort());
         process.once('SIGTERM', () => stop.abort());
-        const hook = config.start?.webhook;
-        const hookToken = hook?.token ?? process.env.RUFUS_WEBHOOK_TOKEN;
-        // The phone webhook is a bonus sense: if it cannot bind (network not up yet at boot), Rufus still runs.
-        // v20: the Jarvis Hub takes the webhook's place (same port by default) and keeps answering /signal.
-        const hubCfg = config.start?.hub;
-        const hubOpts = hubCfg && typeof hubCfg === 'object' ? hubCfg : {};
-        const hubToken = hubOpts.token ?? process.env.RUFUS_HUB_TOKEN ?? hookToken;
-        const stt = config.voice?.stt ?? config.telegram?.transcribe;
-        const webhook = hubCfg
-          ? await startJarvisHub({
-              dir,
-              token: hubToken ?? '',
-              ...(hookToken ? { signalToken: hookToken } : {}),
-              backend: daemon.hubBackend(),
-              ...((hubOpts.port ?? hook?.port) !== undefined ? { port: (hubOpts.port ?? hook?.port)! } : {}),
-              ...((hubOpts.host ?? hook?.host) ? { host: (hubOpts.host ?? hook?.host)! } : {}),
-              ...(stt?.command ? { transcribe: stt } : {}),
-              ...(config.voice?.tts ? { tts: config.voice.tts } : {}),
-              ...(now ? { now } : {}),
-            }).catch((err: unknown) => {
-              io.err(`Jarvis Hub not started (Rufus keeps running without it): ${err instanceof Error ? err.message : String(err)}`);
-              return undefined;
-            })
-          : hook || process.env.RUFUS_WEBHOOK_TOKEN
-            ? await startSignalWebhook({ dir, token: hookToken ?? '', ...(hook?.port !== undefined ? { port: hook.port } : {}), ...(hook?.host ? { host: hook.host } : {}), ...(now ? { now } : {}) }).catch((err: unknown) => {
-                io.err(`Signal webhook not started (Rufus keeps running without it): ${err instanceof Error ? err.message : String(err)}`);
-                return undefined;
-              })
-            : undefined;
-        if (webhook && hubCfg) {
-          io.out(`Jarvis Hub: ${webhook.url}/ (open it once with ?token=<your hub token>; for the phone mic, put it behind HTTPS, e.g. tailscale serve). Voice: ${stt?.command ? 'speech-to-text on' : 'no speech-to-text'}, ${config.voice?.tts ? 'local voice on' : 'browser voice'}.`);
-          io.out(`Signal webhook listening on ${webhook.url}/signal (Bearer token required).`);
-        } else if (webhook) io.out(`Signal webhook listening on ${webhook.url}/signal (Bearer token required).`);
-        try {
-          return await daemon.run({ intervalMs, signal: stop.signal, onTick: report });
-        } finally {
-          await webhook?.close();
-        }
-      }
-
-      if (cmd === 'decide') {
-        const [ref, verdict, ...words] = rest;
-        if (!ref || !verdict || !['accept', 'edit', 'reject'].includes(verdict)) throw new Error('Usage: rufus decide <runId|#n> accept|edit|reject [note...] [--output <your version>]');
-        let runId = ref;
-        const short = ref !== undefined ? /^#?(\d{1,4})$/.exec(ref) : null;
-        if (short) {
-          const state = await loadStartState(dir);
-          const numbers = assignNumbers(state, await loop.pending());
-          const hit = Object.entries(numbers).find(([, n]) => n === Number(short[1]));
-          if (!hit) throw new Error(`Nothing is waiting as #${short[1]}. See rufus now.`);
-          runId = hit[0];
-        }
-        const output = flags['--output'];
-        const editedOutput = output === undefined ? undefined : (() => {
+        while (!stop.signal.aborted) {
           try {
-            return JSON.parse(output) as unknown;
-          } catch {
-            return output;
+            const report = await loop.runOnce();
+            if (report.status !== 'idle' || report.errors.length) for (const line of formatLoopReport(report)) io.out(line);
+          } catch (err) {
+            io.err(`loop pass failed: ${(err as Error).message}`);
           }
-        })();
-        const note = words.join(' ').trim();
-        const r = await loop.resolveHumanDecision(runId, { verdict: verdict as 'accept' | 'edit' | 'reject', ...(editedOutput !== undefined ? { editedOutput } : {}), ...(note ? { note } : {}) });
-        io.out(`Recorded ${verdict} on ${runId}: now ${r.run.status}${r.run.committed ? ' (applied)' : ''}.`);
-        if (r.held) io.out(`Draft updated; nothing was sent. Send it with: rufus decide ${ref} accept`);
-        if (r.run.commitError) io.err(`Not applied: ${r.run.commitError}`);
-        if (r.trust) io.out(`Trust for ${r.trust.record.actionType}: ${r.trust.record.autonomy}, clean streak ${r.trust.record.consecutiveClean}/${r.trust.record.promotionThreshold}${r.trust.demoted ? ' (demoted back to check)' : ''}.`);
-        if (r.promotionHint) io.out(r.promotionHint);
-        if (r.run.status !== 'accepted' && r.run.status !== 'edited' && r.run.status !== 'rejected') for (const line of formatLoopRun(r.run)) io.out(line);
-        io.out(`Saved as an example (${r.example.id}).`);
-        return;
-      }
-
-      if (rest[0] === 'status') {
-        const waiting = await loop.pending();
-        if (!waiting.length) return io.out('No loop runs waiting on you.');
-        io.out(`Waiting on you (${waiting.length}):`);
-        for (const run of waiting) for (const line of formatLoopRun(run)) io.out(line);
-        return;
-      }
-      if (once) {
-        const report = await loop.runOnce();
-        for (const line of formatLoopReport(report)) io.out(line);
-        if (report.errors.length) process.exitCode = 1;
-        return;
-      }
-      const intervalMs = parseDuration(flags['--interval'] ?? '60s');
-      io.out(`Master Loop running every ${flags['--interval'] ?? '60s'}. Ctrl+C to stop.`);
-      const stop = new AbortController();
-      process.once('SIGINT', () => stop.abort());
-      process.once('SIGTERM', () => stop.abort());
-      while (!stop.signal.aborted) {
-        try {
-          const report = await loop.runOnce();
-          if (report.status !== 'idle' || report.errors.length) for (const line of formatLoopReport(report)) io.out(line);
-        } catch (err) {
-          io.err(`loop pass failed: ${(err as Error).message}`);
+          await new Promise<void>((resolve) => {
+            const t = setTimeout(resolve, intervalMs);
+            stop.signal.addEventListener('abort', () => (clearTimeout(t), resolve()), { once: true });
+          });
         }
-        await new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, intervalMs);
-          stop.signal.addEventListener('abort', () => (clearTimeout(t), resolve()), { once: true });
-        });
+        return;
+      } finally {
+        await closeMcp();
       }
-      return;
     }
 
     case 'missions': {
@@ -996,9 +1019,34 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
       return;
     }
 
+    case 'tools': {
+      const tools = buildTools(config, { ...(options.fetch ? { fetch: options.fetch } : {}) });
+      const closeMcp = await attachMcp(tools, config, io);
+      try {
+        const lines = formatTools(tools);
+        if (!lines.length) return io.out('No tools configured.');
+        io.out(`Tools (${lines.length}):`);
+        for (const line of lines) io.out(`  ${line}`);
+      } finally {
+        await closeMcp();
+      }
+      return;
+    }
+
     case 'chat': {
       if (!rest.length) throw new Error('Usage: rufus chat <message...>');
-      io.out(await new ChiefOfStaff({ engine, provider: config.chief?.provider }).handleMessage(rest.join(' ')));
+      if (!config.tools?.mcp || !Object.keys(config.tools.mcp).length) {
+        io.out(await new ChiefOfStaff({ engine, provider: config.chief?.provider }).handleMessage(rest.join(' ')));
+        return;
+      }
+      // v24c: with MCP servers configured, chat can look things up with their read-only tools (writes are not run here).
+      const tools = buildTools(config);
+      const closeMcp = await attachMcp(tools, config, io, { quiet: true });
+      try {
+        io.out(await new ChiefOfStaff({ engine, provider: config.chief?.provider, tools }).handleMessage(rest.join(' ')));
+      } finally {
+        await closeMcp();
+      }
       return;
     }
 
