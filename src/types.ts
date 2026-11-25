@@ -401,6 +401,38 @@ export interface TranscribeCommand {
   timeoutMs?: number;
 }
 
+/**
+ * v20: a local text-to-speech command ($0, nothing leaves the machine). In `args`, `{text}` becomes the text to speak
+ * and `{out}` a temp file the command writes audio to. Without `{text}` the text is piped on stdin; without `{out}` the
+ * audio is read from stdout. Examples: `piper` + `ffmpeg` to ogg/opus, or macOS `say -o {out}` with `outputFormat: "wav"`.
+ */
+export interface TtsCommandConfig {
+  command: string;
+  args: string[];
+  /** The audio the command produces. Default `ogg` (what Telegram voice notes want: OGG/Opus). */
+  outputFormat?: 'ogg' | 'wav' | 'mp3';
+  /** Default 60000. */
+  timeoutMs?: number;
+  /** Longest text spoken; longer replies are cut at a sentence. Default 1200 characters. */
+  maxChars?: number;
+}
+
+/** v20: when a chat reply is a voice note. `match` (the default once `tts` is set): when you sent a voice note. */
+export type VoiceReplyMode = 'never' | 'match' | 'always';
+
+/** v20: voice settings (local speech-to-text and text-to-speech, $0). */
+export interface VoiceConfig {
+  /** Text-to-speech command. Unset: Rufus never speaks (the Hub falls back to the browser's own voice). */
+  tts?: TtsCommandConfig;
+  /** Default `match` when `tts` is set, else `never`. */
+  replyMode?: VoiceReplyMode;
+  /** Speech-to-text for the Hub's live call. Default: `telegram.transcribe`. */
+  stt?: TranscribeCommand;
+}
+
+/** v20: the Ambient Jarvis Hub (a phone/desktop web app). `true`: on, sharing the webhook's port, host and token. */
+export type HubConfig = boolean | { port?: number; host?: string; token?: string };
+
 /** Beeper Desktop API settings. Env vars (RUFUS_BEEPER_*) override these; prefer env for the token. */
 export interface BeeperConfig {
   url?: string;
@@ -498,6 +530,12 @@ export interface StartConfig {
    * `RUFUS_WEBHOOK_TOKEN`. Default host `127.0.0.1`, port 8787.
    */
   webhook?: { port?: number; host?: string; token?: string };
+  /**
+   * v20: the Ambient Jarvis Hub, a token-protected web app (chat, live voice call, Now & Verify) served by the same
+   * small server as `/signal` (which keeps working exactly as before). Token: `hub.token`, `RUFUS_HUB_TOKEN`, or the
+   * webhook token. Off unless set.
+   */
+  hub?: HubConfig;
   /** Proactive heads-ups before Anchor blocks and the good-morning brief. Default on; `false` turns it off. */
   heartbeat?: false | { leadMinutes?: number; quietHours?: string | false; morningBrief?: boolean; morningUntil?: string; phrasing?: 'code' | 'ai' };
   /**
@@ -572,6 +610,8 @@ export interface RufusConfig {
   chief?: { /** Named provider (a key of `providers`) for free-form chat. */ provider?: string };
   telegram?: TelegramConfig;
   beeper?: BeeperConfig;
+  /** v20: local voice (text-to-speech replies, the Hub's live call). */
+  voice?: VoiceConfig;
   /** The scheduler stays silent in this window unless a trigger is `urgent`. */
   quietHours?: QuietHours;
   learning?: LearningConfig;

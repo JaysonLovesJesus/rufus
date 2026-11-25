@@ -16,6 +16,8 @@ export interface IncomingMessage {
   messageId?: string;
   /** Set when this is an emoji reaction the human put on a message (`text` reads like `[reacted 👍]`). */
   reaction?: { emoji: string; targetMessageId: string };
+  /** v20: this came in as a voice note (`text` is its transcript), so a spoken reply may fit. */
+  voice?: boolean;
 }
 
 /** The smallest thing a chat app needs to be: somewhere to send text, and (optionally) to read replies. */
@@ -29,6 +31,10 @@ export interface LiveChannel {
   typing?(): Promise<void>;
   /** Puts an emoji reaction on one of the human's messages (`messageId` from `IncomingMessage`). Best effort. */
   react?(messageId: string, emoji: string): Promise<void>;
+  /** v20: did this incoming message (by `IncomingMessage.id`) arrive as a voice note? */
+  isVoiceNote?(id: string): boolean;
+  /** v20: sends audio as a voice note. Returns the chat app's message id when it has one. */
+  sendVoice?(audio: Buffer, opts?: { caption?: string; filename?: string; mimeType?: string }): Promise<number | string | undefined | void>;
 }
 
 /** Pause between two chat bubbles, so they arrive like someone typing them one after the other. */

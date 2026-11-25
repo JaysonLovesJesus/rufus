@@ -762,6 +762,18 @@ It always appends one structured record to `<workspace>/self-review.jsonl`. Only
 
 The gate lives in `start-state.json` (`selfReview.lastDate`): once per local day, after `19:00`, never in quiet hours, never in an Anchor `protect_time` window (a Sabbath) or a protected block, never mid-conversation. Configure it with `"start": { "selfReview": { "after": "19:30", "repeatRejections": 3 } }`, or turn it off with `"selfReview": false`.
 
+### Ambient voice and the Jarvis Hub (v20)
+
+Talk to Rufus by voice, from Telegram or from any browser, at $0: speech in and out runs on local commands you choose.
+
+- **Local text-to-speech.** `"voice": { "tts": { "command": "...", "args": [...], "outputFormat": "ogg" } }`. In `args`, `{text}` is the text and `{out}` a temp file the command writes; without `{text}` the text arrives on stdin, without `{out}` the audio is read from stdout. Replies are rewritten for the ear first (`toSpeakableText`: no markdown, code blocks or raw URLs), cut at a sentence after `maxChars` (default 1200), and the command times out after `timeoutMs` (default 60s). Try it with `rufus say "hello there" --out hello.ogg`. Examples: `piper` piped into `ffmpeg -c:a libopus` for `ogg` (what Telegram voice notes want), or macOS `say -o {out} --data-format=LEI16@22050 -f -` (text on stdin) with `"outputFormat": "wav"`.
+- **Telegram voice-note replies.** With `tts` set, `voice.replyMode` defaults to `match`: a voice note you send gets a voice note back (`TelegramChannel.sendVoice`, a multipart `sendVoice` upload, with the text as its caption). `always` speaks every chat reply, `never` turns it off. Loop items, check-ins and cards are always text. If speaking or the upload fails, the reply goes out as plain text.
+- **The Ambient Jarvis Hub.** `"start": { "hub": true }` serves a dark, self-contained web app (no CDN, installable as a PWA) on the webhook's port, and `POST /signal` keeps working exactly as before. Open `http://127.0.0.1:8787/?token=<token>` once: the token becomes an HttpOnly, SameSite=Strict cookie (or send `Authorization: Bearer <token>`). The token is `start.hub.token`, `RUFUS_HUB_TOKEN`, or the webhook token. Browsers only allow the microphone over HTTPS, so for your phone run `tailscale serve --bg 8787` and open the `https://…ts.net` address.
+  - **Call Rufus**: one button starts a hands-free call. The page records, detects the end of your sentence (WebAudio silence detection, or tap "Done talking"), and posts the audio to `/api/voice`; the server transcribes it (`voice.stt`, else `telegram.transcribe`), asks the Chief of Staff (with its tools), speaks the reply with `voice.tts` (or the browser's own voice when unset), and the page listens again until you hang up.
+  - **Chat** (`GET /api/state`, `POST /api/chat`) shares `chat-history.jsonl` with Telegram. **Now & Verify** shows today's Anchor and every item waiting on you, with Approve / Reject buttons.
+  - **Safety.** Chat and voice are always conversation: the Chief can only queue a side effect as a Verify item, never run it, so "yes, send it" said on a call sends nothing. The only way the Hub resolves an item is `POST /api/verify/:ref/approve` with `{"confirm": true}` (the page asks for a second tap) or `/reject`. Cookie-authenticated POSTs also need an `x-rufus-hub: 1` header, so another site can't post for you.
+  - `GET /api/health` returns `{ ok, voice: { stt, tts }, pendingCount, now }`.
+
 ### Earned Trust 2.0: ladder, kill switch, audit ledger, `beeper.react` (v21)
 
 - **The ladder.** Every action type sits on one rung: `blocked` (never runs), `check` (the default: works, you verify), `auto_notify` (acts, then texts you right away: *"Just reacted 😂 to Mom — reply 'undo' or 'demote' if you want me to ask first again"*), `autonomous` (acts quietly). Only you promote: `rufus trust promote <action> --mode auto_notify|autonomous`. Clean `auto_notify` runs build the streak toward a suggested `autonomous`.
@@ -791,7 +803,7 @@ Some asks take more than one look: "research standing desks under $500 and get b
 
 ### What is primary and what is legacy
 
-`rufus --help` is the Jarvis core: nine **primary commands**, `start`, `now`, `anchor`, `trust`, `decide`, `chat`, `missions`, `collect`, `embed`, with their options. Everything else (`init`, `bridge`, `loop`, `signal`, `run`/`pending`/`answer`, `tick`/`watch`/`emit`, `lessons`/`propose`, `seed`, `mine`, `replay`/`compare`, `backtest`, `context`, `demo`) still works exactly as before, listed one line each under **Advanced / Legacy**; `rufus --help --all` spells out their options. `rufus bridge` and `rufus loop` are each half of what `rufus start` does.
+`rufus --help` is the Jarvis core: ten **primary commands**, `start`, `now`, `anchor`, `trust`, `decide`, `chat`, `missions`, `say`, `collect`, `embed`, with their options. Everything else (`init`, `bridge`, `loop`, `signal`, `run`/`pending`/`answer`, `tick`/`watch`/`emit`, `lessons`/`propose`, `seed`, `mine`, `replay`/`compare`, `backtest`, `context`, `demo`) still works exactly as before, listed one line each under **Advanced / Legacy**; `rufus --help --all` spells out their options. `rufus bridge` and `rufus loop` are each half of what `rufus start` does.
 
 ## The One Master Loop (v11)
 

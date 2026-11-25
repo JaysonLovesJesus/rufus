@@ -26,6 +26,10 @@ import { assignNumbers, loadStartState, saveStartState, takeCheckinRequest, type
 import { formatMissionDelivery, listMissions, loadMission, runMission, saveMission, type MissionRecord } from './missions';
 import { MISSION_START_TOOL, missionTools } from '../tools/mission-tools';
 import { parseAutonomyCommand, runAutonomyCommand } from './autonomy';
+import { commandSynthesizer, resolveVoiceReplyMode, shouldSpeakReply, type Synthesizer } from '../channels/voice';
+import type { TtsCommandConfig, VoiceReplyMode } from '../types';
+import { loadChatHistory } from '../chief/history';
+import type { HubBackend, HubBlock, HubDecision, HubItem, HubState } from './hub';
 
 /**
  * `rufus start`: ONE daemon for everything.
@@ -80,6 +84,12 @@ export interface UnifiedDaemonOptions {
    * background with read-only tools only, and the result is sent to you once when done. Default on; `false`: off.
    */
   missions?: MissionDaemonOptions | false;
+  /**
+   * v20: spoken replies. With `tts` set (a local command, or a function in tests), a chat reply to a voice note comes
+   * back as a voice note too (`replyMode: 'match'`, the default), or every chat reply does (`'always'`). Loop items,
+   * check-ins and cards are always text. If speaking fails, the reply is sent as text.
+   */
+  voice?: { tts?: TtsCommandConfig | Synthesizer; replyMode?: VoiceReplyMode };
   now?: () => Date;
 }
 
@@ -171,11 +181,16 @@ const oneLine = (s: string, max = 200): string => {
 class RelayChannel implements LiveChannel {
   inbox: IncomingMessage[] = [];
   constructor(
-    private readonly sendText: (text: string, relayed: boolean) => Promise<void>,
+    /** `chat`: a Chief of Staff reply (may be spoken); otherwise a card. */
+    private readonly sendText: (text: string, chat: boolean) => Promise<void>,
     private readonly real: LiveChannel,
   ) {}
   async send(text: string): Promise<void> {
     await this.sendText(text, true);
+  }
+  /** Cards stay plain text (no buttons), and are never spoken. */
+  async sendCard(_card: unknown, text: string): Promise<void> {
+    await this.sendText(text, false);
   }
   async typing(): Promise<void> {
     await this.real.typing?.().catch(() => undefined);
@@ -231,6 +246,10 @@ export class UnifiedDaemon {
   private readonly followUps = new Set<string>();
   /** The state of the current pass, so the relay's sends are recorded in it. */
   private current?: StartState;
+  private readonly synth?: Synthesizer;
+  private readonly voiceMode: VoiceReplyMode;
+  /** Set while the chat being answered this pass came in as a voice note. */
+  private voiceTurn = false;
 
   constructor(opts: UnifiedDaemonOptions) {
     this.loop = opts.loop;
@@ -249,6 +268,9 @@ export class UnifiedDaemon {
     this.missionOpts = opts.missions === false ? false : { ...opts.missions, concurrency: Math.max(1, Math.floor(opts.missions?.concurrency ?? 1)) };
     this.pendingTtlMs = opts.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
     this.bubblePauseMs = Math.max(0, opts.bubblePauseMs ?? 350);
+    const tts = opts.voice?.tts;
+    this.synth = tts && (typeof tts === 'function' || tts.command) ? commandSynthesizer(tts) : undefined;
+    this.voiceMode = this.synth ? resolveVoiceReplyMode({ tts: true, ...(opts.voice?.replyMode ? { replyMode: opts.voice.replyMode } : {}) }) : 'never';
     // Your schedule and goals are editable from chat ("remove the study block"): private and local, so no Verify item.
     if (!this.loop.tools.has(ANCHOR_TOOL)) this.loop.tools.register(anchorUpdateTool());
     // Corrections, preferences and facts said in chat are saved as feedback the next triage/chat pass learns from.
@@ -261,7 +283,7 @@ export class UnifiedDaemon {
     if (!this.loop.listHandlers().some((h) => h.id === phoneSignalHandler.id)) this.loop.addHandler(phoneSignalHandler);
     if (this.chief?.hasTools && !this.loop.listSensors().some((x) => x.id === 'inbox')) this.loop.addSensor(inboxSensor(this.loop.dir));
     if (this.channel) {
-      this.relay = new RelayChannel((text, relayed) => this.say(text, relayed), this.channel);
+      this.relay = new RelayChannel((text, chat) => this.say(text, true, false, false, chat), this.channel);
       this.bridge = new CardBridge({
         engine: this.engine,
         channel: this.relay,
@@ -415,7 +437,11 @@ export class UnifiedDaemon {
         report.errors.push(`deliver: ${message(err)}`);
       }
       if (this.bridge) {
-        report.bridge = await this.bridge.tick();
+        try {
+          report.bridge = await this.bridge.tick();
+        } finally {
+          this.voiceTurn = false;
+        }
         if (report.bridge.error) report.errors.push(`channel: ${report.bridge.error}`);
       }
       // Chat queued an action ("send Sam ..."): plan and deliver it now, so its "1" works right after the reply.
@@ -768,7 +794,10 @@ export class UnifiedDaemon {
     const pending = await this.loop.pending();
     assignNumbers(state, pending);
     const delivered = pending.filter((r) => state.delivered.includes(r.id)).sort((a, b) => (state.numbers[a.id] ?? 0) - (state.numbers[b.id] ?? 0));
-    const passOn = (): void => void this.relay!.inbox.push(msg);
+    const passOn = (): void => {
+      if (msg.voice || this.channel?.isVoiceNote?.(msg.id)) this.voiceTurn = true;
+      this.relay!.inbox.push(msg);
+    };
     // With a flow card open, bare answers belong to the card: loop items then need "#n".
     const cardsOpen = (await this.engine.pending()).length > 0;
     const parsed: LoopReply | undefined = parseLoopReply(text, cardsOpen ? 0 : delivered.length);
@@ -911,14 +940,128 @@ export class UnifiedDaemon {
    * Records what we send (so its echo is ignored), then sends it, or prints it when there is no channel. What the daemon
    * itself says (items, heads-ups) also goes into the chat history; relayed chief replies are recorded by the chief.
    */
-  private async say(text: string, relayed = false, record = false, proactive = false): Promise<void> {
+  private async say(text: string, relayed = false, record = false, proactive = false, chat = false): Promise<void> {
     const state = this.current;
     if (state) {
       state.sent = [...state.sent, hash(text)].slice(-KEEP_SENT);
       await this.persist();
     }
-    if (this.channel) await this.channel.send(text);
-    else this.output(text);
+    if (this.channel) {
+      if (!(chat && shouldSpeakReply(this.voiceMode, this.voiceTurn) && (await this.speak(text)))) await this.channel.send(text);
+    } else this.output(text);
     if (!relayed && (this.chief || record || proactive)) await appendChatTurns(this.loop.dir, [{ role: 'assistant', text, at: this.now().toISOString(), ...(proactive ? { proactive: true } : {}) }]).catch(() => undefined);
+  }
+
+  /**
+   * v20: sends a chat reply as a voice note (the text as its caption, or after it when too long for one). False when the
+   * channel can't take voice or speaking failed: the caller then sends plain text, so nothing is ever lost.
+   */
+  private async speak(text: string): Promise<boolean> {
+    if (!this.synth || !this.channel?.sendVoice || !text.trim()) return false;
+    let audio;
+    try {
+      audio = await this.synth(text);
+    } catch {
+      return false;
+    }
+    const caption = text.length <= 1000 ? text : undefined;
+    try {
+      await this.channel.sendVoice(audio.audio, { filename: `rufus.${audio.ext}`, mimeType: audio.mimeType, ...(caption ? { caption } : {}) });
+    } catch {
+      return false;
+    }
+    if (!caption) await this.channel.send(text);
+    return true;
+  }
+
+  // ---------- v20: the Jarvis Hub ----------
+
+  /** Runs `fn` between passes (never during one), so the Hub and the daemon never edit state at the same time. */
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(fn);
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** What the Jarvis Hub (`startJarvisHub`) talks to. Chat and voice reach the Chief of Staff; only `decide` resolves items. */
+  hubBackend(): HubBackend {
+    return {
+      chat: (text) => this.hubChat(text),
+      state: () => this.hubState(),
+      decide: (ref, verdict, note) => this.hubDecide(ref, verdict, note),
+    };
+  }
+
+  /**
+   * A Hub chat turn (typed or spoken): always conversation. Like Telegram chat, it can only QUEUE a side effect as a
+   * Verify item; nothing it says is ever read as an approval. The queued item is planned right away so it shows up.
+   */
+  private hubChat(text: string): Promise<{ text: string; bubbles?: string[]; queued?: string[] }> {
+    return this.exclusive(async () => {
+      if (!this.chief) return { text: 'Chat is off on this Rufus.' };
+      const state = await loadStartState(this.loop.dir);
+      state.lastHumanAt = this.now().toISOString();
+      if (state.think) state.think.unanswered = 0;
+      await saveStartState(this.loop.dir, state);
+      const reply = await this.chief.handle(text);
+      if (this.chief.drainQueued()) {
+        const again = await this.loop.runOnce().catch(() => undefined);
+        for (const r of again?.runs ?? []) if (r.actionType?.startsWith('chief.')) this.followUps.add(r.runId);
+      }
+      const shown = reply.silent ? '' : reply.react ? reply.react : reply.text;
+      return { text: shown, ...(reply.bubbles && !reply.silent && !reply.react ? { bubbles: reply.bubbles } : {}), ...(reply.queued?.length ? { queued: reply.queued } : {}) };
+    });
+  }
+
+  private async hubState(): Promise<HubState> {
+    const now = this.now();
+    const [anchor, pending, state, chat] = await Promise.all([loadAnchor(this.loop.dir, now), this.loop.pending(), loadStartState(this.loop.dir), loadChatHistory(this.loop.dir, 60).catch(() => [])]);
+    const numbers = assignNumbers(state, pending); // a read: the numbers a pass would give, not saved
+    const block = (b: ScheduleBlock): HubBlock => ({ start: b.start, end: b.end, title: b.title, kind: b.kind, status: b.status });
+    const { current, next } = scheduleNow(anchor, now);
+    const items: HubItem[] = [...pending]
+      .sort((a, b) => Number(b.urgency === 'urgent') - Number(a.urgency === 'urgent') || (numbers[a.id] ?? 0) - (numbers[b.id] ?? 0))
+      .map((r) => ({
+        id: r.id,
+        ...(numbers[r.id] !== undefined ? { n: numbers[r.id] } : {}),
+        stage: r.status === 'awaiting_human_plan' ? 'plan' : r.status === 'awaiting_human_execute' ? 'execute' : 'verify',
+        urgent: r.urgency === 'urgent',
+        text: formatLoopItem(r, numbers[r.id] ?? 0, { multi: true, hint: false }),
+      }));
+    const today = anchor.schedule.date === localDate(now) ? [...anchor.schedule.blocks].sort((a, b) => hhmmToMin(a.start) - hhmmToMin(b.start)) : [];
+    return { now: now.toISOString(), ...(current ? { current: block(current) } : {}), ...(next ? { next: block(next) } : {}), schedule: today.map(block), pending: items, chat };
+  }
+
+  /** The Hub's Approve / Reject buttons. `ref` is a run id, or `n` / `#n` as shown in chat. */
+  private hubDecide(ref: string, verdict: 'accept' | 'reject', note?: string): Promise<HubDecision> {
+    return this.exclusive(async () => {
+      const state = await loadStartState(this.loop.dir);
+      const pending = await this.loop.pending();
+      assignNumbers(state, pending);
+      const short = /^#?(\d{1,4})$/.exec(ref.trim());
+      const target = short ? pending.find((r) => state.numbers[r.id] === Number(short[1])) : pending.find((r) => r.id === ref.trim());
+      if (!target) return { ok: false, code: 404, message: `Nothing is waiting as ${short ? `#${short[1]}` : ref}.` };
+      const n = state.numbers[target.id];
+      const stage = target.status;
+      let result;
+      try {
+        result = await this.loop.resolveHumanDecision(target.id, { verdict, ...(note ? { note } : {}) });
+      } catch (err) {
+        return { ok: false, code: 409, message: `Couldn't apply that to #${n}: ${oneLine(message(err))}` };
+      }
+      const after = result.run;
+      state.delivered = state.delivered.filter((id) => id !== target.id);
+      if (state.lastItem === target.id) delete state.lastItem;
+      if (['awaiting_human_plan', 'awaiting_human_execute', 'awaiting_human_verify'].includes(after.status)) this.followUps.add(target.id);
+      await saveStartState(this.loop.dir, state);
+      const what =
+        stage === 'awaiting_human_execute'
+          ? verdict === 'accept' ? `#${n} marked done.` : `#${n} dropped.`
+          : verdict === 'accept'
+            ? `#${n} approved.${after.committed ? ' Done.' : ''}${after.commitError ? ` Not applied: ${oneLine(after.commitError)}` : ''}`
+            : `#${n} rejected.`;
+      await appendChatTurns(this.loop.dir, [{ role: 'assistant', text: what, at: this.now().toISOString() }]).catch(() => undefined);
+      return { ok: true, message: what, status: after.status, committed: !!after.committed };
+    });
   }
 }

@@ -49,6 +49,8 @@ import { UnifiedDaemon, type StartTickReport } from './unified/daemon';
 import { DEFAULT_THINK_EVERY } from './unified/think';
 import { REMEMBER_TOOL, rememberTool } from './chief/learning';
 import { startSignalWebhook } from './unified/webhook';
+import { startJarvisHub } from './unified/hub';
+import { synthesizeSpeech, toSpeakableText } from './channels/voice';
 import { nowSummary } from './unified/now';
 import { assignNumbers, loadStartState, requestCheckin, saveStartState } from './unified/state';
 import { cancelMission, createMission, describeMission, formatMissionList, resolveMission } from './unified/missions';
@@ -78,6 +80,7 @@ Primary commands:
   missions [list | start <goal...> [--context <text>] | show <id> | cancel <id>]
                                background research and prep: \`rufus start\` runs them with read-only tools and
                                texts you the result when done
+  say <text...> [--out <file>] speak text with your local voice.tts command (a $0 test; writes the audio file)
   collect <source> <path...> [--limit N] [--dry-run] [--ignore a,b] [--me addr,addr]
                                add local activity to your life corpus: files, calendar, browser, email, ai-prompts,
                                reactions (a Beeper messages export: what you only answered with an emoji)
@@ -268,7 +271,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const showAll = bool('--all');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
-  for (const flag of ['--dir', '--checkin', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data', '--context', '--hours']) {
+  for (const flag of ['--dir', '--checkin', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data', '--context', '--hours', '--out']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
@@ -825,6 +828,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
           breakDigest: config.start?.breakDigest === false ? false : (config.start?.breakDigest ?? {}),
           selfReview: config.start?.selfReview === false ? false : { ...(config.start?.selfReview ?? {}) },
           ...(config.start?.missions !== undefined ? { missions: config.start.missions } : {}),
+          ...(config.voice?.tts ? { voice: { tts: config.voice.tts, ...(config.voice.replyMode ? { replyMode: config.voice.replyMode } : {}) } } : {}),
           ...(now ? { now } : {}),
         });
         const report = (r: StartTickReport): void => {
@@ -846,13 +850,36 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         const hook = config.start?.webhook;
         const hookToken = hook?.token ?? process.env.RUFUS_WEBHOOK_TOKEN;
         // The phone webhook is a bonus sense: if it cannot bind (network not up yet at boot), Rufus still runs.
-        const webhook = hook || process.env.RUFUS_WEBHOOK_TOKEN
-          ? await startSignalWebhook({ dir, token: hookToken ?? '', ...(hook?.port !== undefined ? { port: hook.port } : {}), ...(hook?.host ? { host: hook.host } : {}), ...(now ? { now } : {}) }).catch((err: unknown) => {
-              io.err(`Signal webhook not started (Rufus keeps running without it): ${err instanceof Error ? err.message : String(err)}`);
+        // v20: the Jarvis Hub takes the webhook's place (same port by default) and keeps answering /signal.
+        const hubCfg = config.start?.hub;
+        const hubOpts = hubCfg && typeof hubCfg === 'object' ? hubCfg : {};
+        const hubToken = hubOpts.token ?? process.env.RUFUS_HUB_TOKEN ?? hookToken;
+        const stt = config.voice?.stt ?? config.telegram?.transcribe;
+        const webhook = hubCfg
+          ? await startJarvisHub({
+              dir,
+              token: hubToken ?? '',
+              ...(hookToken ? { signalToken: hookToken } : {}),
+              backend: daemon.hubBackend(),
+              ...((hubOpts.port ?? hook?.port) !== undefined ? { port: (hubOpts.port ?? hook?.port)! } : {}),
+              ...((hubOpts.host ?? hook?.host) ? { host: (hubOpts.host ?? hook?.host)! } : {}),
+              ...(stt?.command ? { transcribe: stt } : {}),
+              ...(config.voice?.tts ? { tts: config.voice.tts } : {}),
+              ...(now ? { now } : {}),
+            }).catch((err: unknown) => {
+              io.err(`Jarvis Hub not started (Rufus keeps running without it): ${err instanceof Error ? err.message : String(err)}`);
               return undefined;
             })
-          : undefined;
-        if (webhook) io.out(`Signal webhook listening on ${webhook.url}/signal (Bearer token required).`);
+          : hook || process.env.RUFUS_WEBHOOK_TOKEN
+            ? await startSignalWebhook({ dir, token: hookToken ?? '', ...(hook?.port !== undefined ? { port: hook.port } : {}), ...(hook?.host ? { host: hook.host } : {}), ...(now ? { now } : {}) }).catch((err: unknown) => {
+                io.err(`Signal webhook not started (Rufus keeps running without it): ${err instanceof Error ? err.message : String(err)}`);
+                return undefined;
+              })
+            : undefined;
+        if (webhook && hubCfg) {
+          io.out(`Jarvis Hub: ${webhook.url}/ (open it once with ?token=<your hub token>; for the phone mic, put it behind HTTPS, e.g. tailscale serve). Voice: ${stt?.command ? 'speech-to-text on' : 'no speech-to-text'}, ${config.voice?.tts ? 'local voice on' : 'browser voice'}.`);
+          io.out(`Signal webhook listening on ${webhook.url}/signal (Bearer token required).`);
+        } else if (webhook) io.out(`Signal webhook listening on ${webhook.url}/signal (Bearer token required).`);
         try {
           return await daemon.run({ intervalMs, signal: stop.signal, onTick: report });
         } finally {
@@ -954,6 +981,19 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         return;
       }
       throw new Error('Usage: rufus missions [list | start <goal...> [--context <text>] | show <id> | cancel <id>]');
+    }
+
+    case 'say': {
+      const text = rest.join(' ').trim();
+      if (!text) throw new Error('Usage: rufus say <text...> [--out <file>]');
+      const tts = config.voice?.tts;
+      if (!tts?.command) throw new Error('No voice configured: set "voice": { "tts": { "command": ..., "args": [...] } } in config.json (see the README).');
+      const spoken = await synthesizeSpeech(text, tts);
+      const out = path.resolve(flags['--out'] ?? `rufus-say.${spoken.ext}`);
+      await fs.writeFile(out, spoken.audio);
+      io.out(`Spoke: "${toSpeakableText(text, tts.maxChars)}"`);
+      io.out(`Wrote ${spoken.audio.length} bytes (${spoken.mimeType}) to ${out}`);
+      return;
     }
 
     case 'chat': {

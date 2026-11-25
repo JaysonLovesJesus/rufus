@@ -8,6 +8,9 @@ import { commandTranscriber, type Transcriber } from './transcribe';
 export const DEFAULT_TELEGRAM_API = 'https://api.telegram.org';
 /** Telegram rejects messages longer than 4096 characters. */
 const MAX_TEXT = 4000;
+/** Telegram's media caption limit. */
+const MAX_CAPTION = 1024;
+const mimeOf = (file: string): string => (/\.mp3$/i.test(file) ? 'audio/mpeg' : /\.m4a$/i.test(file) ? 'audio/mp4' : /\.wav$/i.test(file) ? 'audio/wav' : 'audio/ogg');
 
 /** Telegram isn't reachable (offline, DNS, timeout). Safe to retry later. */
 export class TelegramOfflineError extends Error {
@@ -101,6 +104,8 @@ export class TelegramChannel implements LiveChannel {
   private readonly transcriber?: Transcriber;
   private offset?: number;
   private loaded = false;
+  /** Recent incoming ids that were voice notes (bounded). */
+  private voiceIds: string[] = [];
 
   constructor(private readonly opts: TelegramOptions) {
     const api = (opts.apiUrl ?? DEFAULT_TELEGRAM_API).replace(/\/+$/, '');
@@ -173,10 +178,33 @@ export class TelegramChannel implements LiveChannel {
       const at = m.date ? new Date(m.date * 1000).toISOString() : undefined;
       // Telegram dates are whole seconds, so treat the second `since` falls in as still new.
       if (sinceMs !== undefined && m.date && (m.date + 1) * 1000 <= sinceMs) continue;
-      const text = m.text?.trim() ? m.text : await this.transcribeAudio(audio!.file_id);
-      if (text) out.push({ id: `tg_${u.update_id}`, text, messageId: String(m.message_id), ...(at ? { at } : {}) });
+      const spoken = !m.text?.trim();
+      const text = spoken ? await this.transcribeAudio(audio!.file_id) : m.text;
+      if (!text) continue;
+      if (spoken) this.rememberVoice(`tg_${u.update_id}`);
+      out.push({ id: `tg_${u.update_id}`, text, messageId: String(m.message_id), ...(at ? { at } : {}) });
     }
     return out;
+  }
+
+  /**
+   * v20: sends audio as a voice note (Telegram's `sendVoice`, a multipart upload). Telegram plays OGG/Opus (also MP3
+   * and M4A) as a voice note. `caption` is cut to Telegram's 1024 characters. Returns the message id.
+   */
+  async sendVoice(audio: Buffer, opts: { caption?: string; filename?: string; mimeType?: string } = {}): Promise<number | undefined> {
+    if (!audio?.length) throw new Error('sendVoice needs audio');
+    const form = new FormData();
+    form.append('chat_id', this.opts.chatId);
+    const filename = (opts.filename ?? 'reply.ogg').replace(/[^\w.-]/g, '_');
+    form.append('voice', new Blob([new Uint8Array(audio)], { type: opts.mimeType ?? mimeOf(filename) }), filename);
+    if (opts.caption?.trim()) form.append('caption', opts.caption.trim().slice(0, MAX_CAPTION));
+    const sent = await this.call<{ message_id?: number }>('sendVoice', form, 60_000);
+    return sent.message_id;
+  }
+
+  /** v20: did this incoming message (an `IncomingMessage.id` from `poll`) arrive as a voice note or audio? */
+  isVoiceNote(id: string): boolean {
+    return this.voiceIds.includes(id);
   }
 
   /** Never throws: `{ online: false, reason }` when the token or network is bad. */
@@ -216,6 +244,10 @@ export class TelegramChannel implements LiveChannel {
     } finally {
       if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  private rememberVoice(id: string): void {
+    this.voiceIds = [...this.voiceIds, id].slice(-200);
   }
 
   private async download(filePath: string): Promise<Response> {
@@ -271,14 +303,16 @@ export class TelegramChannel implements LiveChannel {
     return last;
   }
 
-  private async call<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  private async call<T = unknown>(method: string, params: Record<string, unknown> | FormData = {}, defaultTimeoutMs = 15_000): Promise<T> {
     let res: Response;
     try {
+      // A FormData body sets its own multipart content-type (with the boundary).
+      const multipart = params instanceof FormData;
       res = await this.doFetch(`${this.base}/${method}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(params),
-        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 15_000),
+        ...(multipart ? {} : { headers: { 'content-type': 'application/json' } }),
+        body: multipart ? params : JSON.stringify(params),
+        signal: AbortSignal.timeout(this.opts.timeoutMs ?? defaultTimeoutMs),
       });
     } catch (err) {
       throw new TelegramOfflineError(this.scrub(err instanceof Error ? err.message : String(err)));
