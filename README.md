@@ -686,16 +686,26 @@ Today:
   > 07:30-09:00 focus Deep work
     12:00-13:00 personal Gym
 Goals: [high] Ship the beta
-Waiting on you (2):
+Waiting on you (1):
   [#1] (urgent) verify: reply.chat: Draft a concise reply to Sam's chat message -> "Thursday works. 12:30?"
-  [#2] verify: triage.ignore: Ignore Alex's chat message (a short acknowledgement, nothing to answer)
-Done on its own (last 24h): 1
+Done on its own (last 24h): 2
+  triage.ignore: Ignore Alex's chat message (a short acknowledgement, nothing to answer)
   schedule.block: Put "Standup" (meeting) on 2026-11-25 at 09:30-09:45 without overlapping anything.
 Earned Trust:
   reply.chat  check  accepted 4 · edited 1 · rejected 0 · clean streak 2/10
 ```
 
 It also asks a running `rufus start` for a check-in on its next pass.
+
+### Alive conversation (v13)
+
+- **Time-aware.** Every chat (and every Master Loop prompt) gets the exact local date, weekday, `HH:MM` and today's current + next Anchor block, computed by code.
+- **Only relevant memories.** Corpus facts reach a reply only with a score of at least `0.35` and real overlap with what you said; greetings and "ok thanks" skip the lookup entirely.
+- **Short-term memory.** The last 12 turns live in `<workspace>/chat-history.jsonl` (with times), so a correction 10 seconds later is understood. Several texts in one poll are merged into **one** turn and get **one** reply.
+- **Act first, reply second.** With tools configured, the chief can call read-only tools (`calendar.read`, `beeper.read`, `gmail.read`, ...) with `TOOL_CALL: {"tool":..,"args":{..}}` up to 3 times before answering. Outside side effects (`beeper.send`, `shell.run`) are never run from chat: they become an urgent Verify item delivered in the same pass, so "1" runs them. `anchor.update` (add/move/remove a block, add/drop a goal) only touches your private `anchor.json`, so it runs right away when you ask.
+- **Silent no-ops.** `triage.ignore` (acknowledgements) completes on its own at $0; it never waits on you. A Beeper chat titled "Rufus" (or any of `sensors.beeper.ignoreChatTitles`) is never sensed, so Rufus never answers itself.
+- **Proactive heartbeat ($0).** A one-line heads-up ~10 minutes before a real (non-break) block, and a 3-line good-morning brief on the first `phone.unlocked` of the morning. Nothing during quiet hours (`22:00-07:00` by default). Tune with `"start": { "heartbeat": { "leadMinutes": 10, "quietHours": "22:00-07:00" } }` or turn it off with `"heartbeat": false`.
+- **Phone webhook.** `"start": { "webhook": { "port": 8787, "host": "0.0.0.0", "token": "<16+ chars>" } }` (or `RUFUS_WEBHOOK_TOKEN`) opens `POST /signal` (`Authorization: Bearer <token>`, body `{"kind":"phone.unlocked"}`, `{"kind":"app.opened","text":"Maps"}`, `{"kind":"location.changed","data":{...}}`). Each valid signal is appended to `inbox.jsonl`. Point a MacroDroid or Tasker HTTP action at it.
 
 ### What is primary and what is legacy
 

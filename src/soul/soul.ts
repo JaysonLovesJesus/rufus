@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { Anchor } from '../anchor/anchor';
+import { localDate, toMinutes, type Anchor, type ScheduleBlock } from '../anchor/anchor';
 import type { CorpusHit } from '../corpus';
 import { clip } from '../corpus/types';
 
@@ -77,7 +77,114 @@ export function anchorBrief(anchor: Anchor, opts: { maxGoals?: number; maxBlocks
   return lines.join('\n');
 }
 
+// ---------- time awareness ----------
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const hhmm = (d: Date): string => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+
+type BlockView = Pick<ScheduleBlock, 'start' | 'end' | 'kind' | 'title'>;
+
+/** Exact local time facts, computed by code so the model never has to guess what day or hour it is. */
+export interface TimeFacts {
+  /** `YYYY-MM-DD`, local. */
+  date: string;
+  weekday: string;
+  /** `HH:MM`, 24-hour, local. */
+  time: string;
+  /** IANA zone of this machine, when known. */
+  timeZone?: string;
+  /** The Anchor block happening right now (today's schedule only). */
+  currentBlock?: BlockView;
+  /** The next Anchor block today. */
+  nextBlock?: BlockView;
+}
+
+const slim = (b: ScheduleBlock): BlockView => ({ start: b.start, end: b.end, kind: b.kind, title: b.title });
+
+/** Today's current and next schedule blocks from the Anchor (none when the Anchor's schedule is for another day). */
+export function scheduleNow(anchor: Anchor | undefined, now: Date): { current?: ScheduleBlock; next?: ScheduleBlock } {
+  if (!anchor || anchor.schedule.date !== localDate(now)) return {};
+  const mins = now.getHours() * 60 + now.getMinutes();
+  const blocks = anchor.schedule.blocks.filter((b) => b.status !== 'skipped').sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
+  const current = blocks.find((b) => toMinutes(b.start) <= mins && mins < toMinutes(b.end));
+  const next = blocks.find((b) => toMinutes(b.start) > mins);
+  return { ...(current ? { current } : {}), ...(next ? { next } : {}) };
+}
+
+export function timeFacts(now: Date, anchor?: Anchor): TimeFacts {
+  let timeZone: string | undefined;
+  try {
+    timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    /* unknown */
+  }
+  const { current, next } = scheduleNow(anchor, now);
+  return {
+    date: localDate(now),
+    weekday: WEEKDAYS[now.getDay()]!,
+    time: hhmm(now),
+    ...(timeZone ? { timeZone } : {}),
+    ...(current ? { currentBlock: slim(current) } : {}),
+    ...(next ? { nextBlock: slim(next) } : {}),
+  };
+}
+
+/** "Wednesday 2026-11-25, 08:00 local time. Now: 07:30-09:00 focus Deep work. Next: 12:00-13:00 personal Gym." */
+export function timeBrief(now: Date, anchor?: Anchor): string {
+  const t = timeFacts(now, anchor);
+  const block = (b: BlockView): string => `${b.start}-${b.end} ${b.kind} ${b.title}`;
+  return [
+    `${t.weekday} ${t.date}, ${t.time} local time${t.timeZone ? ` (${t.timeZone})` : ''}.`,
+    t.currentBlock ? `Now: ${block(t.currentBlock)}.` : 'Nothing scheduled right now.',
+    t.nextBlock ? `Next: ${block(t.nextBlock)}.` : 'Nothing else scheduled today.',
+  ].join(' ');
+}
+
+// ---------- corpus relevance ----------
+
+/** Below this score a corpus hit is noise (a stray word in common) and never reaches the model. */
+export const MIN_FACT_SCORE = 0.35;
+
+const SMALL_TALK = new Set([
+  'hi', 'hey', 'hello', 'yo', 'sup', 'hiya', 'howdy', 'morning', 'good', 'gm', 'night', 'gn', 'evening', 'afternoon',
+  'ok', 'okay', 'k', 'kk', 'thanks', 'thank', 'you', 'thx', 'ty', 'cool', 'nice', 'great', 'yes', 'yep', 'yeah', 'no', 'nope',
+  'sure', 'lol', 'haha', 'got', 'it', 'sounds', 'perfect', 'awesome', 'done', 'np', 'there', 'rufus', 'whats', 'up', 'how', 'are',
+  'u', 'r', 'doing', 'all', 'right', 'alright', 'fine', 'and', 'so', 'a', 'the', 'to', 'is', 'im', 'i', 'me', 'please', 'pls',
+]);
+/** Words that carry no topic, so they never count toward (or against) a keyword match. */
+const FUNCTION_WORDS = new Set([
+  'what', 'when', 'where', 'who', 'why', 'which', 'does', 'do', 'did', 'can', 'could', 'will', 'would', 'should', 'was', 'were',
+  'be', 'been', 'an', 'of', 'in', 'on', 'for', 'with', 'my', 'at', 'by', 'or', 'this', 'that', 'these', 'those', 'we', 'our',
+  'your', 'he', 'she', 'they', 'them', 'his', 'her', 'their', 'have', 'has', 'had', 'from', 'about', 'any', 'some', 'just', 'now',
+  'today', 'tomorrow', 'need', 'want', 'get', 'let', 'lets', 'tell', 'know', 'think', 'still', 'too', 'also', 'if', 'then', 'than',
+]);
+const wordsOf = (s: string): string[] => s.toLowerCase().replace(/['’]/g, '').split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+
+/** "hi", "ok thanks", "good morning!" and the like: nothing worth a corpus lookup. */
+export function isSmallTalk(text: string): boolean {
+  const w = wordsOf(text);
+  return w.length === 0 || w.every((x) => SMALL_TALK.has(x));
+}
+
+/**
+ * Only the hits that clearly relate to `query`: a score of at least `minScore`, and either semantic similarity at that
+ * level or keyword overlap with at least a third of the query's meaningful words. Small talk gets nothing at all.
+ */
+export function relevantHits(hits: CorpusHit[], query: string, opts: { minScore?: number } = {}): CorpusHit[] {
+  if (isSmallTalk(query)) return [];
+  const min = opts.minScore ?? MIN_FACT_SCORE;
+  const content = new Set(wordsOf(query).filter((w) => !SMALL_TALK.has(w) && !FUNCTION_WORDS.has(w) && w.length > 1));
+  return hits.filter((h) => {
+    if (!(h.score >= min)) return false;
+    if (h.similarity !== undefined && h.similarity >= min) return true;
+    const share = content.size ? h.matched.filter((m) => content.has(m)).length / content.size : 0;
+    return h.matched.length > 0 && share >= 1 / 3;
+  });
+}
+
 export interface PersonaInput {
+  /** The current time: adds a "Right now" section (date, weekday, local time, current and next Anchor block). */
+  now?: Date;
   soul?: string;
   anchor?: Anchor;
   /** Past human verdicts, closest first. */
@@ -92,6 +199,7 @@ export interface PersonaInput {
  */
 export function buildPersona(input: PersonaInput): string {
   const parts: string[] = [];
+  if (input.now) parts.push(`## Right now\n${timeBrief(input.now, input.anchor)}`);
   if (input.soul?.trim()) parts.push(`## Who you work for (SOUL.md)\n${clip(input.soul.trim(), MAX_SOUL_CHARS)}`);
   const brief = input.anchor ? anchorBrief(input.anchor) : '';
   if (brief) parts.push(`## The Anchor (what matters right now)\n${brief}`);

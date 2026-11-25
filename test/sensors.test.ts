@@ -175,14 +175,14 @@ describe('messageTriageHandler', () => {
     expect(classifyByCode('ok so about the contract, can you check clause 4 tonight')).toBeUndefined();
   });
 
-  it('without a model: acknowledgements wait as normal; real messages become your step, urgent ones flagged', async () => {
+  it('without a model: acknowledgements complete silently at $0; real messages become your step, urgent ones flagged', async () => {
     const dir = await tempDir();
     const loop = new MasterLoop({ dir, sensors: [sensorOf([msg('1', 'ok thanks'), msg('2', 'Help, call me asap'), msg('3', 'Lunch Thursday?')])], handlers: [messageTriageHandler()], now: () => NOW });
     const r = await loop.runOnce();
     expect(r.cost).toBe(0);
     const runs = await Promise.all(r.runs.map((x) => loop.getRun(x.runId)));
     expect(runs.map((x) => [x.status, x.actionType, x.urgency])).toEqual([
-      ['awaiting_human_verify', 'triage.ignore', 'normal'],
+      ['completed', 'triage.ignore', 'normal'],
       ['awaiting_human_execute', 'reply.chat', 'urgent'],
       ['awaiting_human_execute', 'reply.chat', 'normal'],
     ]);

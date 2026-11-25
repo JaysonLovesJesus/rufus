@@ -450,6 +450,8 @@ export interface BeeperSensorConfig {
   limitPerChat?: number;
   /** Chats whose title matches this (case-insensitive regex) are bots and skipped. Default `\bbot\b|bot$`. */
   botPattern?: string;
+  /** Chats with exactly this title (case-insensitive) are never sensed: Rufus's own chat. Default `["rufus"]`. */
+  ignoreChatTitles?: string[];
 }
 
 /** A read-only command whose JSON output becomes signals (`config.sensors.commands[]`). */
@@ -488,6 +490,14 @@ export interface StartConfig {
   checkinEvery?: string;
   /** Which chat to talk through, when both are configured. */
   channel?: 'telegram' | 'beeper';
+  /**
+   * A tiny local `POST /signal` webhook (Bearer token) so phone automations (MacroDroid, Tasker) can push
+   * `phone.unlocked`, `app.opened`, `location.changed` into the loop. Off unless set. The token may also come from
+   * `RUFUS_WEBHOOK_TOKEN`. Default host `127.0.0.1`, port 8787.
+   */
+  webhook?: { port?: number; host?: string; token?: string };
+  /** Proactive heads-ups before Anchor blocks and the good-morning brief. Default on; `false` turns it off. */
+  heartbeat?: false | { leadMinutes?: number; quietHours?: string | false; morningBrief?: boolean; morningUntil?: string };
 }
 
 /** Guardrails against piling up prompt rules. */

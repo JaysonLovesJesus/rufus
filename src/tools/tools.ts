@@ -32,6 +32,11 @@ export interface ToolDefinition<A = Record<string, unknown>, R = unknown> {
   sensitivity?: Sensitivity[];
   /** True when it only reads. Default: false for safety, so it waits for `commit`. */
   readOnly?: boolean;
+  /**
+   * True when its only side effect is on your private local workspace (e.g. `anchor.update` editing your schedule).
+   * Chat may run it right away when you ask for it explicitly; it never needs a Verify item. Ignored if it has a sensitivity.
+   */
+  local?: boolean;
   execute(args: A, ctx: ToolContext): R | Promise<R>;
 }
 

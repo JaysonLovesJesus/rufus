@@ -32,6 +32,8 @@ export interface TickReport {
   ignored: number;
   /** Set when the channel failed (e.g. the chat app is not running). The next tick retries. */
   error?: string;
+  /** Chat messages folded into an earlier one this tick (several texts in a row get ONE reply). */
+  merged?: number;
 }
 
 interface BridgeState {
@@ -139,6 +141,7 @@ export class CardBridge {
 
   private async receive(state: BridgeState, report: TickReport): Promise<void> {
     if (!this.channel.poll) return;
+    const fresh: string[] = [];
     for (const msg of await this.channel.poll(state.since)) {
       if (state.handled.includes(msg.id)) {
         report.ignored++;
@@ -154,8 +157,24 @@ export class CardBridge {
         report.ignored++;
         continue;
       }
-      await this.handleReply(state, text, report);
+      fresh.push(text);
     }
+    // Several chat texts in a row ("can you move my 3pm" / "actually make it 4") are one thought: ONE turn, ONE reply.
+    for (let i = 0; i < fresh.length; i++) {
+      const parts = [fresh[i]!];
+      if (await this.isPlainChat(state, parts[0]!)) {
+        while (i + 1 < fresh.length && (await this.isPlainChat(state, fresh[i + 1]!))) parts.push(fresh[++i]!);
+      }
+      if (parts.length > 1) report.merged = (report.merged ?? 0) + parts.length - 1;
+      await this.handleReply(state, parts.join('\n'), report);
+    }
+  }
+
+  /** Free-form chat for the chief: no open card it could answer, no card ref, not a command. Safe to merge with its neighbours. */
+  private async isPlainChat(state: BridgeState, text: string): Promise<boolean> {
+    if (!this.chief || REF.test(text) || this.chief.isCommand(text)) return false;
+    const delivered = new Set(state.delivered);
+    return !(await this.engine.pending()).some((c) => delivered.has(c.id));
   }
 
   /**

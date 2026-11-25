@@ -1,10 +1,16 @@
 import { createHash } from 'node:crypto';
 import { CardBridge, type IncomingMessage, type LiveChannel, type TickReport } from '../channels/bridge';
+import { loadAnchor, localDate } from '../anchor/anchor';
+import { chiefActionHandler } from '../chief/actions';
 import { ChiefOfStaff } from '../chief/chief';
+import { appendChatTurns } from '../chief/history';
+import { inboxSensor } from '../engine/loop-builtins';
+import { ANCHOR_TOOL, anchorUpdateTool } from '../tools/anchor-tool';
 import type { Engine } from '../engine/engine';
 import type { HumanDecision, LoopRun, LoopRunStatus, LoopTickReport, MasterLoop } from '../engine/loop';
 import type { Verdict } from '../engine/trust';
 import { formatCheckin, formatLoopItem, parseLoopReply, type LoopReply } from './loop-text';
+import { blocksToNudge, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, formatMorningBrief, formatNudge, inQuietHours, isMorning, markNudged, phoneSignalHandler, type HeartbeatOptions } from './heartbeat';
 import { nowSummary } from './now';
 import { assignNumbers, loadStartState, saveStartState, takeCheckinRequest, type StartState } from './state';
 
@@ -31,6 +37,8 @@ export interface UnifiedDaemonOptions {
   chief?: ChiefOfStaff | false;
   /** How often normal items are delivered together. Default 2 hours. */
   checkinEveryMs?: number;
+  /** Proactive schedule heads-ups and the good-morning brief (code only, $0). Default on; `false` turns it off. */
+  heartbeat?: HeartbeatOptions | false;
   now?: () => Date;
 }
 
@@ -47,6 +55,8 @@ export interface StartTickReport {
   decided: Array<{ runId: string; n: number; verdict: Verdict; status: LoopRunStatus }>;
   /** Flow cards and chat (the CardBridge). */
   bridge?: TickReport;
+  /** Proactive messages Rufus started this pass (schedule heads-ups, the good-morning brief). */
+  proactive?: string[];
   /** Problems this pass; the next pass retries. */
   errors: string[];
 }
@@ -65,9 +75,9 @@ const oneLine = (s: string, max = 200): string => {
 /** Hands the CardBridge only what the daemon did not consume, and sends through the daemon (so echoes are known). */
 class RelayChannel implements LiveChannel {
   inbox: IncomingMessage[] = [];
-  constructor(private readonly sendText: (text: string) => Promise<void>) {}
+  constructor(private readonly sendText: (text: string, relayed: boolean) => Promise<void>) {}
   async send(text: string): Promise<void> {
-    await this.sendText(text);
+    await this.sendText(text, true);
   }
   async poll(): Promise<IncomingMessage[]> {
     const out = this.inbox;
@@ -95,6 +105,7 @@ export class UnifiedDaemon {
   private readonly output: (text: string) => void;
   private readonly chief?: ChiefOfStaff;
   private readonly checkinEveryMs: number;
+  private readonly heartbeat: HeartbeatOptions | false;
   private readonly now: () => Date;
   private readonly relay?: RelayChannel;
   private readonly bridge?: CardBridge;
@@ -114,9 +125,16 @@ export class UnifiedDaemon {
     this.now = opts.now ?? (() => new Date());
     this.checkinEveryMs = opts.checkinEveryMs ?? DEFAULT_CHECKIN_MS;
     if (!(this.checkinEveryMs > 0)) throw new Error('checkinEveryMs must be above 0.');
-    this.chief = opts.chief === false ? undefined : (opts.chief ?? new ChiefOfStaff({ engine: this.engine, loop: this.loop }));
+    this.heartbeat = opts.heartbeat === false ? false : (opts.heartbeat ?? {});
+    // Your schedule and goals are editable from chat ("remove the study block"): private and local, so no Verify item.
+    if (!this.loop.tools.has(ANCHOR_TOOL)) this.loop.tools.register(anchorUpdateTool());
+    this.chief = opts.chief === false ? undefined : (opts.chief ?? new ChiefOfStaff({ engine: this.engine, loop: this.loop, tools: this.loop.tools, ...(opts.now ? { now: opts.now } : {}) }));
+    // Side effects asked for in chat become Verify items; phone context signals are recorded silently.
+    if (!this.loop.listHandlers().some((h) => h.id === chiefActionHandler.id)) this.loop.addHandler(chiefActionHandler);
+    if (!this.loop.listHandlers().some((h) => h.id === phoneSignalHandler.id)) this.loop.addHandler(phoneSignalHandler);
+    if (this.chief?.hasTools && !this.loop.listSensors().some((x) => x.id === 'inbox')) this.loop.addSensor(inboxSensor(this.loop.dir));
     if (this.channel) {
-      this.relay = new RelayChannel((text) => this.say(text));
+      this.relay = new RelayChannel((text, relayed) => this.say(text, relayed));
       this.bridge = new CardBridge({ engine: this.engine, channel: this.relay, chief: this.chief ?? false, workspaceDir: this.loop.dir, now: this.now });
     }
   }
@@ -178,12 +196,58 @@ export class UnifiedDaemon {
         report.bridge = await this.bridge.tick();
         if (report.bridge.error) report.errors.push(`channel: ${report.bridge.error}`);
       }
+      // Chat queued an action ("send Sam ..."): plan and deliver it now, so its "1" works right after the reply.
+      if (this.chief?.drainQueued()) {
+        try {
+          const again = await this.loop.runOnce();
+          for (const e of again.errors) report.errors.push(`sensor ${e.sensorId}: ${e.error}`);
+          for (const r of again.runs) if (r.actionType?.startsWith('chief.')) this.followUps.add(r.runId);
+          await this.deliver(state, report);
+        } catch (err) {
+          report.errors.push(`loop: ${message(err)}`);
+        }
+      }
+      if (this.heartbeat) {
+        try {
+          await this.heartbeatPass(state, report, this.heartbeat);
+        } catch (err) {
+          report.errors.push(`heartbeat: ${message(err)}`);
+        }
+      }
     } finally {
       await this.persist();
       this.current = undefined;
       this.chatCheckin = false;
     }
     return report;
+  }
+
+  /** Proactive, code-only: a heads-up before the next real block, and the good-morning brief on the first unlock. */
+  private async heartbeatPass(state: StartState, report: StartTickReport, hb: HeartbeatOptions): Promise<void> {
+    const now = this.now();
+    const quiet = hb.quietHours ?? DEFAULT_QUIET_HOURS;
+    const unlocked = (report.loop?.runs ?? []).some((r) => r.actionType === 'phone.unlocked');
+    if (inQuietHours(now, quiet)) return;
+    const anchor = await loadAnchor(this.loop.dir, now);
+    const sent: string[] = [];
+
+    if (unlocked && (hb.morningBrief ?? true) && isMorning(now, { quietHours: quiet, ...(hb.morningUntil ? { morningUntil: hb.morningUntil } : {}) })) {
+      const date = localDate(now);
+      if (state.lastMorningBrief !== date) {
+        state.lastMorningBrief = date;
+        const text = formatMorningBrief(anchor, now, (await this.loop.pending()).length);
+        await this.say(text);
+        sent.push(text);
+      }
+    }
+
+    for (const block of blocksToNudge(anchor, now, state.nudged ?? [], hb.leadMinutes ?? DEFAULT_LEAD_MINUTES)) {
+      state.nudged = markNudged(state.nudged, anchor, block);
+      const text = formatNudge(block, now);
+      await this.say(text);
+      sent.push(text);
+    }
+    if (sent.length) report.proactive = [...(report.proactive ?? []), ...sent];
   }
 
   private async persist(): Promise<void> {
@@ -328,8 +392,11 @@ export class UnifiedDaemon {
     }
   }
 
-  /** Records what we send (so its echo is ignored), then sends it, or prints it when there is no channel. */
-  private async say(text: string): Promise<void> {
+  /**
+   * Records what we send (so its echo is ignored), then sends it, or prints it when there is no channel. What the daemon
+   * itself says (items, heads-ups) also goes into the chat history; relayed chief replies are recorded by the chief.
+   */
+  private async say(text: string, relayed = false): Promise<void> {
     const state = this.current;
     if (state) {
       state.sent = [...state.sent, hash(text)].slice(-KEEP_SENT);
@@ -337,5 +404,6 @@ export class UnifiedDaemon {
     }
     if (this.channel) await this.channel.send(text);
     else this.output(text);
+    if (!relayed && this.chief) await appendChatTurns(this.loop.dir, [{ role: 'assistant', text, at: this.now().toISOString() }]).catch(() => undefined);
   }
 }

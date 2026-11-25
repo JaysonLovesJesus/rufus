@@ -340,19 +340,19 @@ describe('CLI: rufus now, rufus start, rufus decide #n, and the pruned help', ()
     expect(now).toContain('Now: 2026-11-25 08:00');
     expect(now).toContain('Today:\n  > 07:30-09:00 focus Deep work');
     expect(now).toContain('Goals: [high] Ship the beta');
-    expect(now).toContain('Waiting on you (2):');
+    expect(now).toContain('Waiting on you (1):');
     expect(now).toMatch(/\[#1\] verify: schedule\.block: Put "Gym"/);
-    expect(now).toMatch(/\[#2\] verify: triage\.ignore: Ignore Sam's chat message/);
-    expect(now).toContain('Done on its own (last 24h): nothing.');
+    expect(now).not.toContain('verify: triage.ignore'); // an acknowledgement never waits on you
+    expect(now).toContain('Done on its own (last 24h): 1');
+    expect(now).toContain("triage.ignore: Ignore Sam's chat message");
     expect(now).toContain('Earned Trust:');
     await access(path.join(dir, 'checkin.request'));
 
     expect(await run('decide', '#1', 'accept')).toMatch(/Recorded accept on loop_[0-9a-f]+: now accepted \(applied\)\./);
-    await run('trust', 'promote', 'triage.ignore');
     await appendSignal(dir, { surface: 'chat', kind: 'message.received', text: '👍', actor: 'Alex' }, NOW);
     await run('start', '--once');
     const after = await run('now');
-    expect(after).toContain('Done on its own (last 24h): 1');
+    expect(after).toContain('Done on its own (last 24h): 2');
     expect(after).toContain("triage.ignore: Ignore Alex's chat message");
     expect(after).toContain('schedule.block  check  accepted 1');
     await expect(run('decide', '#9', 'accept')).rejects.toThrow('Nothing is waiting as #9');

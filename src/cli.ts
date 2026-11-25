@@ -45,6 +45,7 @@ import { initSoul } from './soul/soul';
 import { buildTools } from './tools/tools';
 import { buildSensors, messageTriageHandler } from './sensors';
 import { UnifiedDaemon, type StartTickReport } from './unified/daemon';
+import { startSignalWebhook } from './unified/webhook';
 import { nowSummary } from './unified/now';
 import { assignNumbers, loadStartState, requestCheckin, saveStartState } from './unified/state';
 import { demoInput, demoProvider, triageDraft } from '../examples/triage-draft.flow';
@@ -195,6 +196,7 @@ function describeStartTick(r: StartTickReport): string[] {
   if (r.sentNow.length) lines.push(`sent ${r.sentNow.length} item(s) right away`);
   if (r.checkin.length) lines.push(`check-in: sent ${r.checkin.length} item(s)`);
   if (r.batched.length) lines.push(`${r.batched.length} item(s) waiting for the next check-in`);
+  for (const p of r.proactive ?? []) lines.push(`said: ${p.split('\n')[0]}`);
   if (r.bridge) lines.push(...describeBridgeTick(r.bridge));
   return lines;
 }
@@ -739,8 +741,9 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
           engine,
           ...(channel ? { channel } : {}),
           output: (t) => io.out(t),
-          chief: new ChiefOfStaff({ engine, provider: config.chief?.provider, loop }),
+          chief: new ChiefOfStaff({ engine, provider: config.chief?.provider, loop, tools: loop.tools, ...(now ? { now } : {}) }),
           checkinEveryMs,
+          ...(config.start?.heartbeat !== undefined ? { heartbeat: config.start.heartbeat } : {}),
           ...(now ? { now } : {}),
         });
         const report = (r: StartTickReport): void => {
@@ -758,7 +761,17 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         const stop = new AbortController();
         process.once('SIGINT', () => stop.abort());
         process.once('SIGTERM', () => stop.abort());
-        return daemon.run({ intervalMs, signal: stop.signal, onTick: report });
+        const hook = config.start?.webhook;
+        const hookToken = hook?.token ?? process.env.RUFUS_WEBHOOK_TOKEN;
+        const webhook = hook || process.env.RUFUS_WEBHOOK_TOKEN
+          ? await startSignalWebhook({ dir, token: hookToken ?? '', ...(hook?.port !== undefined ? { port: hook.port } : {}), ...(hook?.host ? { host: hook.host } : {}), ...(now ? { now } : {}) })
+          : undefined;
+        if (webhook) io.out(`Signal webhook listening on ${webhook.url}/signal (Bearer token required).`);
+        try {
+          return await daemon.run({ intervalMs, signal: stop.signal, onTick: report });
+        } finally {
+          await webhook?.close();
+        }
       }
 
       if (cmd === 'decide') {

@@ -33,6 +33,8 @@ const writeCursor = (c: SeenCursor): string => JSON.stringify({ ...(c.since ? { 
 // ---------- Beeper ----------
 
 export const DEFAULT_BOT_PATTERN = '\\bbot\\b|bot$';
+/** Chat titles never sensed by default: a chat named after Rufus is Rufus talking to you, never new work. */
+export const DEFAULT_IGNORE_CHAT_TITLES: readonly string[] = ['rufus'];
 
 export interface BeeperSensorOptions extends BeeperSensorConfig, BeeperApiOptions {
   /** Sensor id. Default `beeper`. */
@@ -47,13 +49,16 @@ const isGroup = (c: BeeperChat): boolean => /group/i.test(c.type ?? '');
 
 /**
  * New incoming messages from people across your Beeper chats. Skips your own messages, deleted and non-text messages,
- * bot chats (by title), muted and archived chats (by default), your Rufus chat and any `ignoreChatIds`.
+ * bot chats (by title), muted and archived chats (by default), your Rufus chat (by id, and any chat titled "Rufus"
+ * or one of `ignoreChatTitles`) and any `ignoreChatIds`.
  * The first pass only sets the cursor to now: old history is never replayed as new work.
  */
 export function beeperSensor(opts: BeeperSensorOptions = {}): Sensor {
   const api = opts.api ?? new BeeperApi(opts);
   const ignore = new Set([...(opts.ignoreChatIds ?? []), ...(opts.controlChatId ? [opts.controlChatId] : [])]);
   const bot = new RegExp(opts.botPattern ?? DEFAULT_BOT_PATTERN, 'i');
+  const titleKey = (t: string): string => t.trim().toLowerCase();
+  const ignoreTitles = new Set((opts.ignoreChatTitles ?? DEFAULT_IGNORE_CHAT_TITLES).map(titleKey).filter(Boolean));
   const limit = opts.limitPerChat ?? 20;
   return {
     id: opts.id ?? 'beeper',
@@ -66,7 +71,7 @@ export function beeperSensor(opts: BeeperSensorOptions = {}): Sensor {
       const signals: LoopSignal[] = [];
       for (const chat of await api.listChats()) {
         if (ignore.has(chat.id)) continue;
-        if (chat.title && bot.test(chat.title)) continue;
+        if (chat.title && (bot.test(chat.title) || ignoreTitles.has(titleKey(chat.title)))) continue;
         if (opts.groups === false && isGroup(chat)) continue;
         if ((opts.skipMuted ?? true) && chat.isMuted) continue;
         if (chat.isArchived) continue;
@@ -309,7 +314,7 @@ export function messageTriageHandler(opts: MessageTriageOptions = {}): SignalHan
       judged ??= { label: signal.urgency === 'urgent' ? 'urgent' : 'batch', reason: 'no model configured: you decide' };
       const urgency: Urgency = judged.label === 'urgent' || signal.urgency === 'urgent' ? 'urgent' : 'normal';
       if (judged.label === 'ignore') {
-        return { goal: `Ignore ${who}'s ${surface} message (${judged.reason})`, actionType: `triage.ignore`, route: 'code', urgency: 'normal', label: 'ignore', reason: judged.reason };
+        return { goal: `Ignore ${who}'s ${surface} message (${judged.reason})`, actionType: `triage.ignore`, route: 'code', urgency: 'normal', autoComplete: true, label: 'ignore', reason: judged.reason };
       }
       const replyTool = surface === 'email' ? emailTool : sendTool;
       if (!ctx.hasAi) {

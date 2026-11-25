@@ -20,6 +20,10 @@ export interface StartState {
   handled: string[];
   /** Hashes of what Rufus sent, so an echoed message never answers itself. */
   sent: string[];
+  /** Schedule blocks already given a heads-up (`<date>:<blockId>@<start>`). */
+  nudged?: string[];
+  /** The local date (`YYYY-MM-DD`) of the last good-morning brief. */
+  lastMorningBrief?: string;
 }
 
 export const START_STATE_FILE = 'start-state.json';

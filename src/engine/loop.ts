@@ -9,7 +9,7 @@ import { checkBoundaries, loadAnchor, type Anchor, type Sensitivity } from '../a
 import { CorpusStore, queryCorpus, type CorpusHit, type CorpusItem } from '../corpus';
 import { clip, stableId } from '../corpus/types';
 import { FileStore } from '../store';
-import { buildPersona, loadSoul, withPersona } from '../soul/soul';
+import { buildPersona, loadSoul, relevantHits, withPersona } from '../soul/soul';
 import { ToolRegistry } from '../tools/tools';
 import type { AiProvider, Route, Spectrum, StagePlan, Tier, VerifyResult } from '../types';
 
@@ -89,6 +89,12 @@ export interface LoopPlan extends StagePlan {
   uses?: string[];
   /** `urgent` interrupts you now; `normal` (default) waits for the next check-in. Beats the signal's hint. */
   urgency?: Urgency;
+  /**
+   * A no-op that touches nothing (e.g. "ignore this acknowledgement"): once it passes its checks it completes on its own,
+   * whatever its Earned Trust, and never waits on the human. Ignored when the plan has a sensitivity, uses a tool, or an
+   * Anchor boundary asks for approval.
+   */
+  autoComplete?: boolean;
 }
 
 export interface LoopReplan {
@@ -504,10 +510,11 @@ export class MasterLoop {
     let persona: string | undefined;
     const personaOf = (): string =>
       (persona ??= buildPersona({
+        now: this.now(),
         ...(this.soul ? { soul: this.soul } : {}),
         anchor,
         examples: corpus.length ? examples({ ...(run.actionType ? { actionType: run.actionType } : {}), limit: 3 }) : [],
-        facts: corpus.length && signalText.trim() ? queryCorpus(corpus.filter((i) => i.source !== 'feedback'), { query: signalText, limit: 3, now: this.now() }).filter((h) => h.matched.length || h.similarity !== undefined) : [],
+        facts: corpus.length && signalText.trim() ? relevantHits(queryCorpus(corpus.filter((i) => i.source !== 'feedback'), { query: signalText, limit: 3, now: this.now() }), signalText) : [],
       }));
     const approved = base.stage === 'commit' && base.approved === true;
     const registry = this.tools;
@@ -667,6 +674,11 @@ export class MasterLoop {
       if (result !== undefined) run.result = result;
 
       // ---- Verify, step 2: Earned Trust + boundaries ----
+      if (plan.autoComplete && run.verified && !bounds.requiresApproval && !sensitivity.length && !(plan.uses ?? []).length) {
+        run.status = 'completed';
+        await this.commit(run, handler, anchor, corpus, result);
+        return;
+      }
       const trust = await this.trust.get(plan.actionType);
       run.autonomy = trust.autonomy;
       if (bounds.requiresApproval || trust.autonomy === 'check' || !run.verified) {
