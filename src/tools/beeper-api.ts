@@ -164,6 +164,21 @@ export class BeeperApi {
     return body?.pendingMessageID;
   }
 
+  /**
+   * v21: adds an emoji reaction to one message (`POST /v1/chats/{chatID}/messages/{messageID}/reactions`,
+   * `{ reactionKey }`). Throws `BeeperOfflineError` when Beeper Desktop is not reachable, `BeeperApiError` otherwise.
+   */
+  async reactToMessage(chatId: string, messageId: string, emoji: string): Promise<{ reacted: true; chatId: string; messageId: string; emoji: string }> {
+    const c = typeof chatId === 'string' ? chatId.trim() : '';
+    const m = typeof messageId === 'string' ? messageId.trim() : '';
+    const e = typeof emoji === 'string' ? emoji.trim() : '';
+    if (!c) throw new Error('reactToMessage needs a chatId.');
+    if (!m) throw new Error('reactToMessage needs a messageId.');
+    if (!e || e.length > 32) throw new Error('reactToMessage needs one emoji.');
+    await this.json('POST', `/v1/chats/${encodeURIComponent(c)}/messages/${encodeURIComponent(m)}/reactions`, { reactionKey: e });
+    return { reacted: true, chatId: c, messageId: m, emoji: e };
+  }
+
   private async json(method: 'GET' | 'POST', p: string, body?: unknown): Promise<unknown> {
     let res: Response;
     try {

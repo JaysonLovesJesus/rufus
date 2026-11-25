@@ -38,6 +38,8 @@ export interface ToolDefinition<A = Record<string, unknown>, R = unknown> {
    * Chat may run it right away when you ask for it explicitly; it never needs a Verify item. Ignored if it has a sensitivity.
    */
   local?: boolean;
+  /** v21: true when what it does can be taken back (a reaction can be removed; a sent message cannot). For the audit ledger. */
+  reversible?: boolean;
   execute(args: A, ctx: ToolContext): R | Promise<R>;
 }
 
@@ -218,7 +220,10 @@ export function commandTool(name: string, cfg: CommandToolConfig, run: CommandRu
   };
 }
 
-/** `beeper.read` (messages of one chat) and `beeper.send` (external: always gated). */
+/**
+ * `beeper.read` (messages of one chat), `beeper.send` and (v21) `beeper.react` (both external: gated until a human says
+ * yes, or until the action earned `auto_notify` / `autonomous` on the v21 ladder).
+ */
 export function beeperTools(api: BeeperApi | BeeperApiOptions = {}): ToolDefinition<Record<string, unknown>, unknown>[] {
   const client = api instanceof BeeperApi ? api : new BeeperApi(api);
   const chatIdOf = (args: Record<string, unknown>, tool: string): string => {
@@ -255,6 +260,25 @@ export function beeperTools(api: BeeperApi | BeeperApiOptions = {}): ToolDefinit
         } catch (err) {
           if (err instanceof ToolError) throw err;
           throw new ToolError('beeper.send', (err as Error).message);
+        }
+      },
+    },
+    {
+      name: 'beeper.react',
+      description: 'React to one Beeper message with an emoji (args: chatId, messageId, emoji). External: needs your yes until it earned trust.',
+      readOnly: false,
+      sensitivity: ['external'],
+      reversible: true,
+      async execute(args) {
+        const messageId = args.messageId ?? args.messageID;
+        const emoji = typeof args.emoji === 'string' ? args.emoji.trim() : typeof args.reaction === 'string' ? args.reaction.trim() : '';
+        if (typeof messageId !== 'string' || !messageId.trim()) throw new ToolError('beeper.react', 'needs a messageId.');
+        if (!emoji) throw new ToolError('beeper.react', 'needs an emoji.');
+        try {
+          return await client.reactToMessage(chatIdOf(args, 'beeper.react'), messageId, emoji);
+        } catch (err) {
+          if (err instanceof ToolError) throw err;
+          throw new ToolError('beeper.react', (err as Error).message);
         }
       },
     },

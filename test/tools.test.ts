@@ -166,7 +166,7 @@ describe('buildTools (config.json)', () => {
       },
       { env: {}, fetch: f.fetch, run: async () => '[]' },
     );
-    expect(r.list().map((t) => t.name)).toEqual(['beeper.read', 'beeper.send', 'calendar.read', 'shell.run', 'web.fetch', 'web.search']);
+    expect(r.list().map((t) => t.name)).toEqual(['beeper.react', 'beeper.read', 'beeper.send', 'calendar.read', 'shell.run', 'web.fetch', 'web.search']);
     expect(r.isTrusted('calendar.read')).toBe(true);
     await r.call('beeper.read', { chatId: 'x' }, ctx());
     expect(f.calls[0]!.url).toBe('http://127.0.0.1:9999/v1/chats/x/messages?limit=20');

@@ -25,6 +25,7 @@ import { nowSummary } from './now';
 import { assignNumbers, loadStartState, saveStartState, takeCheckinRequest, type StartState } from './state';
 import { formatMissionDelivery, listMissions, loadMission, runMission, saveMission, type MissionRecord } from './missions';
 import { MISSION_START_TOOL, missionTools } from '../tools/mission-tools';
+import { parseAutonomyCommand, runAutonomyCommand } from './autonomy';
 
 /**
  * `rufus start`: ONE daemon for everything.
@@ -138,6 +139,8 @@ export interface StartTickReport {
   reviewed?: string;
   /** v22: missions started in the background, and finished ones announced, this pass. */
   missions?: { started: string[]; delivered: string[] };
+  /** v21: runs that acted on their own at `auto_notify` and were announced this pass. */
+  autoNotified?: string[];
   /** Problems this pass; the next pass retries. */
   errors: string[];
 }
@@ -149,6 +152,9 @@ const KEEP_SENT = 100;
 const CONVERSATION_QUIET_MS = 5 * 60_000;
 export const DEFAULT_CALENDAR_SYNC_MS = 20 * 60_000;
 const KEEP_KEYS = 200;
+/** v21: a bare "undo" / "demote" refers to the last auto_notify action for this long. */
+const AUTO_UNDO_WINDOW_MS = 24 * 3_600_000;
+const UNDO_OR_DEMOTE = /^(undo|demote|demote (?:it|that)|ask (?:me )?first(?: again)?)[.!\s]*$/i;
 const hhmmToMin = (t: string): number => {
   const m = /^(\d{1,2}):(\d{2})$/.exec(t.trim());
   return m ? Number(m[1]) * 60 + Number(m[2]) : NaN;
@@ -399,6 +405,7 @@ export class UnifiedDaemon {
       try {
         report.loop = await this.loop.runOnce();
         for (const e of report.loop.errors) report.errors.push(`sensor ${e.sensorId}: ${e.error}`);
+        await this.announceAuto(state, report, report.loop);
       } catch (err) {
         report.errors.push(`loop: ${message(err)}`);
       }
@@ -417,6 +424,7 @@ export class UnifiedDaemon {
           const again = await this.loop.runOnce();
           for (const e of again.errors) report.errors.push(`sensor ${e.sensorId}: ${e.error}`);
           for (const r of again.runs) if (r.actionType?.startsWith('chief.')) this.followUps.add(r.runId);
+          await this.announceAuto(state, report, again);
           await this.deliver(state, report);
         } catch (err) {
           report.errors.push(`loop: ${message(err)}`);
@@ -689,6 +697,40 @@ export class UnifiedDaemon {
     }
   }
 
+  /**
+   * v21: an action that ran on its own at `auto_notify` is told to you right away, never batched ("Just reacted 😂 to
+   * Mom — reply 'undo' or 'demote' if you want me to ask first again").
+   */
+  private async announceAuto(state: StartState, report: StartTickReport, loop: LoopTickReport): Promise<void> {
+    for (const r of loop.runs) {
+      if (!r.autoNotified) continue;
+      try {
+        const run = await this.loop.getRun(r.runId);
+        await this.say(run.autoNotice ?? `Just did ${run.actionType ?? 'something'} on my own — reply 'undo' or 'demote' if you want me to ask first again.`);
+        state.lastAutoNotified = { runId: run.id, actionType: run.actionType ?? run.handlerId, at: this.now().toISOString() };
+        (report.autoNotified ??= []).push(run.id);
+      } catch (err) {
+        report.errors.push(`auto-notify: ${message(err)}`);
+      }
+    }
+  }
+
+  /** v21: "undo" / "demote" right after an auto_notify action: that action goes back to `check` (a complaint). */
+  private async undoOrDemote(state: StartState, text: string): Promise<boolean> {
+    const last = state.lastAutoNotified;
+    if (!last || !UNDO_OR_DEMOTE.test(text)) return false;
+    if (this.now().getTime() - Date.parse(last.at) > AUTO_UNDO_WINDOW_MS) return false;
+    await this.loop.trust.recordComplaint(last.actionType, text);
+    delete state.lastAutoNotified;
+    const undo = /^undo/i.test(text);
+    await this.say(
+      undo
+        ? `Got it — ${last.actionType} is back to check, so I'll ask first next time. I can't take that one back myself; undo it in the chat if it matters.`
+        : `Done — ${last.actionType} is back to check. I'll ask you first every time.`,
+    );
+    return true;
+  }
+
   private async persist(): Promise<void> {
     if (this.current) await saveStartState(this.loop.dir, this.current);
   }
@@ -716,6 +758,13 @@ export class UnifiedDaemon {
   private async handleIncoming(state: StartState, msg: IncomingMessage, text: string, report: StartTickReport): Promise<void> {
     // An emoji reaction is seen and remembered by the chat side, never read as an answer or an edit.
     if (msg.reaction) return void this.relay!.inbox.push(msg);
+    // v21: "undo" / "demote" right after something Rufus did on its own demotes it at once.
+    if (await this.undoOrDemote(state, text)) return;
+    // v21: the kill switch and friends work even with no Chief of Staff.
+    if (!this.chief) {
+      const cmd = parseAutonomyCommand(text);
+      if (cmd) return this.say(await runAutonomyCommand(this.loop.dir, cmd, { trust: this.loop.trust, now: this.now() }));
+    }
     const pending = await this.loop.pending();
     assignNumbers(state, pending);
     const delivered = pending.filter((r) => state.delivered.includes(r.id)).sort((a, b) => (state.numbers[a.id] ?? 0) - (state.numbers[b.id] ?? 0));

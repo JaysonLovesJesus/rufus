@@ -42,6 +42,8 @@ export interface StartState {
   digested?: string[];
   /** v18: the daily self-review. */
   selfReview?: SelfReviewState;
+  /** v21: the last action Rufus took on its own at `auto_notify`, so a bare "undo" / "demote" knows what it means. */
+  lastAutoNotified?: { runId: string; actionType: string; at: string };
 }
 
 export const START_STATE_FILE = 'start-state.json';

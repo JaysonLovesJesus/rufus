@@ -38,6 +38,7 @@ import {
   type GoalPriority,
 } from './anchor/anchor';
 import { formatTrust, TrustStore } from './engine/trust';
+import { auditSummary } from './unified/audit';
 import { formatLoopReport, formatLoopRun, MasterLoop, type Sensor, type SignalHandler } from './engine/loop';
 import { appendSignal, inboxSensor, scheduleBlockHandler } from './engine/loop-builtins';
 import { configuredChannels } from './channels/select';
@@ -67,8 +68,10 @@ Primary commands:
   anchor                       your Anchor: goals, projects, boundaries and today's schedule
     anchor init | goal <title...> [--priority high|medium|low] [--horizon today|week|month] [--notes <text>]
     anchor block <HH:MM-HH:MM> <focus|meeting|break|scroll|personal|protected> <title...> [--date YYYY-MM-DD] [--allow-overlap]
-  trust [promote|demote <actionType>]
-                               Earned Trust per action type: check (you verify) or autonomous
+  trust [promote <actionType> [--mode auto_notify|autonomous] | demote <actionType> | pause [reason...] | resume]
+                               Earned Trust ladder per action type: blocked, check (you verify), auto_notify (acts,
+                               then tells you), autonomous. pause = kill switch: everything asks first
+  audit [--hours 24]           what Rufus actually did (you approved, or on its own), from audit.jsonl
   decide <runId|#n> accept|edit|reject [note...] [--output <your version>]
                                your verdict from the terminal: updates trust, applies, and becomes an example
   chat <message...>            talk to your chief of staff (status, flows, lessons, run, learn, or anything)
@@ -265,7 +268,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const showAll = bool('--all');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
-  for (const flag of ['--dir', '--checkin', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data', '--context']) {
+  for (const flag of ['--dir', '--checkin', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data', '--context', '--hours']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
@@ -706,22 +709,52 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     }
 
     case 'trust': {
-      const [sub, actionType] = rest;
+      const [sub, actionType, ...words] = rest;
       const trust = new TrustStore(dir);
+      const usage = 'Usage: rufus trust [promote <actionType> [--mode auto_notify|autonomous] | demote <actionType> | pause [reason...] | resume]';
       if (!sub) {
-        for (const line of formatTrust(await trust.all())) io.out(line);
+        const file = await trust.load();
+        for (const line of formatTrust(await trust.all(), { paused: file.paused === true, ...(file.pauseReason ? { pauseReason: file.pauseReason } : {}) })) io.out(line);
         return;
       }
-      if ((sub === 'promote' || sub === 'demote') && actionType) {
-        const r = sub === 'promote' ? await trust.promote(actionType) : await trust.demote(actionType);
+      if (sub === 'pause') {
+        const reason = [actionType, ...words].filter(Boolean).join(' ').trim();
+        await trust.pause(reason || 'paused from the terminal');
+        io.out('Autonomy paused: every action asks you first (auto_notify and autonomous are on hold). rufus trust resume lifts it.');
+        return;
+      }
+      if (sub === 'resume') {
+        await trust.resume();
+        io.out('Autonomy resumed: each action is back on its own rung.');
+        return;
+      }
+      if (sub === 'demote' && actionType) {
+        const r = await trust.demote(actionType);
+        io.out(`${r.actionType} is back to check: you verify every result.`);
+        return;
+      }
+      if (sub === 'promote' && actionType) {
+        const mode = flags['--mode'];
+        if (mode !== undefined && mode !== 'auto_notify' && mode !== 'autonomous') throw new Error('--mode must be auto_notify or autonomous.');
+        const r = await trust.promote(actionType, mode);
+        const paused = (await trust.isPaused()) ? ' (Autonomy is paused right now: it applies once you rufus trust resume.)' : '';
         io.out(
-          r.autonomy === 'autonomous'
-            ? `${r.actionType} is now autonomous: verified results complete without asking (external sends, money and logins still ask).`
-            : `${r.actionType} is back to check: you verify every result.`,
+          r.autonomy === 'auto_notify'
+            ? `${r.actionType} is now auto_notify: it acts on its own (external steps included; money and logins still ask) and tells you right away each time. Any rejection or complaint puts it back to check.${paused}`
+            : mode
+              ? `${r.actionType} is now autonomous: it acts on its own (external steps included; money and logins still ask). Any rejection puts it back to check.${paused}`
+              : `${r.actionType} is now autonomous: verified results complete without asking (external sends, money and logins still ask; --mode auto_notify|autonomous covers external steps too).${paused}`,
         );
         return;
       }
-      throw new Error('Usage: rufus trust [promote|demote <actionType>]');
+      throw new Error(usage);
+    }
+
+    case 'audit': {
+      const hours = flags['--hours'] !== undefined ? Number(flags['--hours']) : 24;
+      if (!(Number.isFinite(hours) && hours > 0)) throw new Error('--hours must be a number above 0.');
+      io.out(await auditSummary(dir, { hours, ...(options.now ? { now: options.now() } : {}) }));
+      return;
     }
 
     case 'signal': {

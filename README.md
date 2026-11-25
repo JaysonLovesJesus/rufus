@@ -762,6 +762,22 @@ It always appends one structured record to `<workspace>/self-review.jsonl`. Only
 
 The gate lives in `start-state.json` (`selfReview.lastDate`): once per local day, after `19:00`, never in quiet hours, never in an Anchor `protect_time` window (a Sabbath) or a protected block, never mid-conversation. Configure it with `"start": { "selfReview": { "after": "19:30", "repeatRejections": 3 } }`, or turn it off with `"selfReview": false`.
 
+### Earned Trust 2.0: ladder, kill switch, audit ledger, `beeper.react` (v21)
+
+- **The ladder.** Every action type sits on one rung: `blocked` (never runs), `check` (the default: works, you verify), `auto_notify` (acts, then texts you right away: *"Just reacted 😂 to Mom — reply 'undo' or 'demote' if you want me to ask first again"*), `autonomous` (acts quietly). Only you promote: `rufus trust promote <action> --mode auto_notify|autonomous`. Clean `auto_notify` runs build the streak toward a suggested `autonomous`.
+- **Demotion is instant.** Any rejection, or a complaint (`undo` / `demote` after an auto action, or `demote <action>` in chat), drops `auto_notify` / `autonomous` straight back to `check` with a zero streak.
+- **What earned trust can never do.** Money and login actions always ask, on every rung. Your own `require_approval` rules always ask. External steps (a send, a reaction) only run on their own after an explicit v21 promotion (`--mode`); a pre-v21 `autonomous` record (or `rufus trust promote <action>` with no `--mode`) still asks before anything external. Earned trust covers only the tools the plan declared in `uses`.
+- **Kill switch.** `pause autonomy` / `stop acting on your own` in chat, or `rufus trust pause [reason]`, makes every non-blocked action `check` until `resume autonomy` / `rufus trust resume`. Stored in `trust.json` (`paused`, `pausedAt`, `pauseReason`); old `trust.json` files load unchanged.
+- **Audit ledger.** Every write or external step Rufus executes, whether you approved it or it acted on its own, is appended to `<workspace>/audit.jsonl` (`action`, `tool`, `summary`, `argsPreview`, `trustMode`, `approval: human | auto_notify | autonomous`, `ok`, `error`, `reversible`). Ask *"what did you do today?"* / *"audit log"* in chat, or run `rufus audit [--hours 24]`: plain code, $0.
+- **`beeper.react`.** With Beeper configured, `beeper.react` (`chatId`, `messageId`, `emoji`) sits next to `beeper.send`: external, starts at `check`, and can earn `auto_notify` → `autonomous`.
+
+```sh
+rufus trust promote chief.beeper.react --mode auto_notify   # react on your own, and tell me each time
+rufus trust pause "travelling"                               # kill switch: everything asks first
+rufus trust resume
+rufus audit --hours 24                                       # what you actually did
+```
+
 ### Background missions (v22)
 
 Some asks take more than one look: "research standing desks under $500 and get back to me", "prep a brief for tomorrow's meeting". Chat hands those to a **mission** with the `mission.start` tool and answers right away ("On it — I'll dig into that and ping you when I have options ready"); `rufus start` does the work in the background and texts you the result when it is done.
@@ -856,6 +872,8 @@ rufus trust                          # one line per action type, plus any promot
 rufus trust promote schedule.block   # stop checking with me
 rufus trust demote schedule.block    # check with me again
 ```
+
+v21 adds the `auto_notify` and `blocked` rungs, the kill switch and the audit ledger: see *Earned Trust 2.0* above.
 
 ## Learning guardrails: no monkey-patching
 

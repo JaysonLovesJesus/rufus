@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { assertActionType, promotionMessage, TrustStore, type FeedbackResult, type Verdict } from './trust';
+import { actsOnItsOwn, assertActionType, promotionMessage, TrustStore, type FeedbackResult, type TrustMode, type Verdict } from './trust';
+import { appendAudit, describeDone, formatAutoNotice, previewArgs, type AuditApproval, type AuditEntry } from '../unified/audit';
 import { AiVerificationError } from './ai';
 import { emptySpectrum } from './spectrum';
 import { ROUTES, routeRank, upgradeRoute, DEFAULT_MAX_REPLANS, MAX_REPLANS_LIMIT } from './stages';
@@ -277,8 +278,14 @@ export interface LoopRun {
   approvals?: string[];
   /** Anchor `never` rules that stopped it. */
   blockedBy?: string[];
-  /** Earned Trust at the time it paused. */
-  autonomy?: 'check' | 'autonomous';
+  /** Earned Trust at the time it paused (or ran on its own). v21: any rung of the ladder. */
+  autonomy?: TrustMode;
+  /** v21: it ran on its own at `auto_notify`; the daemon tells you right away (`autoNotice`). */
+  autoNotified?: boolean;
+  /** v21: what to tell you about an `auto_notify` run ("Just reacted 😂 to Mom — reply 'undo' or 'demote' ..."). */
+  autoNotice?: string;
+  /** v21: who let the commit run: you, or an earned rung. */
+  approval?: AuditApproval;
   promotionSuggested?: boolean;
   promotionHint?: string;
   decision?: HumanDecision & { stage: 'plan' | 'execute' | 'verify'; at: string };
@@ -308,6 +315,8 @@ export interface LoopRunSummary {
   actionType?: string;
   goal?: string;
   route?: Route;
+  /** v21: it ran on its own at `auto_notify`: tell the human now. */
+  autoNotified?: boolean;
 }
 
 export interface LoopTickReport {
@@ -617,7 +626,7 @@ export class MasterLoop {
         };
         await this.process(run, handler, anchor, await loadCorpus(), {});
         report.cost += run.aiCalls;
-        report.runs.push({ runId: run.id, status: run.status, ...(run.actionType ? { actionType: run.actionType } : {}), ...(run.goal ? { goal: run.goal } : {}), ...(run.route ? { route: run.route } : {}) });
+        report.runs.push({ runId: run.id, status: run.status, ...(run.actionType ? { actionType: run.actionType } : {}), ...(run.goal ? { goal: run.goal } : {}), ...(run.route ? { route: run.route } : {}), ...(run.autoNotified ? { autoNotified: true } : {}) });
       }
       if (polled.nextCursor !== undefined) state.cursors[sensor.id] = polled.nextCursor;
       await this.fs.writeJson(this.stateFile, { ...state, lastTickAt: now.toISOString() });
@@ -676,7 +685,23 @@ export class MasterLoop {
     return out.sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
   }
 
-  private context(run: LoopRun, anchor: Anchor, corpus: CorpusItem[], base: { stage: LoopStageContext['stage']; attempt: number; route?: Route; replan?: LoopReplan; humanInput?: string; approved?: boolean }): LoopStageContext {
+  private context(
+    run: LoopRun,
+    anchor: Anchor,
+    corpus: CorpusItem[],
+    base: {
+      stage: LoopStageContext['stage'];
+      attempt: number;
+      route?: Route;
+      replan?: LoopReplan;
+      humanInput?: string;
+      approved?: boolean;
+      /** v21: tools an earned rung (auto_notify / autonomous incl. external) may run in this commit without a per-run yes. */
+      approvedTools?: readonly string[];
+      /** v21: sees every tool call (for the audit ledger). */
+      onToolCall?: (c: { tool: string; args: Record<string, unknown>; ok: boolean; error?: string }) => void;
+    },
+  ): LoopStageContext {
     const defaultTier: Tier = base.stage === 'execute' && base.route === 'smart' ? 'smart' : 'fast';
     const signalText = run.signal.text ?? '';
     const examples: LoopStageContext['examples'] = (o = {}) => {
@@ -701,12 +726,15 @@ export class MasterLoop {
       call: async <R = unknown>(name: string, args: Record<string, unknown> = {}): Promise<R> => {
         const entry: LoopToolCall = { tool: name, stage: base.stage, ok: false, at: this.now().toISOString() };
         (run.toolCalls ??= []).push(entry);
+        const earned = base.stage === 'commit' && (base.approvedTools ?? []).includes(name);
         try {
-          const out = await registry.call<R>(name, args, { dir: this.dir, now: this.now(), runId: run.id, stage: base.stage, approved });
+          const out = await registry.call<R>(name, args, { dir: this.dir, now: this.now(), runId: run.id, stage: base.stage, approved: approved || earned });
           entry.ok = true;
+          base.onToolCall?.({ tool: name, args, ok: true });
           return out;
         } catch (err) {
           entry.error = (err as Error).message;
+          base.onToolCall?.({ tool: name, args, ok: false, error: entry.error });
           throw err;
         }
       },
@@ -808,6 +836,14 @@ export class MasterLoop {
         run.status = 'blocked';
         return;
       }
+      // v21: an action type the human put on `blocked` never runs, not even its execute step.
+      const mode = await this.trust.mode(plan.actionType);
+      if (mode === 'blocked') {
+        run.autonomy = 'blocked';
+        run.blockedBy = [`Earned Trust: ${plan.actionType} is blocked (rufus trust demote ${plan.actionType} puts it back to check).`];
+        run.status = 'blocked';
+        return;
+      }
 
       // ---- Execute ----
       if (plan.route === 'human' || plan.needsHumanExecute) {
@@ -853,36 +889,115 @@ export class MasterLoop {
       // ---- Verify, step 2: Earned Trust + boundaries ----
       if (plan.autoComplete && run.verified && !bounds.requiresApproval && !sensitivity.length && !(plan.uses ?? []).length) {
         run.status = 'completed';
-        await this.commit(run, handler, anchor, corpus, result);
+        await this.commit(run, handler, anchor, corpus, result, false, { approval: 'autonomous', auditFallback: false });
         return;
       }
+      // v21 ladder. The kill switch (`mode` is `check` while paused) wins over everything. Money, logins and your own
+      // require-approval rules always ask. The built-in "external asks" floor is lifted only by an explicit v21
+      // promotion: `auto_notify`, or `autonomous` that covers external (a pre-v21 `autonomous` still asks for sends).
       const trust = await this.trust.get(plan.actionType);
-      run.autonomy = trust.autonomy;
-      if (bounds.requiresApproval || trust.autonomy === 'check' || !run.verified) {
+      const current = await this.trust.mode(plan.actionType);
+      run.autonomy = current;
+      const earnedExternal = current === 'auto_notify' || (current === 'autonomous' && trust.coversExternal === true);
+      const stillAsks = bounds.approvalBy.filter((b) => !(earnedExternal && b.id === 'builtin-external'));
+      if (!actsOnItsOwn(current) || stillAsks.length || !run.verified) {
         if (bounds.approvalBy.length) run.approvals = bounds.approvalBy.map((b) => b.rule);
         run.promotionSuggested = trust.promotionSuggested;
         if (trust.promotionSuggested) run.promotionHint = promotionMessage(trust);
         return this.pause(run, 'awaiting_human_verify');
       }
       run.status = 'completed';
-      await this.commit(run, handler, anchor, corpus, result);
+      if (current === 'auto_notify') run.autoNotified = true;
+      await this.commit(run, handler, anchor, corpus, result, false, { approval: current as AuditApproval, approvedTools: earnedExternal ? (plan.uses ?? []) : [] });
+      if (current === 'auto_notify' && run.committed) await this.trust.recordAutoRun(plan.actionType).catch(() => undefined);
       return;
     }
   }
 
-  private async commit(run: LoopRun, handler: SignalHandler<any, any> | undefined, anchor: Anchor, corpus: CorpusItem[], output: unknown, approved = false): Promise<void> {
+  /**
+   * Applies the output. v21: every write the commit did goes into the audit ledger (`audit.jsonl`): one entry per
+   * write tool call, or (with `auditFallback`, the default) one entry for the commit itself when it used no write tool.
+   */
+  private async commit(
+    run: LoopRun,
+    handler: SignalHandler<any, any> | undefined,
+    anchor: Anchor,
+    corpus: CorpusItem[],
+    output: unknown,
+    approved = false,
+    opts: { approval?: AuditApproval; approvedTools?: readonly string[]; auditFallback?: boolean } = {},
+  ): Promise<void> {
     if (!handler?.commit) {
       run.committed = false;
       if (!handler) run.commitError = `handler "${run.handlerId}" is not registered here, so nothing was applied`;
       return;
     }
+    const approval: AuditApproval = approved ? 'human' : (opts.approval ?? 'autonomous');
+    run.approval = approval;
+    const calls: Array<{ tool: string; args: Record<string, unknown>; ok: boolean; error?: string }> = [];
     try {
-      await handler.commit(output, run.plan!, run.signal, this.context(run, anchor, corpus, { stage: 'commit', attempt: run.replans, ...(run.route ? { route: run.route } : {}), approved }));
+      await handler.commit(
+        output,
+        run.plan!,
+        run.signal,
+        this.context(run, anchor, corpus, {
+          stage: 'commit',
+          attempt: run.replans,
+          ...(run.route ? { route: run.route } : {}),
+          approved,
+          ...(opts.approvedTools?.length ? { approvedTools: opts.approvedTools } : {}),
+          onToolCall: (c) => calls.push(c),
+        }),
+      );
       run.committed = true;
       delete run.commitError;
     } catch (err) {
       run.committed = false;
       run.commitError = (err as Error).message;
+    }
+    await this.audit(run, calls, approval, opts.auditFallback !== false).catch(() => undefined); // the ledger never breaks a run
+  }
+
+  private async audit(run: LoopRun, calls: Array<{ tool: string; args: Record<string, unknown>; ok: boolean; error?: string }>, approval: AuditApproval, fallback: boolean): Promise<void> {
+    const action = run.actionType ?? run.handlerId;
+    const trustMode: TrustMode = run.autonomy ?? 'check';
+    const goal = run.goal ?? action;
+    const writes = calls.filter((c) => this.tools.get(c.tool)?.readOnly !== true);
+    const entries: AuditEntry[] = [];
+    for (const c of writes) {
+      const preview = previewArgs(c.args);
+      const reversible = this.tools.get(c.tool)?.reversible;
+      entries.push(
+        await appendAudit(
+          this.dir,
+          {
+            action,
+            tool: c.tool,
+            summary: describeDone(c.tool, c.args, `ran ${c.tool} (${goal})`),
+            ...(preview ? { argsPreview: preview } : {}),
+            trustMode,
+            approval,
+            ok: c.ok,
+            ...(c.error ? { error: c.error } : {}),
+            ...(reversible !== undefined ? { reversible } : {}),
+            runId: run.id,
+          },
+          this.now(),
+        ),
+      );
+    }
+    if (!writes.length && fallback) {
+      entries.push(
+        await appendAudit(
+          this.dir,
+          { action, summary: `did: ${goal}`, trustMode, approval, ok: run.committed === true, ...(run.commitError ? { error: run.commitError } : {}), runId: run.id },
+          this.now(),
+        ),
+      );
+    }
+    if (approval === 'auto_notify' && entries.length) {
+      const failed = entries.find((e) => !e.ok);
+      run.autoNotice = formatAutoNotice(failed ?? (entries.length === 1 ? entries[0]! : { ...entries[0]!, summary: entries.map((e) => e.summary).join(', ') }));
     }
   }
 

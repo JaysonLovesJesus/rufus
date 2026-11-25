@@ -16,6 +16,7 @@ import { clearPendingPlan, commitPendingPlan, loadPendingPlan, PLAN_APPROVE, PLA
 import { buildBreakDigest, DIGEST_REQUEST } from '../unified/digest';
 import { cancelMission, describeMission, formatMissionList, isActiveMission, listMissions } from '../unified/missions';
 import { MISSION_START_TOOL } from '../tools/mission-tools';
+import { parseAutonomyCommand, runAutonomyCommand, type AutonomyCommand } from '../unified/autonomy';
 
 /** What the Chief of Staff says back, plus any cards whose full text is already in that reply. */
 export interface ChiefReply {
@@ -69,7 +70,9 @@ export type ChiefCommand =
   | { kind: 'plan' }
   | { kind: 'digest' }
   | { kind: 'missions' }
-  | { kind: 'cancelMission'; id?: string };
+  | { kind: 'cancelMission'; id?: string }
+  /** v21: kill switch, resume, demote, and "what did you do today?" (all plain code). */
+  | { kind: 'autonomy'; cmd: AutonomyCommand };
 
 /** v22, $0: "missions", "what are you working on?" */
 export const MISSIONS_REQUEST = /^(?:missions?|my missions|background missions|any missions|what(?:'?re| are) you working on|whatcha working on|what are you doing in the background)[?.!\s]*$/i;
@@ -331,6 +334,8 @@ export class ChiefOfStaff {
     if (MISSIONS_REQUEST.test(trimmed)) return { kind: 'missions' };
     const cancel = CANCEL_MISSION.exec(trimmed);
     if (cancel) return { kind: 'cancelMission', ...(cancel[1] ? { id: cancel[1] } : {}) };
+    const autonomy = parseAutonomyCommand(trimmed);
+    if (autonomy) return { kind: 'autonomy', cmd: autonomy };
 
     const known = new Set(this.engine.listFlows().map((f) => f.meta.id));
     const run = /^run\s+(\S+)(?:\s+([\s\S]+))?$/i.exec(trimmed);
@@ -385,6 +390,8 @@ export class ChiefOfStaff {
         return reply(await formatMissionList(this.loop?.dir ?? this.dir));
       case 'cancelMission':
         return reply(await this.cancelMission(c.id));
+      case 'autonomy':
+        return reply(await runAutonomyCommand(this.loop?.dir ?? this.dir, c.cmd, { ...(this.loop ? { trust: this.loop.trust } : {}), now: this.now() }));
     }
   }
 

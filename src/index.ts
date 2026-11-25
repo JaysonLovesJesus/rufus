@@ -229,7 +229,29 @@ export {
   type Sensitivity,
   type UpsertBlockOptions,
 } from './anchor/anchor';
-export { TrustStore, formatTrust, promotionMessage, assertActionType, DEFAULT_PROMOTION_THRESHOLD, TRUST_FILE, type Autonomy, type Verdict, type TrustRecord, type TrustFile, type FeedbackResult, type TrustStoreOptions } from './engine/trust';
+export {
+  TrustStore,
+  formatTrust,
+  promotionMessage,
+  assertActionType,
+  DEFAULT_PROMOTION_THRESHOLD,
+  TRUST_FILE,
+  TRUST_MODES,
+  isTrustMode,
+  actsOnItsOwn,
+  pauseAutonomy,
+  resumeAutonomy,
+  demoteAction,
+  setTrustMode,
+  trustMode,
+  type Autonomy,
+  type TrustMode,
+  type Verdict,
+  type TrustRecord,
+  type TrustFile,
+  type FeedbackResult,
+  type TrustStoreOptions,
+} from './engine/trust';
 export {
   MasterLoop,
   matchesSignal,
@@ -439,3 +461,6 @@ export {
 export { assignNumbers, loadStartState, saveStartState, requestCheckin, takeCheckinRequest, freshStartState, START_STATE_FILE, CHECKIN_REQUEST_FILE, type StartState } from './unified/state';
 export { inboxSensor, appendSignal, scheduleBlockHandler, INBOX_FILE } from './engine/loop-builtins';
 export { cleanMessageText, stripHtml, decodeEntities, isPlaceholderText, filterNoise, type FilterNoiseResult } from './history/noise';
+// v21: Earned Trust 2.0 - the audit ledger and the chat commands for the kill switch.
+export { AUDIT_FILE, AUDIT_REQUEST, appendAudit, loadAudit, formatAuditSummary, formatAutoNotice, auditSummary, describeDone, previewArgs, auditFile, type AuditEntry, type AuditInput, type AuditApproval } from './unified/audit';
+export { parseAutonomyCommand, runAutonomyCommand, type AutonomyCommand } from './unified/autonomy';
