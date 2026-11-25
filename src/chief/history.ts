@@ -19,6 +19,8 @@ export interface ChatTurn {
   text: string;
   /** ISO time. */
   at: string;
+  /** v18: Rufus spoke up on its own (a heads-up, a think-beat, the evening note), not in answer to the human. */
+  proactive?: boolean;
 }
 
 export const chatHistoryFile = (dir: string): string => path.join(dir, CHAT_HISTORY_FILE);
@@ -26,7 +28,7 @@ export const chatHistoryFile = (dir: string): string => path.join(dir, CHAT_HIST
 function parseTurn(line: string): ChatTurn | undefined {
   try {
     const t = JSON.parse(line) as Partial<ChatTurn>;
-    if ((t.role === 'user' || t.role === 'assistant') && typeof t.text === 'string' && typeof t.at === 'string') return { role: t.role, text: t.text, at: t.at };
+    if ((t.role === 'user' || t.role === 'assistant') && typeof t.text === 'string' && typeof t.at === 'string') return { role: t.role, text: t.text, at: t.at, ...(t.proactive === true ? { proactive: true } : {}) };
   } catch {
     /* a broken line is skipped */
   }
@@ -54,7 +56,7 @@ export async function loadChatHistory(dir: string, limit = DEFAULT_CHAT_TURNS): 
 
 /** Appends turns (blank ones are skipped) and trims the file once it grows well past `KEEP_CHAT_TURNS`. */
 export async function appendChatTurns(dir: string, turns: ChatTurn[]): Promise<void> {
-  const clean = turns.filter((t) => t.text.trim()).map((t) => ({ role: t.role, text: t.text.trim().slice(0, MAX_TURN_CHARS), at: t.at }));
+  const clean = turns.filter((t) => t.text.trim()).map((t) => ({ role: t.role, text: t.text.trim().slice(0, MAX_TURN_CHARS), at: t.at, ...(t.proactive ? { proactive: true } : {}) }));
   if (!clean.length) return;
   await fs.mkdir(dir, { recursive: true });
   await fs.appendFile(chatHistoryFile(dir), clean.map((t) => JSON.stringify(t)).join('\n') + '\n', 'utf8');

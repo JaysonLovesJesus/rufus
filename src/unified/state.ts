@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { LoopRun } from '../engine/loop';
 import { FileStore } from '../store';
+import type { SelfReviewState } from './review';
 import type { ThinkState } from './think';
 
 /** What `rufus start` remembers between passes (`<workspace>/start-state.json`). */
@@ -39,6 +40,8 @@ export interface StartState {
   lastPlanOffer?: string;
   /** v17: scroll/break blocks that already got their digest (`<date>:<blockId>`). */
   digested?: string[];
+  /** v18: the daily self-review. */
+  selfReview?: SelfReviewState;
 }
 
 export const START_STATE_FILE = 'start-state.json';

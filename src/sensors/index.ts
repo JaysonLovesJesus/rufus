@@ -3,6 +3,7 @@ import { BeeperApi, beeperApiOptions, type BeeperApiOptions, type BeeperChat } f
 import { beeperConfigured, parseOutput, runCommand, type CommandRunner } from '../tools/tools';
 import type { BeeperSensorConfig, CommandSensorConfig, RufusConfig } from '../types';
 import { clip } from '../corpus/types';
+import { pastResponseOf, pastResponsesFromThread, reactionHint, REACTION_SOURCE, type ChatMessageLike, type PastResponse, type ReactionHint } from '../history/reactions';
 
 /**
  * Live App Sensors: plain code that notices what is new in your apps, at $0 AI cost. Each sensor keeps a small cursor
@@ -215,13 +216,16 @@ export function buildSensors(config: RufusConfig, opts: { env?: NodeJS.ProcessEn
 
 // ---------- message triage ----------
 
-export type TriageLabel = 'ignore' | 'batch' | 'urgent' | 'todo';
+/** v18: `react` = you usually just put an emoji on messages like this; Rufus suggests the reaction, never a sentence. */
+export type TriageLabel = 'ignore' | 'batch' | 'urgent' | 'todo' | 'react';
 
 export interface TriageResult {
   label: TriageLabel;
   reason: string;
   /** The drafted reply, when one is worth sending. Sent only after your yes. */
   reply?: string;
+  /** For `react`: the emoji you usually use on messages like this. */
+  emoji?: string;
   /** Where it would go. */
   chatId?: string;
   to?: string;
@@ -231,6 +235,7 @@ export interface TriageResult {
 interface TriagePlan extends LoopPlan {
   label: TriageLabel;
   reason: string;
+  emoji?: string;
 }
 
 const ACK = new Set(['ok', 'okay', 'k', 'kk', 'thanks', 'thank', 'you', 'thx', 'ty', 'lol', 'haha', 'hahaha', 'nice', 'cool', 'great', 'perfect', 'awesome', 'yep', 'yup', 'sure', 'done', 'got', 'it', 'sounds', 'good', 'np', 'no', 'problem', 'worries', '👍', '❤️', '🙏', '😂', '🙌']);
@@ -253,17 +258,18 @@ export function classifyByCode(text: string): { label: TriageLabel; reason: stri
   return undefined;
 }
 
-function parseTriage(raw: string): { label?: TriageLabel; reason?: string; reply?: string; todo?: string } {
+function parseTriage(raw: string): { label?: TriageLabel; reason?: string; reply?: string; todo?: string; emoji?: string } {
   const m = /\{[\s\S]*\}/.exec(raw);
   if (!m) return {};
   try {
     const o = JSON.parse(m[0]) as Record<string, unknown>;
-    const label = ['ignore', 'batch', 'urgent', 'todo'].includes(String(o.label)) ? (o.label as TriageLabel) : undefined;
+    const label = ['ignore', 'batch', 'urgent', 'todo', 'react'].includes(String(o.label)) ? (o.label as TriageLabel) : undefined;
     return {
       ...(label ? { label } : {}),
       ...(typeof o.reason === 'string' ? { reason: o.reason } : {}),
       ...(typeof o.reply === 'string' && o.reply.trim() ? { reply: o.reply.trim() } : {}),
       ...(typeof o.todo === 'string' && o.todo.trim() ? { todo: o.todo.trim() } : {}),
+      ...(typeof o.emoji === 'string' && o.emoji.trim() && o.emoji.trim().length <= 16 ? { emoji: o.emoji.trim() } : {}),
     };
   } catch {
     return {};
@@ -283,21 +289,50 @@ export function classifyBurst(text: string): { label: TriageLabel; reason: strin
   return undefined;
 }
 
-/** The last messages of a chat (yours included), for drafting with real context. Empty when unavailable. */
-async function recentThread(signal: LoopSignal, ctx: LoopStageContext, limit = 12): Promise<string> {
+/** The last messages of a chat (yours included, reactions too), oldest first. Empty when unavailable. */
+async function readThread(signal: LoopSignal, ctx: LoopStageContext, limit: number): Promise<ChatMessageLike[]> {
   const chatId = typeof signal.data?.chatId === 'string' ? signal.data.chatId : undefined;
-  if (signal.surface !== 'chat' || !chatId || !ctx.tools.has('beeper.read')) return '';
+  if (signal.surface !== 'chat' || !chatId || !ctx.tools.has('beeper.read')) return [];
   try {
     const msgs = await ctx.tools.call<unknown>('beeper.read', { chatId, limit });
-    if (!Array.isArray(msgs)) return '';
-    return msgs
-      .filter((m): m is { text: string; isSender?: boolean; senderName?: string } => !!m && typeof m.text === 'string' && !!m.text.trim())
-      .slice(-limit)
-      .map((m) => `${m.isSender ? 'Me' : (m.senderName ?? signal.actor ?? 'Them')}: ${clip(m.text, 300)}`)
-      .join('\n');
+    if (!Array.isArray(msgs)) return [];
+    return msgs.filter((m): m is ChatMessageLike & { text: string } => !!m && typeof m.text === 'string').slice(-limit);
   } catch {
-    return ''; // the new messages alone are enough to draft from
+    return []; // the new messages alone are enough to draft from
   }
+}
+
+/** The last messages of a chat (yours included), for drafting with real context. Empty when unavailable. */
+async function recentThread(signal: LoopSignal, ctx: LoopStageContext, limit = 12): Promise<string> {
+  return (await readThread(signal, ctx, limit))
+    .filter((m) => !!m.text?.trim())
+    .map((m) => `${m.isSender ? 'Me' : (m.senderName ?? signal.actor ?? 'Them')}: ${clip(m.text ?? '', 300)}`)
+    .join('\n');
+}
+
+/** Messages read for the reaction hint: enough history to see how you usually answer this person. */
+const HINT_THREAD_LIMIT = 30;
+
+/**
+ * v18: do messages like this one usually get just an emoji from you? Looks at your saved reaction examples
+ * (`chat_reaction` in the corpus) and answered chats, plus how you answered this very chat lately (`beeper.read`).
+ * Code only, $0. `undefined` when nothing similar only got a reaction.
+ */
+export async function triageReactionHint(signal: LoopSignal, ctx: LoopStageContext, text: string): Promise<ReactionHint | undefined> {
+  if (signal.surface !== 'chat' || !text.trim()) return undefined;
+  const past: PastResponse[] = [];
+  for (const hit of [...ctx.facts(text, { sources: [REACTION_SOURCE], limit: 12 }), ...ctx.facts(text, { sources: ['chat'], limit: 12 })]) {
+    const p = pastResponseOf(hit.item);
+    if (p) past.push(p);
+  }
+  const fresh = new Set(
+    (Array.isArray(signal.data?.messages) ? (signal.data.messages as Array<{ messageId?: unknown }>) : [signal.data ?? {}]).map((m) => (m as { messageId?: unknown }).messageId).filter((x): x is string => typeof x === 'string'),
+  );
+  const thread = (await readThread(signal, ctx, HINT_THREAD_LIMIT)).filter((m) => !m.id || !fresh.has(m.id));
+  past.push(...pastResponsesFromThread(thread));
+  // A burst is judged by its newest line: that is what a reaction would land on.
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  return reactionHint(lines.length > 1 ? lines[lines.length - 1]! : text, past);
 }
 
 /** The human's past verdicts closest to `text` (rejections and their notes included), one line each. Empty when none. */
@@ -340,7 +375,10 @@ export function messageTriageHandler(opts: MessageTriageOptions = {}): SignalHan
       const surface = signal.surface;
       const who = signal.actor ?? 'someone';
       const text = signal.text ?? '';
-      let judged = classifyBurst(text);
+      let judged: { label: TriageLabel; reason: string; todo?: string; emoji?: string } | undefined = classifyBurst(text);
+      // v18: messages like this usually got only an emoji from you: suggest the reaction, never a sentence. Code, $0.
+      const hint = judged ? undefined : await triageReactionHint(signal, ctx, text);
+      if (!judged && hint?.strong) judged = { label: 'react', reason: hint.reason, emoji: hint.emoji };
       if (!judged && ctx.hasAi) {
         // Learning from corrections, not regexes: the human's past verdicts on the most similar messages (rejections with
         // their notes, like "2 that's just a call alert, ignore those") go straight into the triage prompt.
@@ -356,6 +394,12 @@ export function messageTriageHandler(opts: MessageTriageOptions = {}): SignalHan
             `From: ${who}`,
             `Messages (oldest first):\n${clip(text, 1500)}`,
             ...(ctx.replan ? [`A previous attempt failed: ${ctx.replan.reason}`] : []),
+            ...(hint
+              ? [
+                  `How they answered similar messages: ${hint.reason}. E.g. ${hint.examples.join('; ')}.`,
+                  `If a quick emoji is all this needs, answer {"label":"react","emoji":"${hint.emoji}","reason":"<short>"} instead of drafting a sentence.`,
+                ]
+              : []),
             ...(past
               ? [
                   `Their past decisions on similar messages (closest first):\n${past}`,
@@ -368,12 +412,18 @@ export function messageTriageHandler(opts: MessageTriageOptions = {}): SignalHan
           { tier: 'fast', json: true },
         );
         const t = parseTriage(raw);
-        if (t.label) judged = { label: t.label, reason: t.reason ?? 'model triage', ...(t.todo ? { todo: t.todo } : {}) };
+        if (t.label) judged = { label: t.label, reason: t.reason ?? 'model triage', ...(t.todo ? { todo: t.todo } : {}), ...(t.label === 'react' ? { emoji: t.emoji ?? hint?.emoji ?? '👍' } : {}) };
       }
       judged ??= { label: signal.urgency === 'urgent' ? 'urgent' : 'batch', reason: 'no model configured: you decide' };
       const urgency: Urgency = judged.label === 'urgent' || signal.urgency === 'urgent' ? 'urgent' : 'normal';
       if (judged.label === 'ignore') {
         return { goal: `Ignore ${who}'s ${surface} message (${judged.reason})`, actionType: `triage.ignore`, route: 'code', urgency: 'normal', autoComplete: true, label: 'ignore', reason: judged.reason };
+      }
+      if (judged.label === 'react') {
+        // A reaction, not a reply: it waits on you as a one-tap step (Rufus never reacts or sends for you here).
+        const emoji = judged.emoji ?? '👍';
+        const step = `React ${emoji} to ${who}`;
+        return { goal: step, actionType: `react.${surface}`, route: 'human', humanStep: step, urgency: 'normal', label: 'react', reason: judged.reason, emoji };
       }
       if (judged.label === 'todo') {
         // Something to DO, not a reply to draft: it waits on you as a to-do, and nothing is ever sent.

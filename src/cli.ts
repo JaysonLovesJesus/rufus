@@ -52,7 +52,7 @@ import { nowSummary } from './unified/now';
 import { assignNumbers, loadStartState, requestCheckin, saveStartState } from './unified/state';
 import { demoInput, demoProvider, triageDraft } from '../examples/triage-draft.flow';
 
-const USAGE = `rufus - your AI + Code + Human chief of staff
+const PRIMARY_USAGE = `rufus - your AI + Code + Human chief of staff
 
 Usage: rufus [--dir <workspace>] <command>      (workspace: ~/.rufus, or $RUFUS_HOME)
 
@@ -72,15 +72,35 @@ Primary commands:
                                your verdict from the terminal: updates trust, applies, and becomes an example
   chat <message...>            talk to your chief of staff (status, flows, lessons, run, learn, or anything)
   collect <source> <path...> [--limit N] [--dry-run] [--ignore a,b] [--me addr,addr]
-                               add local activity to your life corpus: files, calendar, browser, email, ai-prompts
-                               (only your own messages, never the assistant's)
+                               add local activity to your life corpus: files, calendar, browser, email, ai-prompts,
+                               reactions (a Beeper messages export: what you only answered with an emoji)
   embed [--provider local|ollama|gemini|http] [--model <name>]
                                cache vectors for your corpus and history (incremental; default local, offline, $0)
 
 Your words: <workspace>/SOUL.md (created by init) goes into every chat and loop prompt, with the Anchor and the
 closest examples. Tools and sensors live in config.json ("tools", "sensors", "start"); see the README.
+`;
 
-Advanced / Legacy:
+/** One line each: the v1-v11 commands still work, but are not the way in any more. */
+const LEGACY_SHORT = `
+Advanced / Legacy:                (still supported; \`rufus --help --all\` shows every option)
+  init                         create the workspace (config.json, SOUL.md template)
+  flows | run | pending | answer   durable flows and their cards
+  bridge                       cards-only chat bridge (superseded by start)
+  loop                         the Master Loop alone, no chat (superseded by start)
+  signal                       drop a signal into inbox.jsonl
+  tick | watch | emit          the flow scheduler
+  lessons | propose            learned lessons
+  seed                         load past replies as replay cases
+  mine                         what your history says (voice, invariants, intents)
+  replay | compare             re-run past cases against a flow
+  backtest [--count N]         time-travel check against your real past replies
+  context [query]              the life context snapshot
+  demo                         run the example flow
+`;
+
+const LEGACY_FULL = `
+Advanced / Legacy:                (all options)
   init                         create the workspace (config.json, SOUL.md template)
   flows | run <flowId> [json] | pending | answer <cardId> <reply...>
                                durable flows and their cards (rufus start delivers cards too)
@@ -102,6 +122,14 @@ Advanced / Legacy:
   context [query] [--source a,b] [--since <days>] [--limit N] [--half-life <days>] [--json]
   demo [--reply <text>]        run the example flow
 `;
+
+/** \`rufus --help\`: the Jarvis core first, legacy one line each. \`--all\` spells out every legacy option. */
+export function usage(opts: { all?: boolean } = {}): string {
+  return PRIMARY_USAGE + (opts.all ? LEGACY_FULL : LEGACY_SHORT);
+}
+
+/** Kept for compatibility: the default help text. */
+export const USAGE = usage();
 
 export interface Io {
   out(line: string): void;
@@ -229,6 +257,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const save = bool('--save');
   const latest = bool('--latest');
   const allowOverlap = bool('--allow-overlap');
+  const showAll = bool('--all');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
   for (const flag of ['--dir', '--checkin', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data']) {
@@ -243,7 +272,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const reply = flags['--reply'];
 
   const [cmd, ...rest] = args;
-  if (!cmd || cmd === 'help' || cmd === '--help') return io.out(USAGE);
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') return io.out(usage({ all: showAll }));
 
   const store = new FileStore(dir);
   await store.init();
@@ -559,7 +588,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
 
     case 'collect': {
       const [source, ...paths] = rest;
-      if (!source || !paths.length) throw new Error('Usage: rufus collect <files|browser|calendar|email|ai-prompts> <path> [--limit N] [--dry-run]');
+      if (!source || !paths.length) throw new Error('Usage: rufus collect <files|browser|calendar|email|ai-prompts|reactions> <path> [--limit N] [--dry-run]');
       const adapter = getAdapter(source);
       if (adapter.id !== 'files' && adapter.id !== 'ai-prompts' && paths.length > 1) throw new Error(`rufus collect ${adapter.id} takes one path (a file or a folder of exports).`);
       const options = {
@@ -756,6 +785,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
           calendarSync: config.start?.calendarSync === false ? false : { everyMs: parseDuration(config.start?.calendarSync?.every ?? '20m') },
           planner: config.start?.planner === false ? false : (config.start?.planner ?? {}),
           breakDigest: config.start?.breakDigest === false ? false : (config.start?.breakDigest ?? {}),
+          selfReview: config.start?.selfReview === false ? false : { ...(config.start?.selfReview ?? {}) },
           ...(now ? { now } : {}),
         });
         const report = (r: StartTickReport): void => {

@@ -38,7 +38,20 @@ export interface BeeperApiMessage {
   text: string;
   timestamp?: string;
   sortKey?: string;
+  /** v18: emoji reactions on this message, when Beeper returns them. `isMe` marks yours. */
+  reactions?: BeeperReaction[];
 }
+
+/** One emoji reaction on a message. */
+export interface BeeperReaction {
+  emoji: string;
+  participantId?: string;
+  /** True when you reacted. */
+  isMe?: boolean;
+}
+
+/** v18 name for a Beeper message as the sensor and tools see it. */
+export type BeeperMessage = BeeperApiMessage;
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v : typeof v === 'number' ? String(v) : undefined);
 const listOf = (body: unknown): Record<string, unknown>[] => {
@@ -57,6 +70,26 @@ function textOf(m: Record<string, unknown>): string {
     if (s?.trim()) return s;
   }
   return '';
+}
+
+/**
+ * Reactions as Beeper Desktop returns them (`reactions: [{ reactionKey, participantID, emoji, ... }]`), read loosely:
+ * `emoji` may be the emoji itself or a flag next to `reactionKey`. `myIds` are your own participant ids (the senders of
+ * messages marked `isSender`), so a reaction is yours even when Beeper does not say `isMe`.
+ */
+export function parseReactions(raw: unknown, myIds: ReadonlySet<string> = new Set()): BeeperReaction[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((r): BeeperReaction[] => {
+    if (typeof r === 'string') return r.trim() ? [{ emoji: r.trim() }] : [];
+    if (!r || typeof r !== 'object') return [];
+    const o = r as Record<string, unknown>;
+    const emoji = (typeof o.emoji === 'string' ? str(o.emoji) : undefined) ?? str(o.reactionKey) ?? str(o.key) ?? str(o.reaction) ?? str(o.text);
+    if (!emoji?.trim()) return [];
+    const participantId = str(o.participantID) ?? str(o.participantId) ?? str(o.senderID) ?? str(o.senderId) ?? str(o.userID) ?? str(o.userId);
+    const flag = typeof o.isMe === 'boolean' ? o.isMe : typeof o.isSender === 'boolean' ? o.isSender : undefined;
+    const isMe = flag ?? (participantId !== undefined && myIds.has(participantId) ? true : undefined);
+    return [{ emoji: emoji.trim(), ...(participantId ? { participantId } : {}), ...(isMe !== undefined ? { isMe } : {}) }];
+  });
 }
 
 /** Settings from `config.beeper` (`apiUrl`, or the older `url`), with `RUFUS_BEEPER_URL` / `RUFUS_BEEPER_TOKEN` winning. */
@@ -99,10 +132,13 @@ export class BeeperApi {
   async listMessages(chatId: string, opts: { limit?: number } = {}): Promise<BeeperApiMessage[]> {
     const q = opts.limit ? `?limit=${encodeURIComponent(String(opts.limit))}` : '';
     const body = await this.json('GET', `/v1/chats/${encodeURIComponent(chatId)}/messages${q}`);
-    return listOf(body)
+    const raw = listOf(body);
+    const myIds = new Set(raw.flatMap((m) => (m.isSender === true ? [str(m.senderID) ?? str(m.senderId)].filter((x): x is string => !!x) : [])));
+    return raw
       .flatMap((m): BeeperApiMessage[] => {
         const id = str(m.id) ?? str(m.messageID);
         if (!id) return [];
+        const reactions = parseReactions(m.reactions, myIds);
         return [
           {
             id,
@@ -115,6 +151,7 @@ export class BeeperApi {
             text: textOf(m),
             ...(str(m.timestamp) ? { timestamp: str(m.timestamp)! } : {}),
             ...(str(m.sortKey) ? { sortKey: str(m.sortKey)! } : {}),
+            ...(reactions.length ? { reactions } : {}),
           },
         ];
       })

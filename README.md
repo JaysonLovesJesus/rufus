@@ -321,7 +321,7 @@ A chief of staff does not only know your chats. It knows your mail, the sites yo
 1. **History is a recency-weighted baseline.** What you did last month says more about you than what you did two years ago, so every summary decays old activity (exponential half-life, counted in observations rather than calendar days) instead of averaging it in.
 2. **Ideals beat habits.** People change, and do not always live up to what they believe. Rufus helps you live up to the lessons you *stated*; it does not freeze your rushed habits. But ideals do not overpower evolution either: when your latest replies keep contradicting a saved lesson, Rufus asks you about it instead of enforcing a stale rule forever.
 
-### One corpus, five adapters (`rufus collect`)
+### One corpus, six adapters (`rufus collect`)
 
 Everything becomes a `CorpusItem`: `{ id, source, kind, title?, summary, actor?, domain?, path?, timestamp, tags?, metadata? }`, with `source` one of `chat`, `email`, `browser`, `file`, `calendar`, `ai-prompts` (or your own). Items live in `<workspace>/corpus/items.jsonl`, deduplicated by `id` (collecting twice changes nothing; an edited note is updated, not duplicated) and written atomically. Only a short summary is kept, never a full document or message body. Adapters are local and dependency-free:
 
@@ -331,6 +331,7 @@ rufus collect calendar ./cal.ics                            # or a JSON list of 
 rufus collect browser ./history.json                        # or a Chrome / Arc / Safari history database
 rufus collect email ./mail.mbox --me me@example.org         # .mbox, .eml (or a folder of them), or JSONL
 rufus collect ai-prompts ./chats.jsonl ./exports/            # AI chat transcripts: ONLY your own messages are kept (plus what you were replying to, as context)
+rufus collect reactions ./beeper-messages.json               # v18: messages you only answered with an emoji (source chat_reaction)
 # any of them: --limit N (keep the newest N)  --dry-run (read and report, write nothing)
 ```
 
@@ -740,9 +741,29 @@ It also asks a running `rufus start` for a check-in on its next pass.
 - **Proactive day planner.** Say "plan my day" / "schedule the rest of today", or let it offer once a day (`start.planner`, default window `09:00-17:00` when 90+ minutes are open). It fills the open gaps (after calendar events, protected windows like a Sabbath or lights-out, and the `21:00` day end) with focus blocks for your top goals and projects, short breaks and one curated scroll slot, checked in code for zero overlaps. It only asks ("You've got open time from 2 to 5pm — want me to block 2–3:20pm for the deck, a 15m break, and 3:35–5pm for the blog?"); nothing is written until you say yes (or "plan yes" when a send is also waiting, so a bare "yes" never sends anything by accident). The proposal waits in `day-plan.json` for 3 hours. `"planner": { "ai": true }` lets one fast-tier call lay it out (still validated by code).
 - **Curated break digest.** Say "break digest" or "what's interesting?", or get it automatically when a scheduled `scroll` block starts (`start.breakDigest`, `{ "kinds": ["scroll", "break"] }` to widen). It reads recent `browser` corpus items, drops login, search, inbox and feed pages, and gives 2-3 bullets ranked by how they tie into your active goals and projects and how often you came back. Empty history gets a kind one-liner, never an error.
 
+### Emoji reaction learning (v18)
+
+Plenty of messages never deserve a sentence: you just put a 👍, ❤️ or 😂 on them. Rufus now learns that too.
+
+- **Structured reactions.** `BeeperApi.listMessages` (and `beeper.read`) return `reactions: [{ emoji, participantId?, isMe? }]` when Beeper Desktop reports them. A reaction is yours when Beeper says so, or when its participant is the sender of your own messages.
+- **Clean examples.** `extractReactionExamples(messages)` keeps only incoming messages you reacted to *and did not also answer in text* (a reply of yours before their next message the same day, or within 30 minutes, counts as answering). Each becomes a `CorpusItem` with `source: 'chat_reaction'`, the emoji in `tags` / `metadata.emoji`. Save a Beeper messages export with `rufus collect reactions <file.json>`.
+- **Triage suggests the reaction.** Before any model call, `messageTriageHandler` compares the new message with your saved reaction examples, your answered chats, and how you answered this very chat lately (`beeper.read`). Two or more similar messages that only got an emoji (and fewer text replies) make it a `react` step by code at $0: `Your turn: React 😂 to Mom`. One similar example is passed to the model as a hint, which may answer `{"label":"react","emoji":"😂"}`. Either way no sentence is drafted, and Rufus never reacts or sends on its own.
+
+### Daily self-review (v18)
+
+Once each evening `rufus start` looks back over the last 24 hours, by code at $0:
+
+- `chat-history.jsonl`: proactive nudges sent (heads-ups, the morning brief, think-beats, now marked `"proactive": true`) and how many were answered within 2 hours vs. ignored;
+- `loop-runs/`: Verify items accepted / edited / rejected / expired, rejections per action type (with your notes), and failed or missing tool calls;
+- `trust.json`: actions whose clean streak earned a promotion (`promotionSuggested`).
+
+It always appends one structured record to `<workspace>/self-review.jsonl`. Only when something is actionable (an action ready for Earned Trust promotion, three or more rejections of one action type, a tool failing or missing three or more times) does it say ONE short note, such as `Quick one before tonight: you've OK'd my reply.chat 10 times in a row without a change. Want me to handle those on my own from now on? (rufus trust promote reply.chat)`. Otherwise it stays silent. A promotion is mentioned once, not every evening.
+
+The gate lives in `start-state.json` (`selfReview.lastDate`): once per local day, after `19:00`, never in quiet hours, never in an Anchor `protect_time` window (a Sabbath) or a protected block, never mid-conversation. Configure it with `"start": { "selfReview": { "after": "19:30", "repeatRejections": 3 } }`, or turn it off with `"selfReview": false`.
+
 ### What is primary and what is legacy
 
-`rufus --help` now leads with eight **primary commands**: `start`, `now`, `anchor`, `trust`, `decide`, `chat`, `collect`, `embed`. Everything else (`bridge`, `loop`, `signal`, `run`/`pending`/`answer`, `tick`/`watch`/`emit`, `lessons`/`propose`, `seed`, `mine`, `replay`, `compare`, `backtest`, `context`, `demo`) still works exactly as before under **Advanced / Legacy**. `rufus bridge` and `rufus loop` are each half of what `rufus start` does.
+`rufus --help` is the Jarvis core: eight **primary commands**, `start`, `now`, `anchor`, `trust`, `decide`, `chat`, `collect`, `embed`, with their options. Everything else (`init`, `bridge`, `loop`, `signal`, `run`/`pending`/`answer`, `tick`/`watch`/`emit`, `lessons`/`propose`, `seed`, `mine`, `replay`/`compare`, `backtest`, `context`, `demo`) still works exactly as before, listed one line each under **Advanced / Legacy**; `rufus --help --all` spells out their options. `rufus bridge` and `rufus loop` are each half of what `rufus start` does.
 
 ## The One Master Loop (v11)
 
@@ -855,7 +876,7 @@ pnpm rufus answer <cardId> 1    # resume and finish
 pnpm rufus lessons
 ```
 
-Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `propose <scope> <rule...>`, `demo`, `tick`, `watch`, `emit`, `replay`, `compare <flowId>`, `seed`, `mine`, `collect <source> <path>`, `context [query]`, `chat <message...>`, and for the Master Loop `anchor`, `trust`, `signal`, `loop`, `decide`.
+Add `--reply "1"` to `demo` to see the whole thing in one go. Day to day you only need the primary commands (`start`, `now`, `anchor`, `trust`, `decide`, `chat`, `collect`, `embed`); the flow-engine and history tools above are listed under Advanced / Legacy in `rufus --help` (`--help --all` for every option).
 
 ### Your own flows and your own data
 
@@ -937,15 +958,15 @@ src/anchor/     the Anchor: goals, projects, boundaries, schedule (overlap detec
 src/engine/     defineFlow, defineStagedFlow, Engine, step runner, `stages` (plan -> execute -> verify with re-plan escalation), AI verify loop, providers, spectrum (code / fast / smart / human), `loop` (the Master Loop) + built-ins, `trust` (Earned Trust)
 src/store/      atomic JSON file store (no native deps)
 src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay; compare (plain vs. assisted)
-src/history/    HistoryPair, message extraction, `noise` (passcodes, tapbacks, HTML and sync-placeholder cleanup), `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`, `retrieveSimilarExamples`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `backtest` (strictly causal time-travel check), `ideals` (explicit lessons as constraints, drift), `mine` (voice, invariants, intents, recency, optional AI blueprints)
-src/corpus/     `CorpusItem`, `CorpusStore`, `SourceAdapter`s (files, browser, calendar, email, ai-prompts), recurrence, `buildCorpusSummary` / hybrid `queryCorpus`, `embeddings` (providers, `EmbeddingCache`)
+src/history/    HistoryPair, message extraction, `reactions` (emoji-only answers as `chat_reaction` examples, the triage reaction hint), `noise` (passcodes, tapbacks, HTML and sync-placeholder cleanup), `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`, `retrieveSimilarExamples`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `backtest` (strictly causal time-travel check), `ideals` (explicit lessons as constraints, drift), `mine` (voice, invariants, intents, recency, optional AI blueprints)
+src/corpus/     `CorpusItem`, `CorpusStore`, `SourceAdapter`s (files, browser, calendar, email, ai-prompts, reactions), recurrence, `buildCorpusSummary` / hybrid `queryCorpus`, `embeddings` (providers, `EmbeddingCache`)
 src/recency.ts  exponential and rank-based recency weights, shared by history and the corpus
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop
 src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Telegram and Beeper adapters
 src/soul/       SOUL.md loader and the persona block (SOUL.md + Anchor + examples + facts) for every prompt
 src/tools/      ToolRegistry (side effects only in commit, sensitive tools need a yes), Beeper and command tools
 src/sensors/    beeperSensor, commandSensor, messageTriageHandler
-src/unified/    `rufus start` (UnifiedDaemon), plain-text Verify (parseLoopReply / formatLoopItem), batching, `rufus now`
+src/unified/    `rufus start` (UnifiedDaemon), plain-text Verify (parseLoopReply / formatLoopItem), batching, `rufus now`, the think-beat, the daily self-review (`review`)
 src/chief/      ChiefOfStaff: fast code commands + code-assembled free-form chat
 src/cli.ts      the `rufus` command
 examples/       a generic triage-and-draft flow

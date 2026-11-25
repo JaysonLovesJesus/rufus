@@ -9,6 +9,7 @@ import { browserAdapter } from './adapters/browser';
 import { calendarAdapter } from './adapters/calendar';
 import { emailAdapter } from './adapters/email';
 import { filesAdapter } from './adapters/files';
+import { reactionsAdapter } from './adapters/reactions';
 import { describeRecurrence, occurrencesBetween, parseRRule } from './recurrence';
 import { CorpusStore, type AddReport } from './store';
 import { clip, stableId, type CollectOptions, type CorpusItem, type SourceAdapter } from './types';
@@ -16,6 +17,7 @@ import { clip, stableId, type CollectOptions, type CorpusItem, type SourceAdapte
 export { CorpusStore, type AddReport } from './store';
 export { clip, normalizeItem, stableId, type CollectOptions, type CorpusItem, type SourceAdapter } from './types';
 export { filesAdapter, type FilesOptions } from './adapters/files';
+export { reactionsAdapter, reactionItemsFromExport, type ReactionsOptions } from './adapters/reactions';
 export { aiPromptsAdapter, cleanPromptText, humanPrompts, tagPrompt, type AiPromptsOptions, type PromptKind } from './adapters/ai-prompts';
 export { browserAdapter, parseVisitTime, visitFromRecord, visitsToItems, type BrowserOptions } from './adapters/browser';
 export { calendarAdapter, parseIcs, type CalendarOptions } from './adapters/calendar';
@@ -32,9 +34,10 @@ export const ADAPTERS: Record<string, SourceAdapter<any>> = {
   calendar: calendarAdapter,
   email: emailAdapter,
   'ai-prompts': aiPromptsAdapter,
+  reactions: reactionsAdapter,
 };
 
-/** `files`, `browser`, `calendar`, `email` or `ai-prompts` (the singular `file` also works). */
+/** `files`, `browser`, `calendar`, `email`, `ai-prompts` or `reactions` (the singular `file` also works). */
 export function getAdapter(id: string): SourceAdapter<any> {
   const key = id === 'file' ? 'files' : id;
   const a = ADAPTERS[key];

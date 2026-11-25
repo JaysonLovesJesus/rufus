@@ -140,6 +140,8 @@ export {
   corpusItemsFromPairs,
   emailAdapter,
   filesAdapter,
+  reactionsAdapter,
+  reactionItemsFromExport,
   formatCorpusSummary,
   formatHits,
   getAdapter,
@@ -286,12 +288,30 @@ export {
   type RunCommandOptions,
   type BuildToolsOptions,
 } from './tools/tools';
-export { BeeperApi, beeperApiOptions, DEFAULT_BEEPER_API_URL, type BeeperApiOptions, type BeeperChat, type BeeperApiMessage } from './tools/beeper-api';
+export { BeeperApi, beeperApiOptions, parseReactions, DEFAULT_BEEPER_API_URL, type BeeperApiOptions, type BeeperChat, type BeeperApiMessage, type BeeperMessage, type BeeperReaction } from './tools/beeper-api';
+export {
+  extractReactionExamples,
+  responseOutcomes,
+  reactionHint,
+  textSimilarity,
+  pastResponseOf,
+  pastResponsesFromThread,
+  REACTION_SOURCE,
+  DEFAULT_REPLY_WINDOW_MS,
+  DEFAULT_MIN_SIMILARITY,
+  type ChatMessageLike,
+  type ReactionLike,
+  type ReactionExtractOptions,
+  type ResponseOutcome,
+  type PastResponse,
+  type ReactionHint,
+} from './history/reactions';
 export {
   beeperSensor,
   commandSensor,
   buildSensors,
   messageTriageHandler,
+  triageReactionHint,
   classifyByCode,
   DEFAULT_BOT_PATTERN,
   DEFAULT_IGNORE_CHAT_TITLES,
@@ -338,6 +358,25 @@ export {
   type PlanKind,
 } from './unified/planner';
 export { buildBreakDigest, digestCandidates, isNoisePage, codeBullet, formatDigest, EMPTY_DIGEST, DIGEST_REQUEST, DEFAULT_DIGEST_LOOKBACK_HOURS, DEFAULT_DIGEST_MAX, type BreakDigest, type DigestOptions, type DigestTopic } from './unified/digest';
+export {
+  runSelfReview,
+  buildSelfReview,
+  selfReviewSkipReason,
+  selfReviewNote,
+  countNudges,
+  appendSelfReview,
+  loadSelfReviews,
+  loadLoopRuns,
+  SELF_REVIEW_FILE,
+  DEFAULT_REVIEW_AFTER,
+  DEFAULT_NUDGE_ANSWER_MS,
+  DEFAULT_REPEAT_REJECTIONS,
+  DEFAULT_REPEAT_TOOL_FAILURES,
+  type SelfReviewOptions,
+  type SelfReviewState,
+  type SelfReviewRecord,
+  type SelfReviewInsight,
+} from './unified/review';
 export { assignNumbers, loadStartState, saveStartState, requestCheckin, takeCheckinRequest, freshStartState, START_STATE_FILE, CHECKIN_REQUEST_FILE, type StartState } from './unified/state';
 export { inboxSensor, appendSignal, scheduleBlockHandler, INBOX_FILE } from './engine/loop-builtins';
 export { cleanMessageText, stripHtml, decodeEntities, isPlaceholderText, filterNoise, type FilterNoiseResult } from './history/noise';

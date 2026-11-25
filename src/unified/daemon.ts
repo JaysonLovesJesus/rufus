@@ -12,6 +12,7 @@ import type { Verdict } from '../engine/trust';
 import { clip } from '../corpus/types';
 import { REMEMBER_TOOL, rememberTool } from '../chief/learning';
 import { draftOf, formatCheckin, formatLoopItem, isBareVerdict, parseLoopReply, recipientOf, refOf, type LoopReply } from './loop-text';
+import { runSelfReview, type SelfReviewOptions } from './review';
 import { freshThinkState, think, thinkSkipReason, type ThinkOptions } from './think';
 import { acceptNudge, blocksToNudge, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, formatMorningBrief, formatNudge, inQuietHours, isMorning, markNudged, nudgePrompt, phoneSignalHandler, type HeartbeatOptions } from './heartbeat';
 import type { BlockKind, ScheduleBlock } from '../anchor/anchor';
@@ -66,6 +67,11 @@ export interface UnifiedDaemonOptions {
   planner?: DayPlannerOptions | false;
   /** v17: a curated break digest at the start of scheduled `scroll` (and other chosen) blocks. Off unless set. */
   breakDigest?: BreakDigestOptions | false;
+  /**
+   * v18: the daily self-review (once each evening, code only). Writes `self-review.jsonl`; says one short note only when
+   * something is actionable. Off unless set (`rufus start` turns it on).
+   */
+  selfReview?: SelfReviewOptions | false;
   now?: () => Date;
 }
 
@@ -112,6 +118,8 @@ export interface StartTickReport {
   planned?: string;
   /** v17: the break digest sent this pass. */
   digest?: string;
+  /** v18: what the daily self-review did this pass: `noted`, `silent`, or `skipped: <why>`. */
+  reviewed?: string;
   /** Problems this pass; the next pass retries. */
   errors: string[];
 }
@@ -183,6 +191,7 @@ export class UnifiedDaemon {
   private readonly calendarSync: { everyMs: number } | false;
   private readonly planner: DayPlannerOptions | false;
   private readonly digestOpts: BreakDigestOptions | false;
+  private readonly reviewOpts: SelfReviewOptions | false;
   private readonly pendingTtlMs: number;
   private readonly bubblePauseMs: number;
   private readonly now: () => Date;
@@ -209,6 +218,7 @@ export class UnifiedDaemon {
     this.calendarSync = opts.calendarSync === false ? false : { everyMs: Math.max(60_000, opts.calendarSync?.everyMs ?? DEFAULT_CALENDAR_SYNC_MS) };
     this.planner = opts.planner ? opts.planner : false;
     this.digestOpts = opts.breakDigest ? opts.breakDigest : false;
+    this.reviewOpts = opts.selfReview ? opts.selfReview : false;
     this.pendingTtlMs = opts.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
     this.bubblePauseMs = Math.max(0, opts.bubblePauseMs ?? 350);
     // Your schedule and goals are editable from chat ("remove the study block"): private and local, so no Verify item.
@@ -336,6 +346,13 @@ export class UnifiedDaemon {
           report.errors.push(`planner: ${message(err)}`);
         }
       }
+      if (this.reviewOpts) {
+        try {
+          await this.reviewPass(state, report, this.reviewOpts);
+        } catch (err) {
+          report.errors.push(`self-review: ${message(err)}`);
+        }
+      }
       if (this.thinkOpts) {
         try {
           await this.thinkPass(state, report, this.thinkOpts);
@@ -365,7 +382,7 @@ export class UnifiedDaemon {
       if (state.lastMorningBrief !== date) {
         state.lastMorningBrief = date;
         const text = formatMorningBrief(anchor, now, (await this.loop.pending()).length);
-        await this.say(text);
+        await this.say(text, false, false, true);
         sent.push(text);
       }
     }
@@ -373,7 +390,7 @@ export class UnifiedDaemon {
     for (const block of blocksToNudge(anchor, now, state.nudged ?? [], hb.leadMinutes ?? DEFAULT_LEAD_MINUTES)) {
       state.nudged = markNudged(state.nudged, anchor, block);
       const text = hb.phrasing === 'ai' ? await this.phraseNudge(block, now) : formatNudge(block, now);
-      await this.say(text);
+      await this.say(text, false, false, true);
       sent.push(text);
     }
     if (sent.length) report.proactive = [...(report.proactive ?? []), ...sent];
@@ -406,7 +423,7 @@ export class UnifiedDaemon {
       said.push(key);
       const mine = c.blocks.map((b) => speakableTitle(b.title, 32));
       const text = `Heads up — your calendar has ${speakableTitle(c.event.title, 40)} at ${range12(c.event.start, c.event.end)}, right on top of your ${mine.join(' and ')} block. Want me to move ${mine.length > 1 ? 'them' : 'it'}?`;
-      await this.say(text);
+      await this.say(text, false, true, true);
       report.proactive = [...(report.proactive ?? []), text];
     }
     state.calendarConflicts = said.filter((k) => k.startsWith(`${date}:`)).slice(-KEEP_KEYS);
@@ -436,7 +453,7 @@ export class UnifiedDaemon {
     if (!plan.blocks.length) return;
     await savePendingPlan(this.loop.dir, plan, now);
     state.lastPlanOffer = date;
-    await this.say(plan.summary, false, true);
+    await this.say(plan.summary, false, true, true);
     if (state.think) {
       state.think.unanswered += 1;
       state.think.lastSentAt = now.toISOString();
@@ -460,9 +477,41 @@ export class UnifiedDaemon {
     state.digested = [...(state.digested ?? []), key].slice(-KEEP_KEYS);
     const ai = opts.ai ? this.engine.routeProvider({ tier: 'fast' }) : undefined;
     const digest = await buildBreakDigest({ dir: this.loop.dir, anchor, now, ...(ai ? { ai } : {}) });
-    await this.say(digest.text, false, true);
+    await this.say(digest.text, false, true, true);
     report.digest = digest.text;
     report.proactive = [...(report.proactive ?? []), digest.text];
+  }
+
+  /**
+   * v18: the daily self-review. Once each evening, never in quiet hours or protected time, and never mid-conversation or
+   * right after the heartbeat spoke (it simply waits for a later pass). The record is always saved; at most ONE short
+   * note is said, and only when something is actionable.
+   */
+  private async reviewPass(state: StartState, report: StartTickReport, opts: SelfReviewOptions): Promise<void> {
+    const now = this.now();
+    if (report.proactive?.length) {
+      report.reviewed = 'skipped: heartbeat spoke';
+      return;
+    }
+    if (state.lastHumanAt && now.getTime() - Date.parse(state.lastHumanAt) < CONVERSATION_QUIET_MS) {
+      report.reviewed = 'skipped: in conversation';
+      return;
+    }
+    const anchor = await loadAnchor(this.loop.dir, now);
+    const quietHours = opts.quietHours !== undefined ? opts.quietHours : this.heartbeat ? (this.heartbeat.quietHours ?? DEFAULT_QUIET_HOURS) : DEFAULT_QUIET_HOURS;
+    const r = await runSelfReview({ dir: this.loop.dir, now, anchor, state: (state.selfReview ??= {}), options: { ...opts, quietHours } });
+    if ('skipped' in r) {
+      report.reviewed = `skipped: ${r.skipped}`;
+      return;
+    }
+    if (!r.note) {
+      report.reviewed = 'silent';
+      return;
+    }
+    await this.say(r.note, false, true, true);
+    if (state.think) state.think.lastAt = now.toISOString(); // that was the beat
+    report.reviewed = 'noted';
+    report.proactive = [...(report.proactive ?? []), r.note];
   }
 
   /** Expires Verify items that reached you more than `pendingTtlMs` ago. Undelivered items wait for their check-in. */
@@ -514,7 +563,7 @@ export class UnifiedDaemon {
     await this.channel?.typing?.().catch(() => undefined);
     for (const [i, bubble] of r.bubbles.entries()) {
       if (i && this.bubblePauseMs) await new Promise((resolve) => setTimeout(resolve, this.bubblePauseMs));
-      await this.say(bubble, false, true);
+      await this.say(bubble, false, true, true);
     }
     t.unanswered += 1;
     t.lastSentAt = now.toISOString();
@@ -709,7 +758,7 @@ export class UnifiedDaemon {
    * Records what we send (so its echo is ignored), then sends it, or prints it when there is no channel. What the daemon
    * itself says (items, heads-ups) also goes into the chat history; relayed chief replies are recorded by the chief.
    */
-  private async say(text: string, relayed = false, record = false): Promise<void> {
+  private async say(text: string, relayed = false, record = false, proactive = false): Promise<void> {
     const state = this.current;
     if (state) {
       state.sent = [...state.sent, hash(text)].slice(-KEEP_SENT);
@@ -717,6 +766,6 @@ export class UnifiedDaemon {
     }
     if (this.channel) await this.channel.send(text);
     else this.output(text);
-    if (!relayed && (this.chief || record)) await appendChatTurns(this.loop.dir, [{ role: 'assistant', text, at: this.now().toISOString() }]).catch(() => undefined);
+    if (!relayed && (this.chief || record || proactive)) await appendChatTurns(this.loop.dir, [{ role: 'assistant', text, at: this.now().toISOString(), ...(proactive ? { proactive: true } : {}) }]).catch(() => undefined);
   }
 }

@@ -516,6 +516,12 @@ export interface StartConfig {
   planner?: false | { window?: string; minOpenMinutes?: number; dayStart?: string; dayEnd?: string; maxFocusMinutes?: number; breakMinutes?: number; scroll?: boolean; ai?: boolean };
   /** v17: a short curated digest when a scheduled `scroll` block (or the `kinds` you name) starts. Default on; `false`: off. */
   breakDigest?: false | { kinds?: Array<'focus' | 'meeting' | 'break' | 'scroll' | 'personal' | 'protected'>; ai?: boolean; withinMinutes?: number };
+  /**
+   * v18: the daily self-review. Once each evening (after `after`, default `19:00`, before quiet hours, never in protected
+   * time) code reviews the last 24h into `self-review.jsonl`, and says one short note only when something is actionable.
+   * Default on; `false` turns it off.
+   */
+  selfReview?: false | { after?: string; quietHours?: string | false; repeatRejections?: number; repeatToolFailures?: number };
 }
 
 /** Guardrails against piling up prompt rules. */
