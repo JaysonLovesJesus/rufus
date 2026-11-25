@@ -27,6 +27,8 @@ import { nowSummary } from './now';
 import { assignNumbers, loadStartState, saveStartState, takeCheckinRequest, type StartState } from './state';
 import { cancelMission, formatMissionDelivery, isActiveMission, listMissions, loadMission, runMission, saveMission, type MissionRecord } from './missions';
 import { MISSION_START_TOOL, missionTools } from '../tools/mission-tools';
+import { PENDING_CLEAR_TOOL, pendingClearTool } from '../tools/pending-tool';
+import { pruneHandledPendingItems } from '../engine/cross-verify';
 import { parseAutonomyCommand, runAutonomyCommand } from './autonomy';
 import { commandSynthesizer, resolveVoiceReplyMode, shouldSpeakReply, type Synthesizer } from '../channels/voice';
 import type { TtsCommandConfig, VoiceReplyMode } from '../types';
@@ -100,6 +102,13 @@ export interface UnifiedDaemonOptions {
    * check-ins and cards are always text. If speaking fails, the reply is sent as text.
    */
   voice?: { tts?: TtsCommandConfig | Synthesizer; replyMode?: VoiceReplyMode };
+  /**
+   * v24a "Code Prepares": before a check-in or the think-beat, pending Beeper reply items are checked against the live
+   * chat (`beeper.read`); the ones you already answered or reacted to are dismissed at $0, so Rufus never nudges about
+   * them. Checked at most every `everyMs` (default 5 minutes) outside check-ins. On whenever `beeper.read` is
+   * registered; `false`: off.
+   */
+  staleGuard?: { everyMs?: number } | false;
   now?: () => Date;
 }
 
@@ -163,11 +172,15 @@ export interface StartTickReport {
   missions?: { started: string[]; delivered: string[] };
   /** v21: runs that acted on their own at `auto_notify` and were announced this pass. */
   autoNotified?: string[];
+  /** v24a: Verify items dismissed this pass because you already replied or reacted in Beeper (nothing was sent). */
+  pruned?: string[];
   /** Problems this pass; the next pass retries. */
   errors: string[];
 }
 
 export const DEFAULT_CHECKIN_MS = 2 * 3_600_000;
+/** v24a: how often the Beeper staleness guard reads the chats outside check-ins and think-beats. */
+export const DEFAULT_STALE_GUARD_MS = 5 * 60_000;
 const KEEP_HANDLED = 500;
 const KEEP_SENT = 100;
 /** A think-beat never interrupts a live conversation: it waits until the human has been quiet this long. */
@@ -263,6 +276,9 @@ export class UnifiedDaemon {
   private readonly voiceMode: VoiceReplyMode;
   /** Set while the chat being answered this pass came in as a voice note. */
   private voiceTurn = false;
+  /** v24a: the Beeper staleness guard, and when it last read the chats. */
+  private readonly staleGuard: { everyMs: number } | false;
+  private lastPruneAt?: number;
 
   constructor(opts: UnifiedDaemonOptions) {
     this.loop = opts.loop;
@@ -289,6 +305,10 @@ export class UnifiedDaemon {
     if (!this.loop.tools.has(ANCHOR_TOOL)) this.loop.tools.register(anchorUpdateTool());
     // Corrections, preferences and facts said in chat are saved as feedback the next triage/chat pass learns from.
     if (!this.loop.tools.has(REMEMBER_TOOL)) this.loop.tools.register(rememberTool());
+    // v24a: chat can dismiss Verify items you already handled yourself ("I already replied to #1-#4"); it updates this
+    // pass's live start state, so the numbers stay right.
+    if (!this.loop.tools.has(PENDING_CLEAR_TOOL)) this.loop.tools.register(pendingClearTool({ loop: this.loop, liveState: () => this.current }));
+    this.staleGuard = opts.staleGuard === false ? false : { everyMs: Math.max(0, opts.staleGuard?.everyMs ?? DEFAULT_STALE_GUARD_MS) };
     // v22: chat can hand deep research to a background mission ("research X and get back to me").
     // v24b: plain-markdown memory (USER.md, MEMORY.md, daily notes) and the read-only skill tools.
     if (!this.loop.tools.has(MEMORY_WRITE_TOOL)) this.loop.tools.register(memoryWriteTool());
@@ -449,6 +469,11 @@ export class UnifiedDaemon {
         await this.announceAuto(state, report, report.loop);
       } catch (err) {
         report.errors.push(`loop: ${message(err)}`);
+      }
+      try {
+        await this.pruneStale(state, report, this.chatCheckin || this.checkinDue(state));
+      } catch (err) {
+        report.errors.push(`stale-guard: ${message(err)}`);
       }
       try {
         await this.deliver(state, report);
@@ -694,6 +719,25 @@ export class UnifiedDaemon {
     report.dreamed = describeDream(r);
   }
 
+  /** True when the batched check-in would go out on this pass. */
+  private checkinDue(state: StartState): boolean {
+    return state.lastCheckinAt !== undefined && this.now().getTime() - Date.parse(state.lastCheckinAt) >= this.checkinEveryMs;
+  }
+
+  /**
+   * v24a Code Prepares: dismisses pending Beeper reply items you already answered or reacted to (live `beeper.read`, $0).
+   * `force`: a check-in or the think-beat is about to speak; otherwise at most every `staleGuard.everyMs`. Beeper being
+   * offline is never an error: nothing changes.
+   */
+  private async pruneStale(state: StartState, report: StartTickReport, force: boolean): Promise<void> {
+    if (!this.staleGuard || !this.loop.tools.has('beeper.read')) return;
+    const now = this.now();
+    if (!force && this.lastPruneAt !== undefined && now.getTime() - this.lastPruneAt < this.staleGuard.everyMs) return;
+    this.lastPruneAt = now.getTime();
+    const r = await pruneHandledPendingItems(this.loop.dir, this.loop, this.loop.tools, state, { now });
+    if (r.pruned.length) report.pruned = [...(report.pruned ?? []), ...r.pruned];
+  }
+
   /** Expires Verify items that reached you more than `pendingTtlMs` ago. Undelivered items wait for their check-in. */
   private async expireStale(state: StartState, report: StartTickReport): Promise<void> {
     const now = this.now().toISOString();
@@ -734,6 +778,8 @@ export class UnifiedDaemon {
       return;
     }
     t.lastAt = now.toISOString();
+    // v24a Code Prepares: the beat never sees (or nudges about) an item you already answered in Beeper.
+    await this.pruneStale(state, report, true).catch((err) => report.errors.push(`stale-guard: ${message(err)}`));
     const provider = this.engine.routeProvider(opts.provider ? { provider: opts.provider } : { tier: 'fast' });
     const r = await think({ provider, dir: this.loop.dir, loop: this.loop, now, tools: this.loop.tools, ...(opts.tools ? { glance: opts.tools } : {}), ...(opts.toolTimeoutMs !== undefined ? { toolTimeoutMs: opts.toolTimeoutMs } : {}) });
     if (!r.bubbles) {

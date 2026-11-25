@@ -59,6 +59,7 @@ import { cancelMission, createMission, describeMission, formatMissionList, resol
 import { curateMemoryDream, describeDream, formatMemoryForPrompt, loadMarkdownMemory } from './memory/markdown-memory';
 import { listSkills, loadSkill } from './skills/skills';
 import { demoInput, demoProvider, triageDraft } from '../examples/triage-draft.flow';
+import { formatBenchmark, runStrategyBenchmark } from './engine/strategy-benchmark';
 
 const PRIMARY_USAGE = `rufus - your AI + Code + Human chief of staff
 
@@ -87,6 +88,9 @@ Primary commands:
   memory [show | dream]        your plain-markdown memory: USER.md, MEMORY.md and memory/YYYY-MM-DD.md daily notes;
                                dream = curate repeated notes into long-term memory now ($0)
   skills [list | show <name>]  portable skills in skills/<name>/SKILL.md (matched into chat and mission prompts)
+  benchmark [--verbose] [--json]
+                               v24a: compare ai_only, code_only, code->ai->code and bidirectional on real failure
+                               scenarios (stale nudges, hallucinated "I cleared them", ...). Deterministic, $0
   say <text...> [--out <file>] speak text with your local voice.tts command (a $0 test; writes the audio file)
   collect <source> <path...> [--limit N] [--dry-run] [--ignore a,b] [--me addr,addr]
                                add local activity to your life corpus: files, calendar, browser, email, ai-prompts,
@@ -250,6 +254,7 @@ function describeStartTick(r: StartTickReport): string[] {
   if (r.missions?.started.length) lines.push(`missions: started ${r.missions.started.join(', ')}`);
   if (r.dreamed) lines.push(`memory: ${r.dreamed}`);
   if (r.expired?.length) lines.push(`${r.expired.length} item(s) expired unanswered (nothing was sent)`);
+  if (r.pruned?.length) lines.push(`${r.pruned.length} item(s) dismissed: you already replied or reacted in Beeper`);
   if (r.bridge) lines.push(...describeBridgeTick(r.bridge));
   return lines;
 }
@@ -292,6 +297,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const latest = bool('--latest');
   const allowOverlap = bool('--allow-overlap');
   const showAll = bool('--all');
+  const verbose = bool('--verbose');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
   for (const flag of ['--dir', '--checkin', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data', '--context', '--hours', '--out']) {
@@ -307,6 +313,11 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
 
   const [cmd, ...rest] = args;
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') return io.out(usage({ all: showAll }));
+  // v24a: the strategy benchmark needs no workspace, provider or network.
+  if (cmd === 'benchmark') {
+    const result = runStrategyBenchmark();
+    return io.out(asJson ? JSON.stringify(result, null, 2) : formatBenchmark(result, { verbose }));
+  }
 
   const store = new FileStore(dir);
   await store.init();

@@ -299,6 +299,11 @@ export interface LoopRun {
   /** v15: when (and why) it expired unanswered. */
   expiredAt?: string;
   expiredReason?: string;
+  /**
+   * v24a: dismissed without a decision because the human already handled it themselves (replied or reacted in the
+   * chat, or said so in chat via `pending.clear`). Nothing was sent and Earned Trust was not touched. Status: `expired`.
+   */
+  dismissed?: boolean;
   /** Tools this run called, in order. */
   toolCalls?: LoopToolCall[];
   /** Model calls made by this run. */
@@ -541,6 +546,21 @@ export class MasterLoop {
     const run = await this.getRun(runId);
     if (!AWAITING.includes(run.status)) return run;
     run.status = 'expired';
+    run.expiredAt = this.now().toISOString();
+    run.expiredReason = reason;
+    await this.save(run);
+    return run;
+  }
+
+  /**
+   * v24a: dismisses one waiting run because the human already handled it (e.g. "I already replied to #1-#4"). Like an
+   * expiry: nothing is committed or sent, no trust feedback is recorded, and no later reply can revive it.
+   */
+  async dismissRun(runId: string, reason = 'already handled'): Promise<LoopRun> {
+    const run = await this.getRun(runId);
+    if (!AWAITING.includes(run.status)) return run;
+    run.status = 'expired';
+    run.dismissed = true;
     run.expiredAt = this.now().toISOString();
     run.expiredReason = reason;
     await this.save(run);

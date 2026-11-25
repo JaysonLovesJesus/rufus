@@ -378,7 +378,7 @@ export {
 export { parseLoopReply, isBareVerdict, refOf, recipientOf, MAX_REASON_CHARS, formatLoopItem, formatCheckin, replyHint, draftOf, type LoopReply } from './unified/loop-text';
 export { think, gatherBoard, parseThought, thinkInterval, thinkSkipReason, freshThinkState, THINK_PROMPT, SILENT, DEFAULT_THINK_EVERY, DEFAULT_BACKOFF_AFTER, MAX_BACKOFF_FACTOR, type ThinkOptions, type ThinkState } from './unified/think';
 export { rememberNote, rememberTool, noteItem, loadHumanNotes, guessKind, guessVerdict, REMEMBER_TOOL, HUMAN_NOTE_TAG, NOTE_KINDS, NOTE_ACTION_TYPES, type HumanNote, type NoteKind, type NoteVerdict, type RememberOptions, type RememberResult } from './chief/learning';
-export { UnifiedDaemon, DEFAULT_CHECKIN_MS, DEFAULT_CALENDAR_SYNC_MS, type UnifiedDaemonOptions, type StartTickReport, type DayPlannerOptions, type BreakDigestOptions, type MissionDaemonOptions } from './unified/daemon';
+export { UnifiedDaemon, DEFAULT_CHECKIN_MS, DEFAULT_CALENDAR_SYNC_MS, DEFAULT_STALE_GUARD_MS, type UnifiedDaemonOptions, type StartTickReport, type DayPlannerOptions, type BreakDigestOptions, type MissionDaemonOptions } from './unified/daemon';
 export {
   createMission,
   loadMission,
@@ -553,3 +553,36 @@ export {
   type Skill,
   type SkillInput,
 } from './skills/skills';
+// v24a: Bidirectional Code <-> AI Cross-Verification.
+export {
+  detectActionClaims,
+  detectUnbackedActionClaims,
+  honestCorrection,
+  isMessageAlreadyHandled,
+  incomingOf,
+  pruneHandledPendingItems,
+  ALREADY_HANDLED_REASON,
+  VERIFIER_RETRY_PROMPT,
+  type ActionClaimKind,
+  type ActionClaimViolation,
+  type PruneReport,
+  type PruneTools,
+  type StalenessMessage,
+  type VerifiedToolCall,
+} from './engine/cross-verify';
+export { PENDING_CLEAR_TOOL, pendingClearTool, clearPendingItems, parsePendingRefs, type PendingClearResult, type PendingClearReason, type PendingClearToolOptions } from './tools/pending-tool';
+export {
+  runStrategyBenchmark,
+  formatBenchmark,
+  scoreOutcomes,
+  BENCHMARK_SCENARIOS,
+  STRATEGIES,
+  STRATEGY_FLAGS,
+  STRATEGY_LABELS,
+  type BenchmarkResult,
+  type BenchmarkScenario,
+  type ScenarioOutcome,
+  type StrategyFlags,
+  type StrategyId,
+  type StrategyScore,
+} from './engine/strategy-benchmark';

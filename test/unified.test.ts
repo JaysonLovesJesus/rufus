@@ -338,11 +338,11 @@ describe('rufus start: the unified daemon', () => {
   });
 
   it('a two-bubble chat reply goes out as two short messages, never one dense wall', async () => {
-    const s = await setup({ chief: 'Moved it to 2pm.\n---\nWant me to let Sam know?' });
+    const s = await setup({ chief: 'Moving it to 2pm works.\n---\nWant me to let Sam know?' });
     await s.daemon.tick();
     s.chat.human('move my 1pm an hour later');
     await s.daemon.tick();
-    expect(s.chat.sent).toEqual(['Moved it to 2pm.', 'Want me to let Sam know?']);
+    expect(s.chat.sent).toEqual(['Moving it to 2pm works.', 'Want me to let Sam know?']);
   });
 
   it('without a chat channel, items print to the terminal', async () => {

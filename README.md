@@ -822,6 +822,23 @@ Some asks take more than one look: "research standing desks under $500 and get b
 }
 ```
 
+### Bidirectional Code <-> AI cross-verification (v24a)
+
+Two real failures drove this: Rufus nudged about Beeper messages you had already answered or reacted to, and when you said so, the AI replied "I've cleared them" without calling any tool.
+
+- **Code Verifies every chat reply.** `detectUnbackedActionClaims(reply, toolCalls)` flags each sentence that says Rufus *did* something (cleared, sent, replied, reacted, scheduled, moved, deleted, paused, started a mission, saved a note) when no matching tool call ran and succeeded in that turn. A queued send does not count as sent. Questions, offers ("want me to…"), denials and future tense are not claims. Reasons look like `claimed_clear_without_tool`. The Chief of Staff then makes exactly one corrective retry ("CODE VERIFIER REJECTED YOUR DRAFT…"). If the retry still claims the action, code appends an honest `Correction: …` bubble. `ChiefReply.verifier` records what happened.
+- **`pending.clear`, a real tool.** It's a local workspace tool, like `anchor.update`: `{"refs": "#1-#4"}`, `["#1", "#5"]` or `"all"`, with reason `already_handled` by default. It dismisses Verify items without sending anything and without touching Earned Trust. The runs become `expired` with `dismissed: true`, and `start-state.json` renumbers. The chat snapshot shows each waiting item's `#ref`.
+- **Code Prepares: the Beeper staleness guard.** `isMessageAlreadyHandled(messages, incomingTimestamp, messageId?)` is true when you sent a text after the incoming message, or reacted (`isMe`) to it or to a later message from them. Before every check-in and every think-beat (and at most every 5 minutes otherwise), `rufus start` runs `pruneHandledPendingItems`. It reads each pending chat with `beeper.read` and dismisses what you already handled, at $0. If Beeper is offline, nothing changes. Set `staleGuard: false` to turn it off.
+- **The strategy benchmark.** `rufus benchmark [--verbose] [--json]` (library: `runStrategyBenchmark()`) runs six scenarios built from real failures, and the metrics come from the real verifier code. The model in it is scripted, not a live model, so no tokens are spent:
+
+```
+strategy            done   halluc.  stale  unsafe  ai calls  score
+Bidirectional       6/6    0        0      0       7         100
+Code -> AI -> Code  5/6    0        0      0       10        83
+Code only (rigid)   1/6    0        0      0       0         17
+AI only (soft)      2/6    2        5      3       6         -57
+```
+
 ### Markdown memory and portable skills (v24b)
 
 Rufus keeps what it knows about you in plain markdown you can open, read and edit:

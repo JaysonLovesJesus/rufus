@@ -213,11 +213,11 @@ describe('a stream, not forced back-and-forth', () => {
   });
 
   it('two short bubbles arrive one after the other, with typing in between', async () => {
-    const s = await daemonSetup(() => 'Moved gym to 6pm.\n---\nWant me to tell Sam?');
+    const s = await daemonSetup(() => 'Gym at 6pm works.\n---\nWant me to tell Sam?');
     s.chat.human('push gym back an hour');
     await s.daemon.tick();
-    expect(s.chat.sent).toEqual(['Moved gym to 6pm.', 'Want me to tell Sam?']);
-    expect(s.chat.events).toEqual(['typing', 'send:Moved gym to 6pm.', 'typing', 'send:Want me to tell Sam?']);
+    expect(s.chat.sent).toEqual(['Gym at 6pm works.', 'Want me to tell Sam?']);
+    expect(s.chat.events).toEqual(['typing', 'send:Gym at 6pm works.', 'typing', 'send:Want me to tell Sam?']);
   });
 
   it('bubbles wait a brief pause between them', async () => {

@@ -19,6 +19,9 @@ import { MISSION_START_TOOL } from '../tools/mission-tools';
 import { parseAutonomyCommand, runAutonomyCommand, type AutonomyCommand } from '../unified/autonomy';
 import { formatMemoryForPrompt, loadMarkdownMemory, MEMORY_WRITE_TOOL } from '../memory/markdown-memory';
 import { relevantSkillsSection, SKILL_LIST_TOOL, SKILL_READ_TOOL } from '../skills/skills';
+import { detectUnbackedActionClaims, honestCorrection, VERIFIER_RETRY_PROMPT, type VerifiedToolCall } from '../engine/cross-verify';
+import { PENDING_CLEAR_TOOL, pendingClearTool } from '../tools/pending-tool';
+import { assignNumbers, loadStartState } from '../unified/state';
 
 /** What the Chief of Staff says back, plus any cards whose full text is already in that reply. */
 export interface ChiefReply {
@@ -39,6 +42,11 @@ export interface ChiefReply {
   react?: string;
   /** Nothing needs saying: send nothing. */
   silent?: boolean;
+  /**
+   * v24a: Code Verifies. Set when the reply's first draft claimed an action no tool performed: what was flagged, whether
+   * one corrective retry ran, and whether code had to append an honest correction because the retry still claimed it.
+   */
+  verifier?: { violations: string[]; retried: boolean; corrected: boolean };
 }
 
 /** The chat reply asks for no message at all. */
@@ -195,6 +203,12 @@ function systemWithTools(tools: ToolRegistry, maxSteps: number): string {
           'When they are choosing between options, end with a clear pick in plain lines (no tables): Option A vs Option B, your pick and why in one line, then the next step. Fit it to their goals and boundaries.',
         ]
       : []),
+    ...(tools.has(PENDING_CLEAR_TOOL)
+      ? [
+          `When they say they already handled items waiting on them ("I already replied to #1-#4 and reacted to #5", "those are done"), call ${PENDING_CLEAR_TOOL} with those refs FIRST, then confirm. The loopWaiting refs (#1, #2...) are in the snapshot.`,
+        ]
+      : []),
+    'Never say you did something (cleared, sent, replied, reacted, scheduled, moved, saved, started a mission, paused) unless a tool call for it ran and succeeded in this turn. Code checks every reply against the tool calls that actually ran.',
     ...(tools.has(MISSION_START_TOOL)
       ? [
           `When they ask for deep multi-step research or prep that takes a while ("research X and get back to me", "prep a brief for tomorrow's meeting", "compare a few options and let me know"), start a background mission with ${MISSION_START_TOOL} (goal in their words, plus any context that matters), then reply naturally that you're on it and will ping them when it's ready. Missions only read; nothing is sent. Quick questions you can answer now don't need one.`,
@@ -281,6 +295,8 @@ export class ChiefOfStaff {
     this.dir = opts.dir ?? opts.engine.store.dir;
     this.loop = opts.loop;
     this.tools = opts.tools ?? opts.loop?.tools;
+    // v24a: with a loop, chat can dismiss Verify items the human already handled ("I already replied to #1-#4").
+    if (this.loop && this.tools && !this.tools.has(PENDING_CLEAR_TOOL)) this.tools.register(pendingClearTool({ loop: this.loop }));
     this.maxToolSteps = Math.max(0, Math.min(10, Math.floor(opts.maxToolSteps ?? 3)));
     this.historyTurns = Math.max(0, Math.floor(opts.historyTurns ?? DEFAULT_CHAT_TURNS));
     this.now = opts.now ?? (() => new Date());
@@ -581,12 +597,23 @@ export class ChiefOfStaff {
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         .slice(0, 5)
         .map((r) => ({ id: r.id, flow: r.flowId, status: r.status, updatedAt: r.updatedAt, ...(r.error ? { error: oneLine(r.error, 100) } : {}) })),
-      ...(this.loop
-        ? {
-            loopWaiting: (await this.loop.pending()).slice(0, 10).map((r) => ({ actionType: r.actionType, goal: r.goal, status: r.status, urgency: r.urgency ?? 'normal' })),
-          }
-        : {}),
+      ...(this.loop ? { loopWaiting: await this.loopWaiting() } : {}),
     };
+  }
+
+  /** v24a: what waits on the human in the loop, with the same short refs (#1, #2...) the check-ins use. */
+  private async loopWaiting(): Promise<Array<Record<string, unknown>>> {
+    const pending = await this.loop!.pending();
+    const numbers = await loadStartState(this.loop!.dir)
+      .then((state) => assignNumbers(state, pending))
+      .catch(() => ({}) as Record<string, number>);
+    return pending.slice(0, 10).map((r) => ({
+      ...(numbers[r.id] !== undefined ? { ref: `#${numbers[r.id]}` } : {}),
+      actionType: r.actionType,
+      goal: r.goal,
+      status: r.status,
+      urgency: r.urgency ?? 'normal',
+    }));
   }
 
   /** SOUL.md + the Anchor + the corpus facts closest to the message, for the chat system prompt. Never throws. */
@@ -669,18 +696,38 @@ export class ChiefOfStaff {
       const queued: string[] = [];
       /** v24b: set once this turn read outside content (a chat, a page, mail), so memory writes stop trusting it. */
       let readOutside = false;
+      // v24a: every tool call this turn, for Code Verifies (a queued or failed call did not perform anything).
+      const executed: VerifiedToolCall[] = [];
+      let verifier: ChiefReply['verifier'];
+      let toolSteps = 0;
       for (let step = 0; ; step++) {
         const out = (await provider.complete({ system, messages, meta: { runId: 'chief', flowId: 'chief', step: `${spoken ? 'voice' : 'chat'}${step ? `.tool${step}` : ''}`, attempt: 1 } })).trim();
         const call = tools ? parseToolCall(out) : undefined;
         if (!call) {
-          const extra = { ...(toolsUsed.length ? { toolsUsed } : {}), ...(queued.length ? { queued } : {}) };
-          return { ...this.shaped(out, text), ...extra };
+          // Talk-only chat (no tools) is told it cannot act; Code Verifies guards the chat that can.
+          const violations = tools ? detectUnbackedActionClaims(out, executed) : [];
+          if (violations.length && !verifier) {
+            // Code Verifies: one corrective retry. The model may call the tool now, or say honestly it hasn't done it.
+            verifier = { violations, retried: true, corrected: false };
+            messages.push({ role: 'assistant', content: out });
+            messages.push({ role: 'user', content: `${VERIFIER_RETRY_PROMPT}\nFlagged: ${violations.join(', ')}.` });
+            continue;
+          }
+          let final = out;
+          if (violations.length && verifier) {
+            verifier.corrected = true;
+            verifier.violations = [...new Set([...verifier.violations, ...violations])];
+            final = `${out}\n---\n${honestCorrection(violations)}`;
+          }
+          const extra = { ...(toolsUsed.length ? { toolsUsed } : {}), ...(queued.length ? { queued } : {}), ...(verifier ? { verifier } : {}) };
+          return { ...this.shaped(final, text), ...extra };
         }
-        if (step >= this.maxToolSteps) {
+        if (toolSteps++ >= this.maxToolSteps) {
           const before = out.slice(0, TOOL_CALL.exec(out)?.index ?? 0).trim();
-          return reply(clip(concise(before || "I couldn't finish looking that up. Ask me again in a moment.", text)), { ...(toolsUsed.length ? { toolsUsed } : {}), ...(queued.length ? { queued } : {}) });
+          return reply(clip(concise(before || "I couldn't finish looking that up. Ask me again in a moment.", text)), { ...(toolsUsed.length ? { toolsUsed } : {}), ...(queued.length ? { queued } : {}), ...(verifier ? { verifier } : {}) });
         }
         const result = await this.useTool(tools!, call.tool, call.args, readOutside ? 'external' : 'user');
+        executed.push({ name: call.tool, ok: result.ran === true });
         if (result.ran) toolsUsed.push(call.tool);
         if (result.ran && tools!.get(call.tool)?.readOnly && !OWN_READS.has(call.tool)) readOutside = true;
         if (result.queued) queued.push(call.tool);
