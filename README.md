@@ -326,7 +326,7 @@ rufus collect files ./notes ./docs [--ignore drafts,tmp]   # markdown / text / C
 rufus collect calendar ./cal.ics                            # or a JSON list of events
 rufus collect browser ./history.json                        # or a Chrome / Arc / Safari history database
 rufus collect email ./mail.mbox --me me@example.org         # .mbox, .eml (or a folder of them), or JSONL
-rufus collect ai-prompts ./chats.jsonl ./exports/            # AI chat transcripts: ONLY your own messages are kept
+rufus collect ai-prompts ./chats.jsonl ./exports/            # AI chat transcripts: ONLY your own messages are kept (plus what you were replying to, as context)
 # any of them: --limit N (keep the newest N)  --dry-run (read and report, write nothing)
 ```
 
@@ -338,6 +338,8 @@ rufus collect ai-prompts ./chats.jsonl ./exports/            # AI chat transcrip
 | `email` | `.mbox`, `.eml` (or a folder), or normalized JSONL `{ id, from, to, subject, snippet, date, isFromMe }` | subject, a 240-character snippet (quoted replies and signatures dropped), counterpart, **sender domain**, sent vs. received. `--me` lists your own addresses so `.mbox` / `.eml` messages can be marked sent; without it nothing is guessed |
 
 **`ai-prompts` is human-only on purpose.** It reads JSON / JSONL transcripts in common shapes (`{ role, content | text, timestamp, threadId }` lines, `{ type: "user_message", text }`, `{ createdBy: "user", text }`, or `{ messages: [...] }` conversations) and keeps only messages the human wrote. Assistant, model, system and tool messages are never imported, so model prose cannot colour Rufus's view of you; a message with no clear human signal is dropped rather than guessed, and empty messages and injected wrapper boilerplate are skipped. Each prompt is stored in your own words with a `kind` and `tags` set by plain rules (no AI): `pushback` (also tagged `correction`: "no,", "actually,", "don't", "stop", "instead of", "too complicated", "wrong idea", "not what I..."), `decision` ("let's", "go with", "we should", "I want to"), `question` (contains `?`), else `prompt`. The same prompt in the same thread is stored once.
+
+**What you were replying to (v9).** "No, that's too complicated" means little without the thing that was complicated. So the assistant turn *immediately before* a human message is kept as context only: a snippet of at most 240 characters in `metadata.priorProposal`, plus a labeled `metadata.context` line (`[In response to proposal: ...]`). The summary stays your own words, the assistant turn is never an item of its own, and only the message right after it carries the context (a second message in a row does not; tool results and system messages in between do not hide it). `rufus context` prints the labeled line under the hit, and the snippet is embedded alongside your words, so a similar proposal later finds your earlier pushback.
 
 Write your own: a `SourceAdapter` is `{ id, source, collect(options) => Promise<CorpusItem[]> }`, and `collectInto(store, adapter, options)` merges what it returns.
 
@@ -394,6 +396,69 @@ With `explicitLessons` (saved lessons or plain rule text), `voiceHint` puts **Id
 ```
 
 The lesson keeps applying (it is your stated ideal); the question is yours, and nothing is retired for you. `buildSituationalContext` returns the same entries as `drift`, deliberately out of the `voiceHint`, so a drafting model never sees a note meant for a human. Hardened lessons are skipped (code already enforces them). Everything here is deterministic: $0, no AI.
+
+## Natural learning: cached embeddings and real examples (v9)
+
+Rufus separates two kinds of knowing, and teaches each the way it is best learned:
+
+| | Where it lives | How it learns |
+| --- | --- | --- |
+| **Hard boundaries** (never use an em dash, max 12 words, always include the link) | Deterministic `verify` code, `rufus propose --layer code`, invariants from `rufus mine` | Exact. Checked on every draft; a violation retries or goes to a human |
+| **Taste, tone and judgment** (how you decline, how warm you are with this person, what "too complicated" means to you) | **Real examples**, retrieved by similarity | Not as bullet-list rules. Rufus shows the model the past moments that look like this one, with what you actually answered |
+
+Stiff text rules are followed too literally by a language model; a handful of your real replies are followed the way a person follows an example. So the primary path is **no lessons at all**: `buildSituationalContext` is *example-driven* by default (`exampleDriven: true` whenever you pass no `explicitLessons`), and its `examples` are picked by what the past message says, who it was with, which channel and how recent it is. `LessonStore` and `explicitLessons` still work exactly as before (passing them turns example-driven selection off unless you set `exampleDriven: true`), and nothing ever turns an example into a rule. Every card you answer is saved as a case and shows up as a `Human replied: "..."` example, so the examples keep up with you.
+
+### Cached, incremental vectors (`rufus embed`)
+
+Finding "the past moments that look like this one" needs vectors, and re-embedding everything on every question would be slow and, for a hosted model, costly. So vectors are cached in `<workspace>/corpus/embeddings.jsonl`, one `{ id, model, hash, vector }` per line (`hash` is the SHA-256 of the exact text embedded). `cache.sync(items, provider)` embeds **only new or changed items** and returns `{ embedded, cached, total }`; a second run over unchanged data embeds nothing, an edited note is re-embedded alone, and switching model keeps both sets. It writes atomically and saves progress if a provider fails part-way.
+
+```sh
+rufus collect files ./notes          # collects, then embeds what is new (incremental, real time)
+rufus embed                          # catch up: corpus items, answered chats, and each past incoming message
+rufus embed --provider ollama        # or gemini, http; --model <name> to pick a model
+rufus context "reschedule dentist visit"   # hybrid search when vectors are cached
+```
+
+Collecting never fails because of embedding: if the embedder is unreachable, the items are still collected and you get a one-line warning (`rufus embed` retries).
+
+| Provider | Cost | Where text goes | Notes |
+| --- | --- | --- | --- |
+| `local` (default) | $0 | nowhere | Deterministic hashed character trigrams + words + word pairs, 256 dimensions, unit length. Works immediately, offline, zero dependencies. Catches morphology and shared wording (`reschedule` ~ `rescheduling`), not synonyms |
+| `ollama` | $0 | your machine | Neural embeddings via `POST http://127.0.0.1:11434/api/embed` (default `nomic-embed-text`) |
+| `gemini` | API pricing | Google | `batchEmbedContents` (default `gemini-embedding-001`, 768 dimensions); key in the `x-goog-api-key` header, never a URL |
+| `http` | per endpoint | that endpoint | Any OpenAI-compatible `/embeddings`; key in the `authorization` header |
+
+Choose one in `config.json` (omit it for `local`). Hosted providers receive the text being embedded, so pick them on purpose; prefer `apiKeyEnv` over `apiKey`:
+
+```json
+{ "embeddings": { "type": "ollama", "model": "nomic-embed-text", "baseUrl": "http://127.0.0.1:11434" } }
+```
+
+```ts
+import { EmbeddingCache, createEmbeddingProvider, corpusEmbedItems, pairEmbedItems, queryCorpus, retrieveSimilarExamples, buildSituationalContext } from './src';
+
+const provider = createEmbeddingProvider({ type: 'local' });
+const cache = new EmbeddingCache(`${workspace}/corpus/embeddings.jsonl`);
+await cache.sync([...corpusEmbedItems(items), ...pairEmbedItems(pairs)], provider); // new or changed only
+```
+
+### Hybrid retrieval
+
+```ts
+const embeddings = await cache.lookup(provider, 'can we reschedule my dentist appointments?');
+
+// 1. The corpus: keyword relevance + cosine similarity, x observation recency, spread across sources.
+queryCorpus(items, { query: 'dentist visit', embeddings });   // hits carry `similarity`
+
+// 2. Your voice: the most relevant, recent real (incoming -> your reply) examples.
+retrieveSimilarExamples('can we reschedule my dentist appointments?', pairs, { limit: 4, embeddings, sender: 'Jordan Lee', channel: 'sms' });
+// [{ id, sender, channel, incoming, reply, similarity, score, because: ['same sender', 'similar meaning'] }, ...]
+
+// 3. Or in one step, inside a flow's ctx.code:
+buildSituationalContext(input, pairs, { embeddings });        // exampleDriven is already true
+```
+
+`queryCorpus` blends `(1 - semanticWeight) x keywords + semanticWeight x similarity` (default 0.5), then weights by observation rank, de-duplicates titles and guarantees each matching source a share of the top results. Similarity below `minSimilarity` counts as unrelated (default 0.25; raise it for neural models, whose unrelated pairs still score 0.3-0.5). Items without a cached vector are still found by keywords. `retrieveSimilarExamples` scores similarity (wording, plus meaning when vectors are given), adds a nudge for the same contact and channel, and a recency nudge, and drops an exchange that was saved twice. Without `embeddings` everything still works, by wording alone. All of it is deterministic.
 
 ## Fast and smart model tiers
 
@@ -478,7 +543,7 @@ Rufus keeps **all state outside the repo**, in a workspace directory: `--dir <pa
   scheduler.json  lastRunAt per flow (created by the first tick)
   cases/          saved human reviews, one file per flow (replay + prompt examples)
   history/        pairs.jsonl from `rufus seed`, mine-report.json from `rufus mine --save`
-  corpus/         items.jsonl from `rufus collect` (email, browser, files, calendar, ai-prompts)
+  corpus/         items.jsonl from `rufus collect` (email, browser, files, calendar, ai-prompts), embeddings.jsonl (cached vectors from `rufus embed`)
   runs/           one readable JSON file per run
   flows/          your *.flow.ts files, loaded by the CLI
 ```
@@ -546,8 +611,8 @@ src/providers/  native providers (Google Gemini over fetch)
 src/engine/     defineFlow, Engine, step runner, AI verify loop, providers, spectrum (code / fast / smart / human)
 src/store/      atomic JSON file store (no native deps)
 src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay; compare (plain vs. assisted)
-src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `ideals` (explicit lessons as constraints, drift), `mine` (voice, invariants, intents, recency, optional AI blueprints)
-src/corpus/     `CorpusItem`, `CorpusStore`, `SourceAdapter`s (files, browser, calendar, email, ai-prompts), recurrence, `buildCorpusSummary` / `queryCorpus`
+src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`, `retrieveSimilarExamples`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `ideals` (explicit lessons as constraints, drift), `mine` (voice, invariants, intents, recency, optional AI blueprints)
+src/corpus/     `CorpusItem`, `CorpusStore`, `SourceAdapter`s (files, browser, calendar, email, ai-prompts), recurrence, `buildCorpusSummary` / hybrid `queryCorpus`, `embeddings` (providers, `EmbeddingCache`)
 src/recency.ts  exponential and rank-based recency weights, shared by history and the corpus
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop
 src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Telegram and Beeper adapters

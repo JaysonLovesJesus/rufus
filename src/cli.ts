@@ -15,7 +15,8 @@ import { describeTension } from './learning/lessons';
 import { formatCompare } from './learning/compare';
 import { bucketsFromConfig, defaultMineProvider, formatMine, mineHistory } from './history/mine';
 import { formatSeed, loadPairs, seedHistory } from './history/seed';
-import { CorpusStore, buildCorpusSummary, collectInto, corpusItemsFromPairs, formatCorpusSummary, formatHits, getAdapter, queryCorpus } from './corpus';
+import { CorpusStore, EmbeddingCache, buildCorpusSummary, collectInto, corpusEmbedItems, corpusItemsFromPairs, createEmbeddingProvider, formatCorpusSummary, formatHits, getAdapter, pairEmbedItems, queryCorpus, type EmbedItem, type EmbeddingProvider } from './corpus';
+import type { EmbeddingConfig } from './types';
 import { suggestLayer } from './learning/layers';
 import type { ScopedReplayReport } from './learning/replay';
 import { Scheduler, type TickResult } from './scheduler/scheduler';
@@ -59,6 +60,9 @@ Usage: rufus [--dir <workspace>] <command>
                                folders), calendar (.ics or JSON), browser (history JSON/JSONL or a Chrome/Arc/Safari
                                history database), email (.mbox, .eml, or JSONL) or ai-prompts (JSON/JSONL AI chat
                                transcripts; ONLY your own messages are kept, never the assistant's). Deduplicated; --dry-run writes nothing
+  embed [--provider local|ollama|gemini|http] [--model <name>]
+                               cache vectors for your corpus, chats and past replies (incremental: only new or changed
+                               items are embedded). Runs by itself on collect. Default local: offline, $0
   context [query] [--source a,b] [--since <days>] [--limit N] [--half-life <days>] [--json]
                                your Life Context Snapshot (recency-weighted), or a $0 keyword lookup across chats, email,
                                browsing, files and calendar
@@ -152,7 +156,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const save = bool('--save');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
-  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life']) {
+  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
@@ -191,6 +195,18 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     if (!(Number(v) >= 0)) throw new Error('--half-life needs a number of days (0 turns weighting off).');
     return Number(v);
   })();
+  /** The embedding provider: `--provider`/`--model` for `embed`, else `config.embeddings`, else local (offline, $0). */
+  const embeddingProvider = (override = false): EmbeddingProvider => {
+    const cfg: EmbeddingConfig = { ...config.embeddings };
+    if (override && flags['--provider'] !== undefined) {
+      const type = flags['--provider'] as EmbeddingConfig['type'];
+      if (!['local', 'ollama', 'gemini', 'http'].includes(type!)) throw new Error('--provider for embed must be local, ollama, gemini or http.');
+      if (type !== cfg.type) for (const k of ['model', 'baseUrl', 'dimensions'] as const) delete cfg[k]; // those belong to the configured provider
+      cfg.type = type;
+    }
+    if (override && flags['--model'] !== undefined) cfg.model = flags['--model'];
+    return createEmbeddingProvider(cfg);
+  };
   const list = (v: string | undefined): string[] | undefined => (v ? v.split(',').map((x) => x.trim()).filter(Boolean) : undefined);
 
   /** `--provider <name>`: fail on an unknown name now, instead of reporting it as a model failure per case. */
@@ -453,8 +469,29 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         io.out(`Dry run (nothing written): would add ${report.added}, update ${report.updated}, leave ${report.unchanged} unchanged; the corpus would hold ${report.total}.`);
         for (const i of items.slice(0, 5)) io.out(`  [${i.source}/${i.kind}] ${i.timestamp.slice(0, 10)}  ${i.title ?? i.summary}`);
         if (items.length > 5) io.out(`  ... and ${items.length - 5} more`);
-      } else io.out(`Added ${report.added}, updated ${report.updated}, unchanged ${report.unchanged}. The corpus now holds ${report.total} item(s) (${store.corpusFile}).`);
+      } else {
+        io.out(`Added ${report.added}, updated ${report.updated}, unchanged ${report.unchanged}. The corpus now holds ${report.total} item(s) (${store.corpusFile}).`);
+        // Incremental, in real time: only what is new or changed gets a vector. A failure never loses the collected items.
+        try {
+          const provider = embeddingProvider();
+          const synced = await new EmbeddingCache(store.embeddingsFile).sync(corpusEmbedItems(items), provider);
+          io.out(`Embedded ${synced.embedded} new or changed item(s), ${synced.cached} already cached (${provider.id}).`);
+        } catch (err) {
+          io.err(`Items were collected, but embedding was skipped: ${(err as Error).message} Run rufus embed to retry.`);
+        }
+      }
       if (report.rejected.length) io.err(`${report.rejected.length} item(s) were not valid and were skipped (first: ${report.rejected[0]!.reason}).`);
+      return;
+    }
+
+    case 'embed': {
+      const provider = embeddingProvider(true);
+      const pairs = await loadPairs(store);
+      // Corpus items, your answered chats as corpus items (for `context`), and each past incoming message (for example retrieval).
+      const all: EmbedItem[] = [...corpusEmbedItems([...(await new CorpusStore(store.corpusFile).load()), ...corpusItemsFromPairs(pairs)]), ...pairEmbedItems(pairs)];
+      if (!all.length) return io.out('Nothing to embed yet. Collect something first (rufus collect ...) or seed your history (rufus seed ...).');
+      const r = await new EmbeddingCache(store.embeddingsFile).sync(all, provider, { prune: true });
+      io.out(`Embedded ${r.embedded} new or changed item(s); ${r.cached} already cached; ${r.total} total (${provider.id}, ${store.embeddingsFile}).`);
       return;
     }
 
@@ -473,7 +510,14 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         else for (const line of formatCorpusSummary(summary)) io.out(line);
         return;
       }
-      const hits = queryCorpus(items, { query, sources, sinceDays: since, limit, halfLifeDays: halfLife });
+      // Hybrid when vectors are cached; a provider that is down only costs the semantic part.
+      let embeddings;
+      try {
+        embeddings = await new EmbeddingCache(store.embeddingsFile).lookup(embeddingProvider(), query);
+      } catch (err) {
+        io.err(`Vector search skipped (keywords only): ${(err as Error).message}`);
+      }
+      const hits = queryCorpus(items, { query, sources, sinceDays: since, limit, halfLifeDays: halfLife, embeddings });
       if (asJson) io.out(JSON.stringify(hits, null, 2));
       else for (const line of formatHits(hits, query)) io.out(line);
       return;

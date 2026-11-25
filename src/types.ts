@@ -253,6 +253,26 @@ export type ProviderConfig =
       timeoutMs?: number;
     };
 
+/**
+ * Where vectors for retrieval come from (`rufus embed`, and automatically on `rufus collect`). Default `local`: offline, $0.
+ * `ollama` is local neural ($0); `gemini` and `http` send the embedded text to that service, so choose them on purpose.
+ */
+export interface EmbeddingConfig {
+  type?: 'local' | 'ollama' | 'gemini' | 'http';
+  /** Model name (ollama: `nomic-embed-text`; gemini: `gemini-embedding-001`; http: required). */
+  model?: string;
+  /** Ollama default `http://127.0.0.1:11434`; Gemini default the Generative Language API; http: required (e.g. `https://api.example.com/v1`). */
+  baseUrl?: string;
+  /** Vector length: local default 256, gemini default 768. */
+  dimensions?: number;
+  /** The key itself. Prefer `apiKeyEnv`. Sent in a header, never in a URL. */
+  apiKey?: string;
+  /** Environment variable holding the key (gemini default `GEMINI_API_KEY`, http default `RUFUS_API_KEY`). */
+  apiKeyEnv?: string;
+  /** Abort a request after this many milliseconds (default 60000). */
+  timeoutMs?: number;
+}
+
 /** Telegram Bot API settings. Env vars (RUFUS_TELEGRAM_*) override these; prefer env for the token. */
 export interface TelegramConfig {
   /** Bot token from @BotFather. */
@@ -320,4 +340,5 @@ export interface RufusConfig {
   quietHours?: QuietHours;
   learning?: LearningConfig;
   mine?: MineConfig;
+  embeddings?: EmbeddingConfig;
 }

@@ -7,6 +7,12 @@ import { tempDir } from './helpers';
 
 const jsonl = (rows: unknown[]): string => rows.map((r) => JSON.stringify(r)).join('\n');
 
+/** An item as JSON, minus the labeled `priorProposal` / `context` metadata (the only place a preceding assistant turn may appear). */
+const withoutProposalContext = (i: { metadata?: Record<string, unknown> }): string => {
+  const { priorProposal: _p, context: _c, ...metadata } = i.metadata ?? {};
+  return JSON.stringify({ ...i, metadata });
+};
+
 describe('ai-prompts adapter', () => {
   it('is registered, so `rufus collect ai-prompts` resolves', () => {
     expect(getAdapter('ai-prompts')).toBe(aiPromptsAdapter);
@@ -36,7 +42,7 @@ describe('ai-prompts adapter', () => {
     expect(items.map((i) => i.summary).sort()).toEqual(["Let's go with the short version.", "No, that's too complicated. Keep it to three items.", 'Plan my week around the launch.']);
     for (const i of items) {
       expect(i.source).toBe('ai-prompts');
-      expect(JSON.stringify(i)).not.toMatch(/Certainly|synergy|Gemini-style|search results|Another model|Great choice|Contradictory|No author signal/);
+      expect(withoutProposalContext(i)).not.toMatch(/Certainly|synergy|Gemini-style|search results|Another model|Great choice|Contradictory|No author signal/);
     }
   });
 
@@ -64,7 +70,8 @@ describe('ai-prompts adapter', () => {
     const items = await aiPromptsAdapter.collect({ path: file });
     const text = items.map((i) => i.summary);
     expect(text.sort()).toEqual(['Export style prompt.', 'First part. Second part?', 'Real words here.', 'Wrapped line.']);
-    expect(JSON.stringify(items)).not.toMatch(/LEAKED|Assistant|injected|Export style reply|Caveat/);
+    expect(items.map(withoutProposalContext).join('')).not.toMatch(/LEAKED|Assistant|injected|Export style reply|Caveat/);
+    expect(JSON.stringify(items)).not.toMatch(/LEAKED|injected|Export style reply|Caveat/);
     expect(items.find((i) => i.summary.startsWith('First'))!.metadata).toEqual({ threadId: 'conv-9' });
   });
 
@@ -146,5 +153,97 @@ describe('ai-prompts adapter', () => {
     expect(stored).toContain('Alpha prompt.');
     expect(stored).toContain('Beta prompt?');
     expect(stored).not.toContain('Alpha reply');
+  });
+
+  describe('priorProposal context', () => {
+    it('attaches the immediately preceding assistant turn to the human reply as context, never as an item', async () => {
+      const dir = await tempDir();
+      const file = path.join(dir, 'c.jsonl');
+      await writeFile(
+        file,
+        jsonl([
+          { role: 'user', content: 'Plan the launch checklist.', timestamp: '2026-03-01T10:00:00Z', threadId: 't1' },
+          { role: 'assistant', content: 'Here is a 14-step rollout with a phased canary, feature flags per region and a weekly review board.', timestamp: '2026-03-01T10:01:00Z', threadId: 't1' },
+          { role: 'user', content: "No, that's too complicated. Three steps.", timestamp: '2026-03-01T10:02:00Z', threadId: 't1' },
+          { role: 'user', content: 'Also add a rollback note.', timestamp: '2026-03-01T10:03:00Z', threadId: 't1' },
+        ]),
+      );
+      const items = await aiPromptsAdapter.collect({ path: file });
+      expect(items).toHaveLength(3); // the assistant turn is not an item
+      const byText = (t: string) => items.find((i) => i.summary.startsWith(t))!;
+
+      const pushback = byText("No, that's too complicated");
+      expect(pushback.kind).toBe('pushback');
+      expect(pushback.summary).toBe("No, that's too complicated. Three steps."); // the human's own words only
+      expect(pushback.metadata).toEqual({
+        threadId: 't1',
+        priorProposal: 'Here is a 14-step rollout with a phased canary, feature flags per region and a weekly review board.',
+        context: '[In response to proposal: Here is a 14-step rollout with a phased canary, feature flags per region and a weekly review board.]',
+      });
+      expect(JSON.stringify({ ...pushback, metadata: undefined })).not.toMatch(/rollout|canary/);
+
+      // Only the message right after the assistant turn answers it; the first prompt and a second consecutive one have no proposal.
+      expect(byText('Plan the launch').metadata).toEqual({ threadId: 't1' });
+      expect(byText('Also add').metadata).toEqual({ threadId: 't1' });
+    });
+
+    it('clips the snippet to 240 characters, keeps threads apart, and skips tool results and system messages between the turns', async () => {
+      const dir = await tempDir();
+      const file = path.join(dir, 'c.jsonl');
+      const long = 'We could rebuild the whole importer around a plugin system. '.repeat(20);
+      await writeFile(
+        file,
+        jsonl([
+          { role: 'assistant', content: long, timestamp: '2026-03-01T10:00:00Z', threadId: 'a' },
+          { role: 'assistant', content: 'Thread B proposal.', timestamp: '2026-03-01T10:00:30Z', threadId: 'b' },
+          { role: 'tool', content: 'tool output', timestamp: '2026-03-01T10:00:40Z', threadId: 'a' },
+          { role: 'user', content: [{ type: 'tool_result', content: 'tool result only' }], timestamp: '2026-03-01T10:00:45Z', threadId: 'a' },
+          { role: 'system', content: 'be nice', timestamp: '2026-03-01T10:00:50Z', threadId: 'a' },
+          { role: 'user', content: 'Instead of that, just patch the one parser.', timestamp: '2026-03-01T10:01:00Z', threadId: 'a' },
+          { role: 'user', content: 'Go with the second option.', timestamp: '2026-03-01T10:02:00Z', threadId: 'b' },
+        ]),
+      );
+      const items = await aiPromptsAdapter.collect({ path: file });
+      const a = items.find((i) => i.summary.startsWith('Instead of'))!;
+      const prior = (a.metadata as { priorProposal: string }).priorProposal;
+      expect(prior.length).toBeLessThanOrEqual(240);
+      expect(prior.startsWith('We could rebuild the whole importer')).toBe(true);
+      expect(prior.endsWith('…')).toBe(true);
+      expect(items.find((i) => i.summary.startsWith('Go with'))!.metadata).toMatchObject({ threadId: 'b', priorProposal: 'Thread B proposal.' });
+      expect(items.map((i) => i.summary).join(' ')).not.toMatch(/tool output|tool result only|be nice|rebuild the whole/);
+    });
+
+    it('works for wrapped lines, { messages } conversations and mapping exports, and survives the store round trip', async () => {
+      const dir = await tempDir();
+      const file = path.join(dir, 'c.json');
+      await writeFile(
+        file,
+        JSON.stringify([
+          { id: 'conv-1', messages: [{ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Option A is a cron job.' }, { type: 'tool_use', name: 'x' }] } }, { type: 'user', message: { role: 'user', content: "Actually, let's use events." }, timestamp: '2026-04-01T09:00:00Z' }] },
+          { mapping: { a: { message: { author: { role: 'assistant' }, content: { parts: ['Export-style proposal.'] } } }, b: { message: { author: { role: 'user' }, content: { parts: ['Nope, too heavy.'] }, create_time: 1775034000 } } } },
+        ]),
+      );
+      const items = await aiPromptsAdapter.collect({ path: file });
+      expect(items.find((i) => i.summary.startsWith('Actually'))!.metadata).toMatchObject({ priorProposal: 'Option A is a cron job.' });
+      expect(items.find((i) => i.summary.startsWith('Nope'))!.metadata).toMatchObject({ priorProposal: 'Export-style proposal.' });
+
+      const store = new CorpusStore(path.join(dir, 'corpus.jsonl'));
+      await collectInto(store, aiPromptsAdapter, { path: file });
+      const stored = (await store.load()).find((i) => i.summary.startsWith('Actually'))!;
+      expect(stored.metadata).toMatchObject({ priorProposal: 'Option A is a cron job.', context: '[In response to proposal: Option A is a cron job.]' });
+      expect(stored.summary).toBe("Actually, let's use events.");
+    });
+
+    it('shows the labeled context line in `rufus context` output', async () => {
+      const dir = await tempDir();
+      const file = path.join(dir, 'c.jsonl');
+      await writeFile(file, jsonl([{ role: 'assistant', content: 'A twelve-part migration plan.', timestamp: '2026-05-01T08:00:00Z' }, { role: 'user', content: "No, that's too complicated.", timestamp: '2026-05-01T08:01:00Z' }]));
+      const lines: string[] = [];
+      const io = { out: (l: string) => void lines.push(l), err: (l: string) => void lines.push(l) };
+      await main(['--dir', path.join(dir, 'ws'), 'collect', 'ai-prompts', file], io);
+      lines.length = 0;
+      await main(['--dir', path.join(dir, 'ws'), 'context', 'complicated'], io);
+      expect(lines.join('\n')).toMatch(/too complicated[\s\S]*\[In response to proposal: A twelve-part migration plan\.\]/);
+    });
   });
 });

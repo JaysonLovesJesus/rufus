@@ -3,6 +3,7 @@
 import type { ReplyHabit } from './extract';
 import type { PriorMessage, HistoryPair } from './types';
 import { idealConstraints, detectLessonDrift, ruleOf, type DriftOptions, type LessonDrift, type LessonInput } from './ideals';
+import { cosineSimilarity, pairEmbedId, tokenize, type EmbeddingLookup } from '../corpus/embeddings';
 import { rankWeights, recencyWeight, resolveRecencyMode, toMs, type TimeLike } from '../recency';
 import { DEFAULT_BUCKETS, EMOJI, GREETING, OTHER_BUCKET, SIGN_OFF, classify, median, percentile, snippet, words, type IntentBucket } from './stats';
 
@@ -439,6 +440,104 @@ export function buildContactProfiles(pairs: HistoryPair[], opts: ProfileOptions 
   };
 }
 
+// ---------- Retrieved examples: learn from real moments, not rules ----------
+
+const EXAMPLE_STOP = new Set(['a', 'an', 'the', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'my', 'is', 'it', 'at', 'by', 'me', 'i', 'you', 'we', 'be', 'so', 'do', 'if', 'as', 'that', 'this', 'are', 'was', 'hi', 'hey', 'hello']);
+
+const contentWords = (s: string): string[] => [...new Set(tokenize(s).filter((t) => !EXAMPLE_STOP.has(t)))];
+
+/** Share (0-1) of the query's content words that appear in `text`: exactly (full credit) or as a prefix / shared 5-letter stem (70%). */
+function lexicalOverlap(query: string[], text: string): number {
+  if (!query.length) return 0;
+  const have = contentWords(text);
+  let sum = 0;
+  for (const q of query) {
+    let best = 0;
+    for (const h of have) {
+      const v = h === q ? 1 : q.length >= 4 && h.length >= 4 && (h.startsWith(q) || q.startsWith(h) || h.slice(0, 5) === q.slice(0, 5)) ? 0.7 : 0;
+      if (v > best) best = v;
+      if (best === 1) break;
+    }
+    sum += best;
+  }
+  return sum / query.length;
+}
+
+/** Cosine below this counts as unrelated, so background similarity does not pass for a match. Raise it (`minSimilarity`) for neural models. */
+const VECTOR_FLOOR = 0.1;
+/** The least combined similarity that makes a past message a candidate on its own. */
+const MIN_SIMILARITY = 0.05;
+
+/** How alike (0-1) a past incoming message is to the query: wording, plus meaning when cached vectors are given. */
+function textSimilarity(queryWords: string[], p: HistoryPair, embeddings: EmbeddingLookup | undefined, floor = VECTOR_FLOOR): { similarity: number; vector?: number } {
+  const lexical = lexicalOverlap(queryWords, p.incoming);
+  const vec = embeddings?.vector(pairEmbedId(p));
+  if (!embeddings || !vec) return { similarity: lexical };
+  const vector = Math.max(0, (cosineSimilarity(embeddings.query, vec) - floor) / (1 - floor));
+  return { similarity: 0.65 * vector + 0.35 * lexical, vector };
+}
+
+const round3x = (n: number): number => Math.round(n * 1000) / 1000;
+
+export interface RetrieveOptions extends WeightOptions {
+  /** How many examples to return. Default 4. */
+  limit?: number;
+  /** Cached vectors for the query and your past messages (`await cache.lookup(provider, queryText)`). Without them, matching is by wording alone. */
+  embeddings?: EmbeddingLookup;
+  /** Prefer exchanges with this person (contact affinity). */
+  sender?: string;
+  /** Prefer exchanges on this channel. */
+  channel?: string;
+  /** Cosine similarity below this counts as unrelated (0-1). Default 0.1; neural models, whose unrelated pairs still score 0.3-0.5, want more. */
+  minSimilarity?: number;
+}
+
+export interface RetrievedExample extends SituationExample {
+  sender: string;
+  /** 0-1: how alike their message was to this one (wording, and meaning when vectors are given). */
+  similarity: number;
+  /** Similarity + contact affinity + a recency nudge. Higher is better. */
+  score: number;
+}
+
+/**
+ * The past exchanges most like this message, as real `(incoming -> your reply)` examples. This is how Rufus learns your
+ * voice, taste and judgment: by showing a model what you actually did in similar moments, not by handing it rules.
+ * Hybrid: similarity (wording, plus meaning when cached vectors are passed), a nudge for the same contact and channel, and
+ * observation recency, so your newest way of replying outranks an old habit. Deterministic and $0.
+ */
+export function retrieveSimilarExamples(queryText: string, pairs: HistoryPair[], opts: RetrieveOptions = {}): RetrievedExample[] {
+  const limit = Math.max(1, Math.floor(opts.limit ?? 4));
+  const queryWords = contentWords(queryText);
+  const weight = pairWeigher(pairs, opts);
+  const scored: Array<RetrievedExample & { at: string; i: number }> = [];
+  pairs.forEach((p, i) => {
+    const { similarity, vector } = textSimilarity(queryWords, p, opts.embeddings, Math.min(0.99, Math.max(0, opts.minSimilarity ?? VECTOR_FLOOR)));
+    const sameSender = opts.sender !== undefined && p.sender === opts.sender;
+    const sameChannel = opts.channel !== undefined && p.channel === opts.channel;
+    if (similarity < MIN_SIMILARITY && !sameSender) return;
+    const because: string[] = [];
+    if (sameSender) because.push('same sender');
+    if (sameChannel) because.push('same channel');
+    if (vector !== undefined && vector >= 0.3) because.push('similar meaning');
+    else if (similarity >= 0.3) because.push('similar wording');
+    const score = similarity + (sameSender ? 0.3 : 0) + (sameChannel ? 0.1 : 0) + 0.15 * (weight ? weight(p) : 1);
+    scored.push({ id: p.id, channel: p.channel, sender: p.sender, incoming: snippet(p.incoming, 240), reply: snippet(p.reply, 240), because, similarity: round3x(similarity), score: round3x(score), at: timeOf(p) ?? '', i });
+  });
+  scored.sort((a, b) => b.score - a.score || b.at.localeCompare(a.at) || b.i - a.i);
+  // The same exchange saved twice teaches nothing new.
+  const seen = new Set<string>();
+  const out: RetrievedExample[] = [];
+  for (const { at: _at, i: _i, ...e } of scored) {
+    const key = `${e.incoming.toLowerCase()}\u0000${e.reply.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(e);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 // ---------- Runtime lookup ----------
 
 export interface SituationInput {
@@ -459,6 +558,8 @@ export interface SituationExample {
   reply: string;
   /** Why it was picked, most specific first: `same sender`, `same channel+dm`, `same intent`, `same rhythm`. */
   because: string[];
+  /** 0-1, only in example-driven mode: how alike the incoming message was to this one. */
+  similarity?: number;
 }
 
 export interface SituationalContext {
@@ -552,6 +653,15 @@ export interface SituationOptions extends ProfileOptions {
   explicitLessons?: LessonInput[];
   /** How `detectLessonDrift` judges those ideals against your latest replies. */
   drift?: DriftOptions;
+  /**
+   * Learn from real examples, not rules. When true, the examples are picked by what they say (wording, and meaning when
+   * `embeddings` are given) on top of who and where, so taste, tone and judgment come from what you actually did in similar
+   * moments. Default **true** when no `explicitLessons` are passed; passing explicit lessons turns it off unless you set it.
+   * Hard boundaries stay in code (`verify`); nothing here turns an example into a rule.
+   */
+  exampleDriven?: boolean;
+  /** Cached vectors for the incoming message and your past messages (`await cache.lookup(provider, incoming)`), for example-driven retrieval by meaning. */
+  embeddings?: EmbeddingLookup;
 }
 
 const CHANNEL_NAMES: Record<string, string> = { whatsapp: 'WhatsApp', imessage: 'iMessage', sms: 'SMS', email: 'Email', telegram: 'Telegram', slack: 'Slack', signal: 'Signal', messenger: 'Messenger' };
@@ -621,7 +731,11 @@ export function buildSituationalContext(input: SituationInput, pairs: HistoryPai
     styleBasis = 'overall';
   }
 
-  // Examples: same sender > same channel + DM/group > same intent > same rhythm; newest first within a score.
+  // Examples: same sender > same channel + DM/group > same intent > same rhythm (the situational base). Example-driven mode
+  // adds what each past message says (wording, and meaning with vectors) and a recency nudge, so the closest real moments win.
+  const exampleDriven = opts.exampleDriven ?? !opts.explicitLessons?.length;
+  const queryWords = exampleDriven ? contentWords(input.incoming) : [];
+  const SITUATION_MAX = 133;
   const scored = pairs
     .map((p, i) => {
       const because: string[] = [];
@@ -635,12 +749,14 @@ export function buildSituationalContext(input: SituationInput, pairs: HistoryPai
       else if (p.channel === input.channel) hit(8, 'same channel');
       if (intent !== OTHER_BUCKET.id && classify(p, buckets) === intent) hit(10, 'same intent');
       if (rhythm && rhythmOf(p) === rhythm) hit(3, 'same rhythm');
-      return { p, i, score, because };
+      const similarity = exampleDriven ? textSimilarity(queryWords, p, opts.embeddings).similarity : 0;
+      const rank = exampleDriven ? score / SITUATION_MAX + similarity + 0.15 * (weight ? weight(p) : 1) : score;
+      return { p, i, score, similarity, rank, because };
     })
-    .filter((e) => e.score >= 8)
-    .sort((a, b) => b.score - a.score || (b.p.incomingAt ?? '').localeCompare(a.p.incomingAt ?? '') || b.i - a.i)
+    .filter((e) => e.score >= 8 || e.similarity >= 0.5)
+    .sort((a, b) => b.rank - a.rank || (b.p.incomingAt ?? '').localeCompare(a.p.incomingAt ?? '') || b.i - a.i)
     .slice(0, wantExamples);
-  const examples = scored.map(({ p, because }) => ({ id: p.id, channel: p.channel, incoming: snippet(p.incoming, 240), reply: snippet(p.reply, 240), because }));
+  const examples = scored.map(({ p, because, similarity }) => ({ id: p.id, channel: p.channel, incoming: snippet(p.incoming, 240), reply: snippet(p.reply, 240), because, ...(exampleDriven ? { similarity: round3x(similarity) } : {}) }));
 
   const tier: ClosenessTier = contact?.tier ?? 'new';
   const kindName = chatKind === 'group' ? 'group chat' : chatKind === 'dm' ? 'DM' : 'chat';

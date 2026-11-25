@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { HistoryPair } from '../history/types';
 import { DAY_MS, rankWeights, recencyWeight, resolveRecencyMode, toMs, type TimeLike } from '../recency';
 import { aiPromptsAdapter } from './adapters/ai-prompts';
+import { cosineSimilarity, type EmbeddingLookup } from './embeddings';
 import { browserAdapter } from './adapters/browser';
 import { calendarAdapter } from './adapters/calendar';
 import { emailAdapter } from './adapters/email';
@@ -20,6 +21,7 @@ export { browserAdapter, parseVisitTime, visitFromRecord, visitsToItems, type Br
 export { calendarAdapter, parseIcs, type CalendarOptions } from './adapters/calendar';
 export { emailAdapter, parseAddress, splitMbox, type EmailOptions } from './adapters/email';
 export { parseRRule, occurrencesBetween, describeRecurrence, type Recurrence } from './recurrence';
+export * from './embeddings';
 
 // ---------- Collecting ----------
 
@@ -421,12 +423,24 @@ export interface QueryOptions {
   maxPerTitle?: number;
   /** When several sources match, guarantee each a share of the top results so one noisy source cannot fill them all. Default true. */
   diversify?: boolean;
+  /**
+   * Cached vectors for hybrid retrieval (`await cache.lookup(provider, query)`). With them, an item's relevance blends keyword
+   * match and cosine similarity, so a note that says "rescheduling" is found by "reschedule" even with no shared exact word.
+   * Items with no cached vector are scored by keywords alone. Without this option the search is keyword-only, as before.
+   */
+  embeddings?: EmbeddingLookup;
+  /** Share of relevance given to vector similarity when `embeddings` is passed (0-1). Default 0.5. */
+  semanticWeight?: number;
+  /** Cosine similarity below this counts as no semantic match (0-1). Default 0.25 (hashed local vectors score unrelated text around 0.2); raise it for neural models, whose unrelated pairs still score around 0.3-0.5. */
+  minSimilarity?: number;
 }
 
 export interface CorpusHit {
   item: CorpusItem;
   /** Relevance x recency; higher is better. */
   score: number;
+  /** Cosine similarity to the query (0-1, after `minSimilarity`), when vectors were used and this item has one. */
+  similarity?: number;
   /** The query words that matched, so you can see why it came back. */
   matched: string[];
 }
@@ -448,7 +462,8 @@ const FIELDS: Array<[(i: CorpusItem) => string, number]> = [
  * Fast, deterministic keyword lookup across every source, ranked by relevance x recency. Call it inside any flow's
  * `ctx.code` step to hand the AI the exact emails, notes, events and sites that matter, at $0. A query word matches a
  * field word exactly (full credit) or as a prefix (70%). Recency softens, never erases: a perfect old match still beats a
- * weak new one, but between equals the newer wins.
+ * weak new one, but between equals the newer wins. With `embeddings` (cached vectors) it is hybrid: keyword relevance and
+ * cosine similarity are blended, then weighted by observation recency, then spread across sources.
  */
 export function queryCorpus(items: CorpusItem[], opts: QueryOptions = {}): CorpusHit[] {
   const nowMs = toMs(opts.now) ?? Date.now();
@@ -457,6 +472,10 @@ export function queryCorpus(items: CorpusItem[], opts: QueryOptions = {}): Corpu
   const since = opts.sinceDays !== undefined ? nowMs - opts.sinceDays * DAY_MS : undefined;
   const terms = [...new Set(words(opts.query ?? '').filter((t) => !STOP.has(t)))];
   const phrase = terms.length > 1 ? terms.join(' ') : undefined;
+  const lookup = opts.embeddings;
+  const semanticWeight = Math.min(1, Math.max(0, opts.semanticWeight ?? 0.5));
+  const minSimilarity = Math.min(0.99, Math.max(0, opts.minSimilarity ?? 0.25));
+  const maxRelevance = terms.length * 3 + (phrase ? 2 : 0); // an exact title hit on every word, plus the phrase bonus
 
   // Recency is ranked among the candidates you asked about (their sources and period), at the pace of the evidence.
   const candidates = items.filter((item) => (!sources || sources.has(item.source)) && (since === undefined || Date.parse(item.timestamp) >= since));
@@ -485,9 +504,12 @@ export function queryCorpus(items: CorpusItem[], opts: QueryOptions = {}): Corpu
         matched.push(t);
       }
     }
-    if (!matched.length) continue;
-    if (phrase && words(`${item.title ?? ''} ${item.summary}`).join(' ').includes(phrase)) relevance += 2;
-    hits.push({ item, score: Math.round(relevance * (0.3 + 0.7 * recency) * 1000) / 1000, matched });
+    const vec = lookup?.vector(item.id);
+    const similarity = vec ? Math.max(0, (cosineSimilarity(lookup!.query, vec) - minSimilarity) / (1 - minSimilarity)) : 0;
+    if (!matched.length && similarity <= 0) continue;
+    if (matched.length && phrase && words(`${item.title ?? ''} ${item.summary}`).join(' ').includes(phrase)) relevance += 2;
+    const blended = lookup ? (1 - semanticWeight) * Math.min(1, relevance / maxRelevance) + semanticWeight * similarity : relevance;
+    hits.push({ item, score: Math.round(blended * (0.3 + 0.7 * recency) * 1000) / 1000, matched, ...(lookup && vec ? { similarity: Math.round(similarity * 1000) / 1000 } : {}) });
   }
   let ranked = hits.sort((a, b) => b.score - a.score || b.item.timestamp.localeCompare(a.item.timestamp) || a.item.id.localeCompare(b.item.id));
 
@@ -566,6 +588,7 @@ export function formatHits(hits: CorpusHit[], query?: string): string[] {
   return hits.map((h) => {
     const i = h.item;
     const who = i.actor ? ` · ${i.actor}` : i.domain ? ` · ${i.domain}` : '';
-    return `${day(i.timestamp)}  [${i.source}/${i.kind}] ${i.title ?? i.summary}${who}${i.title ? `\n            ${clip(i.summary, 140)}` : ''}${i.path ? `\n            ${i.path}` : ''}`;
+    const proposal = (i.metadata as { context?: unknown } | undefined)?.context;
+    return `${day(i.timestamp)}  [${i.source}/${i.kind}] ${i.title ?? i.summary}${who}${i.title ? `\n            ${clip(i.summary, 140)}` : ''}${i.path ? `\n            ${i.path}` : ''}${typeof proposal === 'string' && proposal ? `\n            ${clip(proposal, 160)}` : ''}`;
   });
 }

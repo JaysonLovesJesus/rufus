@@ -8,7 +8,7 @@ export const newId = (prefix: string): string => `${prefix}_${randomBytes(4).toS
 /**
  * Plain, readable JSON files inside a workspace directory:
  *   runs/<runId>.json   lessons.json   config.json   scheduler.json   cases/<flowId>.json
- *   history/pairs.jsonl (after `rufus seed`)   corpus/items.jsonl (after `rufus collect`)
+ *   history/pairs.jsonl (after `rufus seed`)   corpus/items.jsonl + corpus/embeddings.jsonl (after `rufus collect`)
  * Writes are atomic (temp file + rename).
  */
 export class FileStore {
@@ -52,6 +52,10 @@ export class FileStore {
   }
   get corpusFile(): string {
     return path.join(this.corpusDir, 'items.jsonl');
+  }
+  /** Cached embeddings (`corpus/embeddings.jsonl`): one `{ id, model, hash, vector }` per line, filled incrementally. */
+  get embeddingsFile(): string {
+    return path.join(this.corpusDir, 'embeddings.jsonl');
   }
 
   /** Idempotent: creates the workspace layout if missing. */
