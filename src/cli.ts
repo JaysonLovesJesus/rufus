@@ -40,7 +40,7 @@ Usage: rufus [--dir <workspace>] <command>
   tick                         one scheduler pass: start flows whose trigger is due (for cron/launchd)
   watch [--interval <30s>]     keep ticking in the foreground (default every 60s)
   emit <event> [payloadJson]   fire flows with an onEvent(<event>) trigger
-  seed <file> --flow <flowId> [--step <aiStep>] [--limit N] [--dry-run]
+  seed <file> --flow <flowId> [--step <aiStep>] [--limit N] [--dry-run] [--include-noise]
                                Day 1: load real past (incoming -> reply) pairs from a JSON/JSONL file as replay cases
   mine [--ai] [--provider <name>] [--limit N] [--scope <scope>] [--json] [--save]
                                what your history says: voice, rules, recurring intents (free, offline);
@@ -132,6 +132,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const prune = bool('--prune');
   const force = bool('--force');
   const dryRun = bool('--dry-run');
+  const includeNoise = bool('--include-noise');
   const useAi = bool('--ai');
   const asJson = bool('--json');
   const save = bool('--save');
@@ -372,8 +373,8 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     case 'seed': {
       const [file] = rest;
       const flowId = flags['--flow'];
-      if (!file || !flowId) throw new Error('Usage: rufus seed <file.json|file.jsonl> --flow <flowId> [--step <aiStep>] [--limit N] [--dry-run]');
-      const report = await seedHistory(engine, path.resolve(file), { flowId, step: flags['--step'], limit: positive('--limit'), dryRun });
+      if (!file || !flowId) throw new Error('Usage: rufus seed <file.json|file.jsonl> --flow <flowId> [--step <aiStep>] [--limit N] [--dry-run] [--include-noise]');
+      const report = await seedHistory(engine, path.resolve(file), { flowId, step: flags['--step'], limit: positive('--limit'), dryRun, includeNoise });
       for (const line of formatSeed(report)) io.out(line);
       return;
     }

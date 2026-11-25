@@ -18,12 +18,41 @@ export { CardBridge, type CardBridgeOptions, type IncomingMessage, type LiveChan
 export { BeeperChannel, BeeperOfflineError, BeeperApiError, createBeeperChannel, resolveBeeperOptions, type BeeperOptions } from './channels/beeper';
 export { TelegramChannel, TelegramOfflineError, TelegramApiError, createTelegramChannel, resolveTelegramOptions, type TelegramOptions } from './channels/telegram';
 export { selectChannel, configuredChannels, type ChannelName } from './channels/select';
-export { extractPairsFromMessages, cleanText, type HistoryMessage, type ExtractOptions } from './history/extract';
-export { pairHash, normalizePair, type HistoryPair } from './history/types';
+export { extractPairsFromMessages, extractHistoryFromMessages, cleanText, type HistoryMessage, type ExtractOptions, type ExtractResult, type ReplyHabit } from './history/extract';
+export { noiseKind, pairNoiseKind, type NoiseKind, type NoiseCounts } from './history/noise';
+export { pairHash, normalizePair, type HistoryPair, type PriorMessage } from './history/types';
+export {
+  buildContactProfiles,
+  buildSituationalContext,
+  closenessTier,
+  tierBySender,
+  styleOf,
+  describeStyle,
+  rhythmFromGap,
+  rhythmOf,
+  chatKindOf,
+  DEFAULT_TIER_THRESHOLDS,
+  type ClosenessTier,
+  type Rhythm,
+  type ChatKind,
+  type StyleSlice,
+  type ContactProfile,
+  type ContactProfiles,
+  type ProfileOptions,
+  type TierThresholds,
+  type SituationInput,
+  type SituationalContext,
+  type SituationOptions,
+  type SituationExample,
+  type StyleBasis,
+} from './history/profiles';
 export { seedHistory, formatSeed, loadPairs, caseFromPair, parseHistoryText, type SeedOptions, type SeedReport, type HistoryInput } from './history/seed';
 export {
   analyzeHistory,
   formatAnalysis,
+  formatContext,
+  situationalRules,
+  type ContextBreakdown,
   mineHistory,
   formatMine,
   synthesizeHistory,

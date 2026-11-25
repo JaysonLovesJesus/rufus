@@ -4,30 +4,12 @@ import type { LessonLayer } from '../learning/layers';
 import type { AiProvider, MineConfig, RufusConfig } from '../types';
 import { loadPairs } from './seed';
 import type { HistoryPair } from './types';
+import { RHYTHM_LABELS, TIERS, buildContactProfiles, styleOf as styleOfPairs, tierBySender, channelName, chatKindOf, rhythmOf, type ClosenessTier, type ContactProfiles, type StyleSlice } from './profiles';
+import { DEFAULT_BUCKETS, EMOJI, GREETING, OTHER_BUCKET, SHORT_WORDS, SIGN_OFF, classify, median, percentile, round1, snippet, tally, top, words, type IntentBucket } from './stats';
+
+export { DEFAULT_BUCKETS, OTHER_BUCKET, SHORT_WORDS, classify, type IntentBucket };
 
 // ---------- Deterministic analysis (no AI, $0.00) ----------
-
-export interface IntentBucket {
-  id: string;
-  label: string;
-  /** Matched against the incoming message. First bucket that matches wins, so counts add up to the total. */
-  pattern: RegExp;
-}
-
-/** Lightweight keyword buckets, first match wins. Pass your own `buckets` (or put them in `config.mine.buckets`). */
-export const DEFAULT_BUCKETS: IntentBucket[] = [
-  { id: 'confirmation', label: 'Confirmations', pattern: /\b(?:confirm(?:ed|ing|ation)?|still (?:on|good|works|happening)|does (?:that|this) work|rsvp|are you (?:coming|joining)|see you (?:there|then))\b/i },
-  { id: 'follow-up', label: 'Follow-ups', pattern: /\b(?:following up|follow(?:ing)? up|checking in|check(?:ing)? in|any (?:update|news)|circling back|reminder|haven'?t heard|just wondering|bump(?:ing)?)\b/i },
-  {
-    id: 'scheduling',
-    label: 'Scheduling',
-    pattern: /\b(?:schedul\w*|reschedul\w*|meet(?:ing)?|call|calendar|available|availability|free (?:at|on|tomorrow|today|this)|what time|book(?:ing)?|appointment|slot|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s?(?:am|pm))\b/i,
-  },
-  { id: 'logistics', label: 'Logistics', pattern: /\b(?:address|directions?|parking|where|location|pick ?up|drop ?off|arriv\w*|eta|invoice|receipt|payment|pay|link|file|document|attach\w*|forward|send (?:me )?(?:the|a|over))\b/i },
-  { id: 'question', label: 'Questions', pattern: /\?/ },
-];
-
-export const OTHER_BUCKET: Pick<IntentBucket, 'id' | 'label'> = { id: 'other', label: 'Everything else' };
 
 /** Compile `config.mine.buckets` (string patterns) into buckets. */
 export function bucketsFromConfig(cfg?: MineConfig): IntentBucket[] | undefined {
@@ -40,11 +22,6 @@ export function bucketsFromConfig(cfg?: MineConfig): IntentBucket[] | undefined 
       throw new Error(`Mine bucket "${b.id}" has an invalid pattern.`);
     }
   });
-}
-
-export function classify(pair: Pick<HistoryPair, 'incoming'>, buckets: IntentBucket[] = DEFAULT_BUCKETS): string {
-  for (const b of buckets) if (new RegExp(b.pattern.source, b.pattern.flags.replace('g', '')).test(pair.incoming)) return b.id;
-  return OTHER_BUCKET.id;
 }
 
 export interface Rate {
@@ -106,10 +83,17 @@ export interface HistoryAnalysis {
   topThreads: Array<{ threadId: string; channel: string; count: number }>;
   voice: VoiceFingerprint;
   rules: CandidateRule[];
+  /** Situational rules (layer `context`): only where a situation's style differs meaningfully from your overall style. */
+  contextRules: CandidateRule[];
+  /** The same history split by who, DM vs. group, channel and conversation rhythm. No contact names. */
+  context: ContextBreakdown;
   intents: Array<{ bucket: string; label: string; count: number; pct: number }>;
   clusters: IntentCluster[];
   notes: string[];
 }
+
+/** Situation-by-situation statistics (contact names left out; see `buildContactProfiles` for those). */
+export type ContextBreakdown = Omit<ContactProfiles, 'contacts'> & { contacts: number };
 
 export interface AnalyzeOptions {
   buckets?: IntentBucket[];
@@ -120,35 +104,9 @@ export interface AnalyzeOptions {
   /** Samples kept per cluster. Default 3. */
   samplesPerCluster?: number;
   topN?: number;
+  /** A situation needs at least this many replies before a context rule is proposed. Default 5. */
+  minSegment?: number;
 }
-
-export const SHORT_WORDS = 20;
-const SNIPPET = 160;
-
-const round1 = (n: number): number => Math.round(n * 10) / 10;
-const words = (s: string): number => (s.trim() ? s.trim().split(/\s+/).length : 0);
-const snippet = (s: string, max = SNIPPET): string => {
-  const t = s.replace(/\s+/g, ' ').trim();
-  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
-};
-/** Nearest-rank percentile of a sorted list. */
-const percentile = (sorted: number[], p: number): number => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))]! : 0);
-const median = (xs: number[]): number => {
-  if (!xs.length) return 0;
-  const s = [...xs].sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
-};
-const tally = <T>(items: T[], key: (t: T) => string): Map<string, number> => {
-  const m = new Map<string, number>();
-  for (const i of items) m.set(key(i), (m.get(key(i)) ?? 0) + 1);
-  return m;
-};
-const top = (m: Map<string, number>, n: number): Array<[string, number]> => [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, n);
-
-const GREETING = /^\W*(hi+|hey+|hello|hiya|yo|howdy|good (?:morning|afternoon|evening)|morning|evening)\b/i;
-const SIGN_OFF = /\b(thanks(?: again| so much| a lot)?|thank you(?: so much)?|cheers|best|best regards|regards|talk soon|see you(?: soon| then)?|take care|ttyl|appreciate it)\W*$/i;
-const EMOJI = /\p{Extended_Pictographic}/u;
 
 function voiceOf(pairs: HistoryPair[]): VoiceFingerprint {
   const replies = pairs.map((p) => p.reply.trim());
@@ -208,6 +166,95 @@ function rulesFrom(pairs: HistoryPair[], v: VoiceFingerprint, minShare: number):
   return out;
 }
 
+interface Segment {
+  id: string;
+  label: string;
+  /** Conditions combined; when two situations cover exactly the same replies, the more specific one is kept. */
+  depth: number;
+  pairs: HistoryPair[];
+}
+
+const pctText = (rate: number): string => `${Math.round(rate * 100)}%`;
+
+/**
+ * Situational candidate rules (layer `context`). Pairs are cut by closeness tier, DM vs. group, channel and
+ * conversation rhythm (alone and combined); a rule is emitted only when that situation's median reply length differs
+ * from your overall median by at least 3 words and 40%, or its greeting / sign-off rate differs by 30 points.
+ * Support is exact: how many replies in that situation are on the rule's side of your overall median (or do / don't greet).
+ */
+export function situationalRules(pairs: HistoryPair[], profiles: ContactProfiles, opts: { minSegment?: number; max?: number } = {}): CandidateRule[] {
+  const minSegment = opts.minSegment ?? 5;
+  const total = pairs.length;
+  if (!total) return [];
+  const overall = styleOfPairs(pairs);
+  const tierOf = new Map(profiles.contacts.map((c) => [c.sender, c.tier] as const));
+  const multiChannel = profiles.byChannel.length > 1;
+  const segments: Segment[] = [];
+  const add = (id: string, label: string, depth: number, match: (p: HistoryPair) => boolean): void => {
+    const group = pairs.filter(match);
+    if (group.length >= minSegment && group.length <= total * 0.9) segments.push({ id, label, depth, pairs: group });
+  };
+  const kinds = ['dm', 'group'] as const;
+  const kindLabel = { dm: 'DMs', group: 'group chats' } as const;
+  for (const tier of TIERS) add(`tier-${tier}`, `${tier} contacts`, 1, (p) => tierOf.get(p.sender) === tier);
+  for (const kind of kinds) add(`kind-${kind}`, kindLabel[kind], 1, (p) => chatKindOf(p) === kind);
+  if (multiChannel) for (const c of profiles.byChannel) add(`channel-${c.channel}`, `${channelName(c.channel)} messages`, 1, (p) => p.channel === c.channel);
+  for (const r of ['live', 'same-day', 'cold'] as const) add(`rhythm-${r}`, `${RHYTHM_LABELS[r]} threads`, 1, (p) => rhythmOf(p) === r);
+  for (const tier of TIERS) {
+    for (const r of ['live', 'cold'] as const) add(`tier-${tier}-${r}`, `${tier} contacts in ${RHYTHM_LABELS[r]} threads`, 2, (p) => tierOf.get(p.sender) === tier && rhythmOf(p) === r);
+    for (const c of profiles.byChannel) for (const kind of kinds) add(`tier-${tier}-${c.channel}-${kind}`, `${tier} ${channelName(c.channel)} ${kindLabel[kind]}`, 3, (p) => tierOf.get(p.sender) === tier && p.channel === c.channel && chatKindOf(p) === kind);
+  }
+
+  const seen = new Set<string>();
+  const found: Array<{ rule: CandidateRule; weight: number }> = [];
+  for (const seg of segments.map((g, i) => ({ g, i })).sort((a, b) => b.g.depth - a.g.depth || a.i - b.i).map(({ g }) => g)) {
+    const signature = seg.pairs.map((p) => p.id).sort().join('|');
+    if (seen.has(signature)) continue; // same replies as a broader situation already covered
+    seen.add(signature);
+    const st = styleOfPairs(seg.pairs);
+    const wordGap = st.medianWords - overall.medianWords;
+    const wordsDiffer = Math.abs(wordGap) >= Math.max(3, overall.medianWords * 0.4);
+    const greetGap = st.greetingRate - overall.greetingRate;
+    const signGap = st.signOffRate - overall.signOffRate;
+    const greetDiffers = Math.abs(greetGap) >= 0.3;
+    const signDiffers = Math.abs(signGap) >= 0.3;
+    if (!wordsDiffer && !greetDiffers && !signDiffers) continue;
+
+    const replies = seg.pairs.map((p) => p.reply.trim());
+    const clauses: string[] = [];
+    let support: number;
+    let basis: string;
+    if (wordsDiffer) {
+      clauses.push(wordGap > 0 ? `use fuller sentences (~${st.medianWords} words)` : `keep replies ~${st.medianWords} words`);
+      support = replies.filter((r) => (wordGap > 0 ? words(r) > overall.medianWords : words(r) < overall.medianWords)).length;
+      basis = `${wordGap > 0 ? 'longer' : 'shorter'} than your overall median of ${overall.medianWords} words`;
+    } else if (greetDiffers) {
+      support = replies.filter((r) => GREETING.test(r) === greetGap > 0).length;
+      basis = greetGap > 0 ? 'open with a greeting' : 'have no greeting';
+    } else {
+      support = replies.filter((r) => SIGN_OFF.test(r) === signGap > 0).length;
+      basis = signGap > 0 ? 'end with a sign-off' : 'have no sign-off';
+    }
+    if (st.greetingRate <= 0.1 && (greetDiffers || wordsDiffer)) clauses.push('no greeting');
+    else if (st.greetingRate >= 0.5) clauses.push('open with a greeting');
+    if (st.signOffRate >= 0.5) clauses.push('sign off');
+    else if (signDiffers && st.signOffRate <= 0.1) clauses.push('no sign-off');
+    if (!clauses.length) clauses.push(`keep replies ~${st.medianWords} words`);
+    const n = seg.pairs.length;
+    found.push({
+      weight: n * (wordsDiffer ? Math.abs(wordGap) / Math.max(1, overall.medianWords) : 0.3),
+      rule: {
+        id: `context-${seg.id}`,
+        layer: 'context',
+        rule: `For ${seg.label}, ${clauses.join(', ')}.`,
+        support: { count: support, of: n },
+        evidence: `${support} of ${n} replies (${round1((support / n) * 100)}%) to ${seg.label} ${basis}. Median ${st.medianWords} vs ${overall.medianWords} words overall; greeting ${pctText(st.greetingRate)} vs ${pctText(overall.greetingRate)}; sign-off ${pctText(st.signOffRate)} vs ${pctText(overall.signOffRate)}.`,
+      },
+    });
+  }
+  return found.sort((a, b) => b.weight - a.weight || a.rule.id.localeCompare(b.rule.id)).slice(0, opts.max ?? 6).map((f) => f.rule);
+}
+
 /**
  * Exact, verifiable statistics about your real history: volume, voice, candidate rules and recurring intents.
  * Pure and offline. Every number can be recomputed by hand from `pairs`.
@@ -246,6 +293,11 @@ export function analyzeHistory(pairs: HistoryPair[], opts: AnalyzeOptions = {}):
   if (total < minPairs) notes.push(`Only ${total} pair(s): at least ${minPairs} are needed before proposing rules from your style.`);
   else rules = rulesFrom(pairs, voice, minShare);
 
+  const profiles = buildContactProfiles(pairs, { buckets });
+  const { contacts, ...rest } = profiles;
+  const context: ContextBreakdown = { ...rest, contacts: contacts.length };
+  const contextRules = total < minPairs ? [] : situationalRules(pairs, profiles, { minSegment: opts.minSegment ?? 5 });
+
   const cell = new Map<string, HistoryPair[]>();
   const labels = new Map<string, string>([...buckets.map((b) => [b.id, b.label] as [string, string]), [OTHER_BUCKET.id, OTHER_BUCKET.label]]);
   for (const p of pairs) {
@@ -278,6 +330,8 @@ export function analyzeHistory(pairs: HistoryPair[], opts: AnalyzeOptions = {}):
     topThreads,
     voice,
     rules,
+    contextRules,
+    context,
     intents,
     clusters,
     notes,
@@ -288,6 +342,30 @@ export function analyzeHistory(pairs: HistoryPair[], opts: AnalyzeOptions = {}):
 function evenly<T>(items: T[], n: number): T[] {
   if (items.length <= n) return items;
   return Array.from({ length: n }, (_, i) => items[Math.floor((i * items.length) / n)]!);
+}
+
+const pc = (rate: number): string => `${Math.round(rate * 100)}%`;
+const sliceLine = (label: string, c: StyleSlice, extra = ''): string =>
+  `  ${label}: ${c.count} repl${c.count === 1 ? 'y' : 'ies'}${extra}, median ${c.medianWords} words (90th pct ${c.p90Words}), greeting ${pc(c.greetingRate)}, sign-off ${pc(c.signOffRate)}, emoji ${pc(c.emojiRate)}, lowercase ${pc(c.lowercaseRate)}${c.medianReplyMins !== undefined ? `, replies in ~${c.medianReplyMins} min` : ''}`;
+
+/** The situational breakdown: who, DM vs. group, channel, conversation rhythm. One flat average hides all of this. */
+export function formatContext(c: ContextBreakdown): string[] {
+  if (!c.total) return [];
+  const lines: string[] = ['', 'Your voice by situation (a single average hides this):'];
+  lines.push('  By closeness (from how often you actually talk):');
+  for (const t of c.byTier.filter((t) => t.count)) lines.push(sliceLine(`  ${t.tier}`, t, ` from ${t.contacts} contact${t.contacts === 1 ? '' : 's'}`));
+  if (c.byChatKind.length) {
+    lines.push('  DM vs. group chat:');
+    for (const k of c.byChatKind) lines.push(sliceLine(`  ${k.kind === 'dm' ? 'DM' : 'group chat'}`, k));
+    if (c.known.chatKind < c.total) lines.push(`    (${c.total - c.known.chatKind} older pair(s) do not say whether they were group chats.)`);
+  } else lines.push('  DM vs. group chat: unknown. Pairs from extractPairsFromMessages carry it; older ones do not.');
+  lines.push('  By channel:');
+  for (const ch of c.byChannel) lines.push(sliceLine(`  ${channelName(ch.channel)}`, ch, ch.replyRate !== undefined ? `, you answer ${pc(ch.replyRate)} of what arrives` : ''));
+  if (c.byRhythm.length) {
+    lines.push('  By conversation rhythm (time since the previous message in the thread):');
+    for (const r of c.byRhythm) lines.push(sliceLine(`  ${RHYTHM_LABELS[r.rhythm]} (${r.rhythm === 'live' ? '< 10 min' : r.rhythm === 'cold' ? '> 24 h' : 'same day'})`, r));
+  } else lines.push('  By conversation rhythm: unknown. Pairs from extractPairsFromMessages carry the gap; older ones do not.');
+  return lines;
 }
 
 /** Plain-English report for the CLI. */
@@ -313,10 +391,11 @@ export function formatAnalysis(a: HistoryAnalysis): string[] {
     lines.push('', 'Biggest recurring patterns (channel + intent):');
     for (const c of shown) lines.push(`  ${c.channel} / ${c.label}: ${c.count} (${c.pct}%), you reply in ~${c.medianReplyWords} words. e.g. "${c.samples[0]!.incoming}" -> "${c.samples[0]!.reply}"`);
   }
+  lines.push(...formatContext(a.context));
   lines.push('');
-  if (a.rules.length) {
+  if (a.rules.length || a.contextRules.length) {
     lines.push('Candidate rules from your own replies (exact support):');
-    for (const r of a.rules) lines.push(`  [${r.layer}] ${r.rule}  (${r.support.count}/${r.support.of})`);
+    for (const r of [...a.rules, ...a.contextRules]) lines.push(`  [${r.layer}] ${r.rule}  (${r.support.count}/${r.support.of})`);
   } else {
     lines.push('No candidate rules: nothing was true of enough replies.');
   }
@@ -360,7 +439,7 @@ const MAX_LESSONS = 8;
  * A small, code-picked sample: round-robin over the biggest intent buckets so every recurring pattern is
  * represented, evenly spaced inside each. Message text is trimmed; names are left out.
  */
-export function representativeSample(pairs: HistoryPair[], buckets: IntentBucket[], n: number): Array<PairSample & { intent: string }> {
+export function representativeSample(pairs: HistoryPair[], buckets: IntentBucket[], n: number, tiers?: Map<string, ClosenessTier>): Array<PairSample & { intent: string; situation?: { closeness: ClosenessTier; chat?: string; rhythm?: string } }> {
   const groups = new Map<string, HistoryPair[]>();
   for (const p of pairs) {
     const id = classify(p, buckets);
@@ -368,14 +447,25 @@ export function representativeSample(pairs: HistoryPair[], buckets: IntentBucket
   }
   const ordered = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
   const picks = new Map(ordered.map(([id, g]) => [id, evenly(g, Math.min(g.length, n))]));
-  const out: Array<PairSample & { intent: string }> = [];
+  const out: Array<PairSample & { intent: string; situation?: { closeness: ClosenessTier; chat?: string; rhythm?: string } }> = [];
   for (let round = 0; out.length < n; round++) {
     let any = false;
     for (const [id] of ordered) {
       const p = picks.get(id)![round];
       if (!p) continue;
       any = true;
-      if (out.length < n) out.push({ id: p.id, intent: id, incoming: snippet(p.incoming, 240), reply: snippet(p.reply, 240) });
+      if (out.length < n) {
+        const closeness = tiers?.get(p.sender);
+        const chat = chatKindOf(p);
+        const rhythm = rhythmOf(p);
+        out.push({
+          id: p.id,
+          intent: id,
+          incoming: snippet(p.incoming, 240),
+          reply: snippet(p.reply, 240),
+          ...(closeness ? { situation: { closeness, ...(chat ? { chat } : {}), ...(rhythm ? { rhythm } : {}) } } : {}),
+        });
+      }
     }
     if (!any) break;
   }
@@ -433,21 +523,30 @@ export async function synthesizeHistory(
   pairs: HistoryPair[],
   opts: { providerName?: string; sampleSize?: number; buckets?: IntentBucket[] } = {},
 ): Promise<Synthesis> {
-  const sample = representativeSample(pairs, opts.buckets ?? DEFAULT_BUCKETS, opts.sampleSize ?? DEFAULT_AI_SAMPLE);
+  const sample = representativeSample(pairs, opts.buckets ?? DEFAULT_BUCKETS, opts.sampleSize ?? DEFAULT_AI_SAMPLE, tierBySender(pairs));
   const stats = {
     totalPairs: analysis.total,
     span: analysis.span,
     channels: analysis.byChannel,
     topContactShares: analysis.topContacts.slice(0, 5).map((c, i) => ({ contact: `contact ${i + 1}`, count: c.count })),
     voice: analysis.voice,
-    candidateRules: analysis.rules.map(({ id, layer, rule, support }) => ({ id, layer, rule, support })),
+    candidateRules: [...analysis.rules, ...analysis.contextRules].map(({ id, layer, rule, support }) => ({ id, layer, rule, support })),
+    // Situational slices, anonymized: tiers are counts of contacts, never names.
+    situations: {
+      byCloseness: analysis.context.byTier.filter((t) => t.count),
+      byChatKind: analysis.context.byChatKind,
+      byChannel: analysis.context.byChannel,
+      byRhythm: analysis.context.byRhythm,
+      byChannelIntent: analysis.context.byChannelIntent.slice(0, 12),
+    },
     intents: analysis.intents,
     clusters: analysis.clusters.slice(0, 12).map(({ bucket, channel, count, pct, medianReplyWords }) => ({ bucket, channel, count, pct, medianReplyWords })),
   };
   const prompt = [
     'Propose how to automate the recurring parts of this person\'s replies.',
     `Return JSON: {"blueprints":[{"name","frequency","trigger","code","ai","human"}],"lessons":[{"rule","layer","support"}]}.`,
-    `- At most ${MAX_BLUEPRINTS} blueprints, the most frequent first. "frequency" quotes counts from the stats. "trigger" says what starts it. "code" is what exact code does (lookups, parsing, checks). "ai" is what the model does (drafting or judging only). "human" is where the person approves.`,
+    `- At most ${MAX_BLUEPRINTS} blueprints, the most frequent first. "frequency" quotes counts from the stats. "trigger" says what starts it. "code" is what exact code does (lookups, parsing, checks, and situational lookups such as the sender's closeness tier, DM vs. group, channel and conversation rhythm). "ai" is what the model does (drafting or judging only). "human" is where the person approves.`,
+    `- Reply style depends on the situation, not one global average. "stats.situations" splits the same replies by closeness tier (inner-circle, regular, occasional, new), DM vs. group, channel and conversation rhythm (live < 10 min, same-day, cold > 24 h). Make blueprints and lessons situation-aware where those slices clearly differ, and quote their exact numbers. Do not invent a situation the slices do not show.`,
     `- At most ${MAX_LESSONS} lessons. Each is one short imperative rule about how to reply. "layer" is "code" (exactly checkable, belongs in a verify function), "context" (the model needs a fact that code should fetch), or "principle" (taste or tone). Prefer the candidate rules in the stats; "support" quotes their counts.`,
   ].join('\n');
 

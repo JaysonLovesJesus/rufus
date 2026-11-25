@@ -3,7 +3,8 @@ import { promises as fs } from 'node:fs';
 import type { Engine } from '../engine/engine';
 import type { FileStore } from '../store';
 import type { ReplayCase } from '../learning/cases';
-import { normalizePair, type HistoryPair, type InvalidRecord } from './types';
+import { addNoise, emptyNoise, pairNoiseKind, type NoiseCounts } from './noise';
+import { normalizePair, type HistoryPair, type InvalidRecord, type PriorMessage } from './types';
 
 /** Epoch, for pairs with no timestamps: history sorts before anything a live run saves. */
 const UNDATED = '1970-01-01T00:00:00.000Z';
@@ -17,6 +18,10 @@ export interface HistoryInput {
   incomingAt?: string;
   tags?: string[];
   metadata?: Record<string, unknown>;
+  /** Situation, when the pair carries it: pass `ctx.input` to `buildSituationalContext` inside a `ctx.code` step. */
+  isGroup?: boolean;
+  gapSincePreviousMs?: number;
+  priorMessages?: PriorMessage[];
 }
 
 /** A JSON array or JSONL file (one JSON value per line) -> raw records. A line that is not JSON is reported, not fatal. */
@@ -67,6 +72,9 @@ export function caseFromPair(flowId: string, pair: HistoryPair, step: string): R
     ...(pair.incomingAt ? { incomingAt: pair.incomingAt } : {}),
     ...(pair.tags ? { tags: pair.tags } : {}),
     ...(pair.metadata ? { metadata: pair.metadata } : {}),
+    ...(pair.isGroup !== undefined ? { isGroup: pair.isGroup } : {}),
+    ...(pair.gapSincePreviousMs !== undefined ? { gapSincePreviousMs: pair.gapSincePreviousMs } : {}),
+    ...(pair.priorMessages ? { priorMessages: pair.priorMessages } : {}),
   };
   const hash = createHash('sha256').update(`${flowId}\u0000${step}\u0000${pair.id}`).digest('hex').slice(0, 12);
   return {
@@ -93,6 +101,8 @@ export interface SeedOptions {
   dryRun?: boolean;
   /** Name of the flow's ai step that writes the reply. Default `draft`. */
   step?: string;
+  /** Keep one-time passcodes and bare tapback/reaction echoes instead of skipping them. Default false. */
+  includeNoise?: boolean;
 }
 
 export interface SeedReport {
@@ -104,6 +114,8 @@ export interface SeedReport {
   invalid: InvalidRecord[];
   /** Repeats of an earlier pair in the same file. */
   duplicatesInFile: number;
+  /** Pairs skipped as automated codes (2FA / OTP) or reaction echoes. Always zero with `includeNoise`. */
+  noiseSkipped: NoiseCounts;
   /** Pairs left after `limit`. */
   considered: number;
   /** Pairs already in `history/pairs.jsonl`. */
@@ -142,10 +154,13 @@ export async function seedHistory(engine: Engine, file: string, opts: SeedOption
   const invalid: InvalidRecord[] = [...badLines];
   const seenInFile = new Set<string>();
   let duplicatesInFile = 0;
+  const noiseSkipped = emptyNoise();
   let pairs: HistoryPair[] = [];
   records.forEach((raw, index) => {
     const r = normalizePair(raw);
     if ('error' in r) return void invalid.push({ index, reason: r.error });
+    const noise = opts.includeNoise ? undefined : pairNoiseKind(r.pair);
+    if (noise) return void addNoise(noiseSkipped, noise);
     if (seenInFile.has(r.pair.id)) return void duplicatesInFile++;
     seenInFile.add(r.pair.id);
     pairs.push(r.pair);
@@ -175,6 +190,7 @@ export async function seedHistory(engine: Engine, file: string, opts: SeedOption
     read: records.length + badLines.length,
     invalid,
     duplicatesInFile,
+    noiseSkipped,
     considered: pairs.length,
     alreadySeeded: pairs.length - fresh.length,
     added: fresh.length,
@@ -190,6 +206,10 @@ export function formatSeed(r: SeedReport): string[] {
       : `Seeded "${r.flowId}": ${r.added} new pair(s) saved, ${r.casesAdded} replay case(s) added (step "${r.step}"). ${r.totalPairs} pair(s) in history.`,
     `  read ${r.read}, invalid ${r.invalid.length}, repeated in file ${r.duplicatesInFile}, already seeded ${r.alreadySeeded}`,
   ];
+  if (r.noiseSkipped.total) {
+    const { otp, tapback } = r.noiseSkipped;
+    lines.push(`  skipped ${r.noiseSkipped.total} noise item(s): ${otp} one-time passcode(s) / verification code(s), ${tapback} tapback reaction(s). Add --include-noise to keep them.`);
+  }
   for (const bad of r.invalid.slice(0, 5)) lines.push(`  skipped record ${bad.index + 1}: ${bad.reason}`);
   if (r.invalid.length > 5) lines.push(`  ...and ${r.invalid.length - 5} more skipped.`);
   if (!r.dryRun && r.casesAdded) lines.push(`Next: rufus replay ${r.flowId} --limit 5   or   rufus compare ${r.flowId} --limit 5   (each case calls your provider)`);

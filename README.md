@@ -226,14 +226,21 @@ interface HistoryPair {
   id: string; channel: string; threadId?: string; sender: string;
   incoming: string; reply: string; incomingAt?: string; replyAt?: string;
   tags?: string[]; metadata?: Record<string, unknown>;
+  // Optional situation (v6.1). Older pairs without these keep working.
+  isGroup?: boolean;
+  priorMessages?: Array<{ sender: string; isFromMe: boolean; text: string; timestamp?: string }>; // last few turns
+  gapSincePreviousMs?: number;  // live chat (minutes) vs. same day vs. cold restart (> 24h)
+  replyDelayMs?: number; incomingHour?: number; incomingDayOfWeek?: number;
 }
 ```
 
 Have a chronological message export instead? `extractPairsFromMessages(messages, { selfIds, maxGapMs })` turns `{ id, threadId, channel, sender, isFromMe, text, timestamp }` into pairs: bursts from one sender merge into one turn, empty and media-only messages are ignored, and a reply only counts if it follows within `maxGapMs` (default 24h). Write the result as JSONL (one pair per line) or a JSON array.
 
+Extraction also records the **situation** of each pair (group or DM, the previous 4 turns, the gap since the previous turn, your reply delay, hour and weekday), **skips noise** (one-time passcodes / verification codes and bare tapback echoes such as `Liked "..."`; pass `includeNoise: true` to keep them), and counts the **silence**: `extractHistoryFromMessages(messages, opts)` returns `{ pairs, noise, ignored }`, where `ignored` says per channel and sender how many incoming turns you answered and how many you left alone.
+
 ```sh
 # 1. Load pairs as replay cases for a flow (and keep them in history/pairs.jsonl)
-rufus seed history.jsonl --flow reply-drafter [--step draft] [--limit 200] [--dry-run]
+rufus seed history.jsonl --flow reply-drafter [--step draft] [--limit 200] [--dry-run] [--include-noise]
 
 # 2. What does your history say? Free, offline, exact
 rufus mine [--limit N] [--json] [--save]
@@ -254,7 +261,13 @@ rufus propose flow:reply-drafter "Keep replies to at most 12 words." --layer cod
 { "mine": { "buckets": [{ "id": "invoices", "label": "Invoice questions", "pattern": "invoice|receipt|refund" }], "minPairs": 10, "minShare": 0.9, "provider": "smart" } }
 ```
 
-**`mine --ai`** sends a provider the code-assembled statistics plus a small sample (24 pairs by default, picked round-robin across the biggest intents and trimmed; contact names are withheld), never the raw history. It returns *workflow blueprints* (name, frequency quoting your counts, trigger, what code handles, what the AI handles, where you approve) and *lessons* tagged `code`, `context` or `principle`, each with a ready-to-paste `rufus propose` line, so the regression gate still decides what is kept. Unparseable output is retried with the exact reason, like any `ctx.ai` step. `--save` writes the report to `history/mine-report.json`.
+`seed` also skips noise pairs (2FA / OTP codes, tapback echoes) and reports how many it skipped; `--include-noise` keeps them. A seeded case's `input` also carries `isGroup`, `gapSincePreviousMs` and `priorMessages` when the pair has them.
+
+**Context, not one average.** A single global "median 8 words" flattens what matters: who you are talking to, how close you are, DM or group, which channel, and whether the thread is live or cold. `buildContactProfiles(pairs)` computes, from real history and with no AI, a **closeness tier** per contact (`inner-circle` >= 20 pairs, or >= 10 and mostly live; `regular` 5-19; `occasional` 2-4; `new` 1) and the same exact style numbers (`count`, `medianWords`, `p90Words`, `greetingRate`, `signOffRate`, `emojiRate`, `exclamationRate`, `lowercaseRate`, `medianReplyMins`) per contact, tier, DM vs. group, channel, rhythm (`live` < 10 min, `same-day`, `cold` > 24h) and channel x intent. `mine` prints that breakdown, and emits `[context]` candidate rules (`For inner-circle WhatsApp DMs, keep replies ~6 words, no greeting.`) only where a situation differs meaningfully from your overall style.
+
+At runtime, call `buildSituationalContext({ channel, sender, isGroup, incoming, gapSincePreviousMs, priorMessages }, pairs)` inside a flow's `ctx.code` step. It returns the contact's tier, the rhythm, the most specific style slice with enough evidence (this contact, else channel + DM/group + intent, else wider), 2-4 relevant past examples (same sender first, then same channel + DM/group, then same intent) and a one-line `voiceHint` such as `Inner-circle WhatsApp DM (45 past exchanges), live chat: median 6 words, casual, no greeting/sign-off`. Hand that to `ctx.ai` as context.
+
+**`mine --ai`** sends a provider the code-assembled statistics plus a small sample (24 pairs by default, picked round-robin across the biggest intents and trimmed; contact names are withheld) and the anonymized situational slices (by closeness tier, DM vs. group, channel and rhythm; never names or prior messages), never the raw history. It returns *workflow blueprints* (name, frequency quoting your counts, trigger, what code handles, what the AI handles, where you approve) and *lessons* tagged `code`, `context` or `principle`, each with a ready-to-paste `rufus propose` line, so the regression gate still decides what is kept. Unparseable output is retried with the exact reason, like any `ctx.ai` step. `--save` writes the report to `history/mine-report.json`.
 
 ## Fast and smart model tiers
 
@@ -376,7 +389,7 @@ defineFlow({ id: 'inbox', name: 'Inbox', description: '...', provider: 'claude' 
 src/engine/     defineFlow, Engine, step runner, AI verify loop, providers
 src/store/      atomic JSON file store (no native deps)
 src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay; compare (plain vs. assisted)
-src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `mine` (voice, rules, intents, optional AI blueprints)
+src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`), `mine` (voice, rules, intents, optional AI blueprints)
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop
 src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Telegram and Beeper adapters
 src/chief/      ChiefOfStaff: fast code commands + code-assembled free-form chat
