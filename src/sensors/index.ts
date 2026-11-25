@@ -1,4 +1,4 @@
-import type { LoopPlan, LoopSignal, LoopStageContext, Sensor, SignalHandler, Urgency } from '../engine/loop';
+import { SELF_REPLY_KIND, type LoopPlan, type LoopSignal, type LoopStageContext, type Sensor, type SignalHandler, type Urgency } from '../engine/loop';
 import { BeeperApi, beeperApiOptions, type BeeperApiOptions, type BeeperChat } from '../tools/beeper-api';
 import { beeperConfigured, parseOutput, runCommand, type CommandRunner } from '../tools/tools';
 import type { BeeperSensorConfig, CommandSensorConfig, RufusConfig } from '../types';
@@ -80,6 +80,13 @@ export function beeperSensor(opts: BeeperSensorOptions = {}): Sensor {
           if (!m.timestamp || m.timestamp < prev.since) continue;
           const id = `${chat.id}:${m.id}`;
           if (seen.has(id)) continue;
+          if (m.isSender && !m.isDeleted) {
+            // v16: you answered this chat yourself; the loop closes whatever was waiting on it. Never a work item.
+            seen.add(id);
+            if (m.timestamp > since) since = m.timestamp;
+            signals.push({ id, surface: 'chat', kind: SELF_REPLY_KIND, actor: 'me', timestamp: m.timestamp, data: { chatId: chat.id, messageId: m.id } });
+            continue;
+          }
           if (m.isSender || m.isDeleted || !m.text.trim()) continue;
           if (m.type && !['TEXT', 'VOICE', 'AUDIO'].includes(m.type.toUpperCase())) continue;
           if (m.senderName && bot.test(m.senderName)) continue;
@@ -208,7 +215,7 @@ export function buildSensors(config: RufusConfig, opts: { env?: NodeJS.ProcessEn
 
 // ---------- message triage ----------
 
-export type TriageLabel = 'ignore' | 'batch' | 'urgent';
+export type TriageLabel = 'ignore' | 'batch' | 'urgent' | 'todo';
 
 export interface TriageResult {
   label: TriageLabel;
@@ -232,6 +239,8 @@ const isAck = (t: string): boolean => {
   const words = t.toLowerCase().replace(/[!.,~]+/g, ' ').split(/\s+/).filter(Boolean);
   return words.length > 0 && words.length <= 4 && words.every((w) => ACK.has(w));
 };
+/** Call notices and other app-generated lines bridged into a chat: never a message to answer. */
+const SYSTEM_NOTICE = /^(incoming|missed|outgoing|ended)\s+(voice\s+|video\s+)?call\b|use the \w+ app to (answer|see|view)|^(this message was deleted|message deleted|you missed a call)/i;
 const URGENT = /\b(urgent|asap|emergency|right now|immediately|call me|help|hospital|accident|deadline (is )?today)\b/i;
 
 /** The free, code-only first guess. `undefined` when code cannot tell and a model (or a person) should judge. */
@@ -239,20 +248,22 @@ export function classifyByCode(text: string): { label: TriageLabel; reason: stri
   const t = text.trim();
   if (!t) return { label: 'ignore', reason: 'empty message' };
   if (isAck(t)) return { label: 'ignore', reason: 'a short acknowledgement, nothing to answer' };
+  if (SYSTEM_NOTICE.test(t)) return { label: 'ignore', reason: 'an app notice (a call alert), not a message' };
   if (URGENT.test(t)) return { label: 'urgent', reason: 'it says it is urgent' };
   return undefined;
 }
 
-function parseTriage(raw: string): { label?: TriageLabel; reason?: string; reply?: string } {
+function parseTriage(raw: string): { label?: TriageLabel; reason?: string; reply?: string; todo?: string } {
   const m = /\{[\s\S]*\}/.exec(raw);
   if (!m) return {};
   try {
     const o = JSON.parse(m[0]) as Record<string, unknown>;
-    const label = ['ignore', 'batch', 'urgent'].includes(String(o.label)) ? (o.label as TriageLabel) : undefined;
+    const label = ['ignore', 'batch', 'urgent', 'todo'].includes(String(o.label)) ? (o.label as TriageLabel) : undefined;
     return {
       ...(label ? { label } : {}),
       ...(typeof o.reason === 'string' ? { reason: o.reason } : {}),
       ...(typeof o.reply === 'string' && o.reply.trim() ? { reply: o.reply.trim() } : {}),
+      ...(typeof o.todo === 'string' && o.todo.trim() ? { todo: o.todo.trim() } : {}),
     };
   } catch {
     return {};
@@ -260,6 +271,34 @@ function parseTriage(raw: string): { label?: TriageLabel; reason?: string; reply
 }
 
 const MAX_REPLY = 600;
+
+/** Code-only triage for a (possibly folded) burst: every line ignorable -> ignore; any urgent line -> urgent. */
+export function classifyBurst(text: string): { label: TriageLabel; reason: string; todo?: string } | undefined {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length <= 1) return classifyByCode(text);
+  const each = lines.map(classifyByCode);
+  const urgent = each.find((j) => j?.label === 'urgent');
+  if (urgent) return urgent;
+  if (each.every((j) => j?.label === 'ignore')) return { label: 'ignore', reason: 'only acknowledgements and notices' };
+  return undefined;
+}
+
+/** The last messages of a chat (yours included), for drafting with real context. Empty when unavailable. */
+async function recentThread(signal: LoopSignal, ctx: LoopStageContext, limit = 12): Promise<string> {
+  const chatId = typeof signal.data?.chatId === 'string' ? signal.data.chatId : undefined;
+  if (signal.surface !== 'chat' || !chatId || !ctx.tools.has('beeper.read')) return '';
+  try {
+    const msgs = await ctx.tools.call<unknown>('beeper.read', { chatId, limit });
+    if (!Array.isArray(msgs)) return '';
+    return msgs
+      .filter((m): m is { text: string; isSender?: boolean; senderName?: string } => !!m && typeof m.text === 'string' && !!m.text.trim())
+      .slice(-limit)
+      .map((m) => `${m.isSender ? 'Me' : (m.senderName ?? signal.actor ?? 'Them')}: ${clip(m.text, 300)}`)
+      .join('\n');
+  } catch {
+    return ''; // the new messages alone are enough to draft from
+  }
+}
 
 /** The human's past verdicts closest to `text` (rejections and their notes included), one line each. Empty when none. */
 function pastDecisions(ctx: LoopStageContext, actionType: string, text: string, limit = 5): string {
@@ -295,23 +334,27 @@ export function messageTriageHandler(opts: MessageTriageOptions = {}): SignalHan
       .join('\n');
   return {
     id: opts.id ?? 'message.triage',
-    match: (s) => (s.surface === 'chat' || s.surface === 'email') && /message|email|received|mail/i.test(s.kind),
+    match: (s) => (s.surface === 'chat' || s.surface === 'email') && s.kind !== SELF_REPLY_KIND && /message|email|received|mail/i.test(s.kind),
     maxReplans: 1,
     async plan(signal, ctx) {
       const surface = signal.surface;
       const who = signal.actor ?? 'someone';
       const text = signal.text ?? '';
-      let judged = classifyByCode(text);
+      let judged = classifyBurst(text);
       if (!judged && ctx.hasAi) {
         // Learning from corrections, not regexes: the human's past verdicts on the most similar messages (rejections with
         // their notes, like "2 that's just a call alert, ignore those") go straight into the triage prompt.
         const past = pastDecisions(ctx, `reply.${surface}`, text);
         const raw = await ctx.ai(
           [
-            `Triage this ${surface} message for your human. Reply with JSON only: {"label":"ignore"|"batch"|"urgent","reason":"<short>"}.`,
-            'ignore = needs nothing from them; batch = answer at the next check-in; urgent = they should see it now.',
+            `Triage this ${surface} conversation for your human the way a sharp chief of staff would: protect their attention.`,
+            'Reply with JSON only: {"label":"ignore"|"batch"|"urgent"|"todo","reason":"<short>","todo":"<only for todo: the task, a few words>"}.',
+            'ignore = no reply is really expected (a shared link or video, news, an FYI, a reaction, an automated notice, small talk that already ended).',
+            'todo = they ask or remind your human to DO something, not just answer (e.g. "don\'t forget to pay Sam").',
+            'batch = a reply is expected but can wait for the next check-in.',
+            'urgent = time-sensitive or important: they should see it now.',
             `From: ${who}`,
-            `Message: ${clip(text, 1200)}`,
+            `Messages (oldest first):\n${clip(text, 1500)}`,
             ...(ctx.replan ? [`A previous attempt failed: ${ctx.replan.reason}`] : []),
             ...(past
               ? [
@@ -325,12 +368,17 @@ export function messageTriageHandler(opts: MessageTriageOptions = {}): SignalHan
           { tier: 'fast', json: true },
         );
         const t = parseTriage(raw);
-        if (t.label) judged = { label: t.label, reason: t.reason ?? 'model triage' };
+        if (t.label) judged = { label: t.label, reason: t.reason ?? 'model triage', ...(t.todo ? { todo: t.todo } : {}) };
       }
       judged ??= { label: signal.urgency === 'urgent' ? 'urgent' : 'batch', reason: 'no model configured: you decide' };
       const urgency: Urgency = judged.label === 'urgent' || signal.urgency === 'urgent' ? 'urgent' : 'normal';
       if (judged.label === 'ignore') {
         return { goal: `Ignore ${who}'s ${surface} message (${judged.reason})`, actionType: `triage.ignore`, route: 'code', urgency: 'normal', autoComplete: true, label: 'ignore', reason: judged.reason };
+      }
+      if (judged.label === 'todo') {
+        // Something to DO, not a reply to draft: it waits on you as a to-do, and nothing is ever sent.
+        const task = clip(judged.todo ?? `Follow up with ${who}`, 160).replace(/[.]+$/, '');
+        return { goal: task, actionType: `todo.${surface}`, route: 'human', humanStep: task, urgency, label: 'todo', reason: judged.reason };
       }
       const replyTool = surface === 'email' ? emailTool : sendTool;
       if (!ctx.hasAi) {
@@ -366,13 +414,16 @@ export function messageTriageHandler(opts: MessageTriageOptions = {}): SignalHan
       };
       if (plan.label === 'ignore') return base;
       const past = sample(ctx, plan.actionType);
+      const thread = await recentThread(signal, ctx);
       const raw = await ctx.ai(
         [
-          `Draft the reply your human would send to this ${signal.surface} message. Their voice, as short as it can be, no greeting fluff.`,
-          'Never invent facts, times or commitments that are not in the message, SOUL.md or the Anchor. If a fact is missing, ask for it briefly.',
+          `Draft the ONE reply your human would send to this ${signal.surface} conversation. Their voice, as short as it can be, no greeting fluff.`,
+          'Answer what actually needs an answer across all the new messages; skip what does not. Match how they already talk to this person.',
+          'Never invent facts, times or commitments that are not in the messages, SOUL.md or the Anchor. If a fact is missing, ask for it briefly.',
           'Reply with JSON only: {"reply":"<the message to send>"}',
           `From: ${signal.actor ?? 'someone'}`,
-          `Message: ${clip(signal.text ?? '', 1500)}`,
+          `New messages (oldest first):\n${clip(signal.text ?? '', 1500)}`,
+          thread ? `The conversation so far (oldest first, "Me" is your human):\n${thread}` : '',
           past ? `How they decided before:\n${past}` : '',
           ctx.replan ? `Your last draft failed a check: ${ctx.replan.reason}. Fix exactly that.` : '',
         ]

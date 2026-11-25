@@ -207,6 +207,31 @@ export type LoopRunStatus =
   /** v15: waited on a human longer than its time-to-live; it can no longer be approved or sent. */
   | 'expired';
 
+/** v16: a sensor saw YOU send a message in a chat (the same `data.chatId`): what waited on that chat is answered. */
+export const SELF_REPLY_KIND = 'message.sent';
+/** At most this many messages are folded into one conversation signal. */
+const MAX_FOLDED = 8;
+
+/** The conversation a signal belongs to (`<surface>:<chatId|threadId>`), or undefined for one-off signals. */
+export function threadOf(s: Pick<LoopSignal, 'surface' | 'data'>): string | undefined {
+  const d = s.data ?? {};
+  const id = typeof d.chatId === 'string' && d.chatId ? d.chatId : typeof d.threadId === 'string' && d.threadId ? d.threadId : undefined;
+  return id ? `${s.surface}:${id}` : undefined;
+}
+
+interface FoldedMessage {
+  text: string;
+  actor?: string;
+  at?: string;
+}
+
+/** The messages a signal carries: its folded burst, or itself. */
+function messagesOf(s: LoopSignal): FoldedMessage[] {
+  const folded = s.data?.messages;
+  if (Array.isArray(folded) && folded.length) return folded.filter((m): m is FoldedMessage => !!m && typeof (m as FoldedMessage).text === 'string');
+  return s.text ? [{ text: s.text, ...(s.actor ? { actor: s.actor } : {}), ...(s.timestamp ? { at: s.timestamp } : {}) }] : [];
+}
+
 export const AWAITING: readonly LoopRunStatus[] = ['awaiting_human_plan', 'awaiting_human_execute', 'awaiting_human_verify'];
 
 export interface LoopTrailEntry {
@@ -297,6 +322,10 @@ export interface LoopTickReport {
   /** Signals already handled earlier (skipped). */
   duplicates: number;
   errors: Array<{ sensorId: string; error: string }>;
+  /** v16: waiting items closed because you replied in that chat yourself. */
+  resolved?: string[];
+  /** v16: waiting items folded into a newer message from the same chat. */
+  folded?: string[];
 }
 
 export interface DecisionResult {
@@ -553,14 +582,20 @@ export class MasterLoop {
         report.errors.push({ sensorId: sensor.id, error: (err as Error).message });
         continue; // cursor unchanged: the same signals come back next pass
       }
+      // v16, one conversation = one item: fresh signals are de-duplicated, your own replies close what they answer, and
+      // several new messages from the same chat (this pass, or still waiting from earlier) fold into ONE signal.
+      const fresh: LoopSignal[] = [];
       for (const raw of polled.signals ?? []) {
         const signal = normalizeSignal(raw, sensor.surface);
         if (!signal) continue;
-        const runId = loopRunId(sensor.id, signal.id);
-        if (await this.runExists(runId)) {
+        if (await this.runExists(loopRunId(sensor.id, signal.id))) {
           report.duplicates++;
           continue;
         }
+        fresh.push(signal);
+      }
+      for (const signal of await this.foldThreads(fresh, report)) {
+        const runId = loopRunId(sensor.id, signal.id);
         report.signals++;
         const handler = this.handlers.find((h) => matchesSignal(h, signal));
         if (!handler) {
@@ -589,6 +624,56 @@ export class MasterLoop {
     }
     if (report.signals) report.status = 'ran';
     return report;
+  }
+
+  /**
+   * v16: you replied in a chat yourself (`message.sent`): anything still waiting on that chat expires, so Rufus never
+   * nags about a conversation you already handled. Several new messages from one chat become one signal whose text is
+   * the whole burst (oldest first), and an item still waiting on that chat is folded in and expired: one conversation,
+   * one item, one draft that answers all of it.
+   */
+  private async foldThreads(signals: LoopSignal[], report: LoopTickReport): Promise<LoopSignal[]> {
+    if (!signals.some((s) => threadOf(s))) return signals;
+    const waiting = await this.pending();
+    const out: LoopSignal[] = [];
+    const groups = new Map<string, LoopSignal[]>();
+    for (const s of signals) {
+      const thread = threadOf(s);
+      if (!thread) {
+        out.push(s);
+        continue;
+      }
+      if (s.kind === SELF_REPLY_KIND) {
+        groups.delete(thread); // what came before your own reply is answered
+        for (const r of waiting.filter((w) => threadOf(w.signal) === thread && AWAITING.includes(w.status))) {
+          await this.expireRun(r.id, 'you replied in that chat yourself');
+          r.status = 'expired';
+          (report.resolved ??= []).push(r.id);
+        }
+        continue;
+      }
+      groups.set(thread, [...(groups.get(thread) ?? []), s]);
+    }
+    for (const [thread, burst] of groups) {
+      const earlier = waiting.filter((w) => threadOf(w.signal) === thread && AWAITING.includes(w.status));
+      const lines = [...earlier.flatMap((r) => messagesOf(r.signal)), ...burst.flatMap(messagesOf)].slice(-MAX_FOLDED);
+      for (const r of earlier) {
+        await this.expireRun(r.id, 'folded into a newer message from the same chat');
+        (report.folded ??= []).push(r.id);
+      }
+      const last = burst[burst.length - 1]!;
+      if (lines.length <= 1) {
+        out.push(last);
+        continue;
+      }
+      out.push({
+        ...last,
+        text: lines.map((m) => m.text).join('\n'),
+        data: { ...(last.data ?? {}), messages: lines },
+        ...(burst.some((b) => b.urgency === 'urgent') ? { urgency: 'urgent' as const } : {}),
+      });
+    }
+    return out.sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
   }
 
   private context(run: LoopRun, anchor: Anchor, corpus: CorpusItem[], base: { stage: LoopStageContext['stage']; attempt: number; route?: Route; replan?: LoopReplan; humanInput?: string; approved?: boolean }): LoopStageContext {

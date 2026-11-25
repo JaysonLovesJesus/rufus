@@ -84,6 +84,8 @@ describe('beeperSensor', () => {
         timestamp: at(5),
         data: { chatId: 'c-sam', messageId: 'm1', chatTitle: 'Sam Rivera', network: 'whatsapp', isGroup: false },
       },
+      // v16: your own reply is a signal too (it closes what waited on that chat), never a work item
+      { id: 'c-sam:m2', surface: 'chat', kind: 'message.sent', actor: 'me', timestamp: at(5), data: { chatId: 'c-sam', messageId: 'm2' } },
       expect.objectContaining({ id: 'c-team:t1', actor: 'Alex', data: expect.objectContaining({ isGroup: true }) }),
     ]);
     const read = b.calls.filter((c) => c.path.endsWith('/messages')).map((c) => c.path);
@@ -177,7 +179,7 @@ describe('messageTriageHandler', () => {
 
   it('without a model: acknowledgements complete silently at $0; real messages become your step, urgent ones flagged', async () => {
     const dir = await tempDir();
-    const loop = new MasterLoop({ dir, sensors: [sensorOf([msg('1', 'ok thanks'), msg('2', 'Help, call me asap'), msg('3', 'Lunch Thursday?')])], handlers: [messageTriageHandler()], now: () => NOW });
+    const loop = new MasterLoop({ dir, sensors: [sensorOf([msg('1', 'ok thanks', { data: { chatId: 'c1' } }), msg('2', 'Help, call me asap', { data: { chatId: 'c2' } }), msg('3', 'Lunch Thursday?')])], handlers: [messageTriageHandler()], now: () => NOW });
     const r = await loop.runOnce();
     expect(r.cost).toBe(0);
     const runs = await Promise.all(r.runs.map((x) => loop.getRun(x.runId)));
@@ -201,11 +203,11 @@ describe('messageTriageHandler', () => {
     expect(run.plan!.sensitivity).toEqual(['external']);
     expect(run.approvals).toEqual(['Always ask before anything external is sent.']);
     expect(provider.calls[1]!.messages[0]!.content).toContain('Lunch Thursday?');
-    expect(b.calls).toHaveLength(0);
+    expect(b.calls.filter((c) => c.method !== 'GET')).toHaveLength(0); // v16: it may READ the chat for context, never send
 
     const done = await loop.resolveHumanDecision(run.id, { verdict: 'accept' });
     expect(done.run.committed).toBe(true);
-    expect(b.calls).toEqual([{ method: 'POST', path: '/v1/chats/c-sam/messages', body: { text: 'Thursday works. 12:30?' } }]);
+    expect(b.calls.filter((c) => c.method !== 'GET')).toEqual([{ method: 'POST', path: '/v1/chats/c-sam/messages', body: { text: 'Thursday works. 12:30?' } }]);
   });
 
   it('your typed edit becomes the draft, and is what gets sent once you say send (v15: an edit never sends by itself)', async () => {
@@ -217,9 +219,10 @@ describe('messageTriageHandler', () => {
     expect(run.urgency).toBe('urgent');
     const held = await loop.resolveHumanDecision(run.id, { verdict: 'edit', editedOutput: 'Yes, around 8.' });
     expect(held).toMatchObject({ held: true, run: { status: 'awaiting_human_verify', result: { reply: 'Yes, around 8.', chatId: 'c-sam' } } });
-    expect(b.calls).toEqual([]);
+    const sends = (): unknown[] => b.calls.filter((c) => c.method === 'POST').map((c) => c.body);
+    expect(sends()).toEqual([]);
     await loop.resolveHumanDecision(run.id, { verdict: 'accept' });
-    expect(b.calls.map((c) => c.body)).toEqual([{ text: 'Yes, around 8.' }]);
+    expect(sends()).toEqual([{ text: 'Yes, around 8.' }]);
   });
 
   it('a draft with a placeholder fails the cross-check and is re-drafted', async () => {

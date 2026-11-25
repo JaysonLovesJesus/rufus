@@ -326,7 +326,7 @@ describe('natural nudges and Verify messages', () => {
     expect(urgent).not.toMatch(/\[#|\(urgent\)|Draft:|Reply:/);
     expect(urgent.startsWith('Heads up: Robin texted')).toBe(true);
     expect(formatLoopItem(run({ signal: { id: 'e', surface: 'email', kind: 'email.received', text: 'Invoice attached', actor: 'Billing' } }), 1)).toContain('Billing emailed "Invoice attached"');
-    expect(formatCheckin([{ run: run({}), n: 1 }, { run: run({ id: 'loop_2' }), n: 2 }])).toMatch(/^2 things waiting on you\./);
+    expect(formatCheckin([{ run: run({}), n: 1 }, { run: run({ id: 'loop_2' }), n: 2 }])).toMatch(/^Catching you up on 2:/);
   });
 
   it('parseLoopReply still reads 1, 2, y, n, edit: and short reject reasons (with one item open)', () => {

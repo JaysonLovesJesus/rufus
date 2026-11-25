@@ -118,15 +118,15 @@ export function formatMorningBrief(anchor: Anchor, now: Date, waiting: number): 
   const t = timeFacts(now, anchor);
   const today = anchor.schedule.date === t.date ? anchor.schedule.blocks.filter((b) => b.status !== 'skipped' && b.kind !== 'break' && toMinutes(b.end) > minutesOf(now)) : [];
   const sorted = [...today].sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
-  const shown = sorted.slice(0, 4).map((b) => `${b.start} ${b.title}`);
+  const shown = sorted.slice(0, 4).map((b) => `${speakableTitle(b.title)} at ${clock12(b.start)}`);
   const { current } = scheduleNow(anchor, now);
-  const lines = [`Good morning. It's ${t.weekday}, ${t.time}.`];
+  const lines = [`Good morning. It's ${t.weekday}, ${clock12(t.time)}.`];
   lines.push(
     shown.length
-      ? `Today: ${shown.join(', ')}${sorted.length > shown.length ? ` (+${sorted.length - shown.length} more)` : ''}.${current ? ` You're in ${current.title} now.` : ''}`
+      ? `Today: ${shown.join(', ')}${sorted.length > shown.length ? ` (+${sorted.length - shown.length} more)` : ''}.${current ? ` You're in ${speakableTitle(current.title)} now.` : ''}`
       : 'Nothing on the schedule today.',
   );
-  lines.push(waiting ? `${waiting} thing${waiting === 1 ? ' is' : 's are'} waiting on you. Say "checkin" to see ${waiting === 1 ? 'it' : 'them'}.` : 'Nothing is waiting on you.');
+  lines.push(waiting ? `${waiting === 1 ? 'One thing is' : `${waiting} things are`} waiting on you; say "checkin" when you want ${waiting === 1 ? 'it' : 'them'}.` : 'Nothing is waiting on you.');
   return lines.join('\n');
 }
 

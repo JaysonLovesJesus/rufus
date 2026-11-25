@@ -129,16 +129,45 @@ const sentence = (s: string): string => (/[.!?…"]$/.test(s) ? s : `${s}.`);
  *   `Sam texted "Can we move to 3?" — want me to reply "Sure, 3 works."? (1 to send, 2 to skip, or edit: your own version)`
  * With several open, each starts with its number (`#2 ...`) so the answer can too.
  */
-export function formatLoopItem(run: LoopRun, n: number, opts: { multi?: boolean } = {}): string {
+/** What they said, for one line: a folded burst shows its newest messages, oldest first. */
+export function quoteOf(text: string, max = 160): string {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const recent = lines.slice(-3);
+  const shown = `${lines.length > recent.length ? '… ' : ''}${recent.join(' / ')}`;
+  return shown.length > max ? `…${shown.slice(shown.length - max + 1)}` : shown;
+}
+
+const isTodo = (run: LoopRun): boolean => run.status === 'awaiting_human_execute' && (run.actionType ?? '').startsWith('todo.');
+
+/**
+ * v16, one item inside a check-in: two short lines, no instructions (the check-in says how to answer once).
+ *   #1 Mom: "You okay today?"
+ *   → "All good, you?"
+ */
+export function formatCheckinItem(run: LoopRun, n: number): string {
+  const who = run.signal.actor ?? 'Someone';
+  const own = run.signal.surface === CHIEF_ACTION_SURFACE;
+  const said = run.signal.text && !own ? `${who}: "${quoteOf(run.signal.text)}"` : undefined;
+  const lead = `#${n} ${run.urgency === 'urgent' ? 'Heads up: ' : ''}`;
+  if (isTodo(run)) return `${lead}To do: ${clip(run.humanStep ?? run.goal ?? '', 160)}${said ? `\n(${said})` : ''}`;
+  const draft = run.status === 'awaiting_human_verify' ? draftOf(run.result) : undefined;
+  if (said && draft !== undefined && !own) return `${lead}${said}\n→ "${clip(draft, 500)}"`;
+  return formatLoopItem(run, n, { multi: true, hint: false });
+}
+
+export function formatLoopItem(run: LoopRun, n: number, opts: { multi?: boolean; hint?: boolean } = {}): string {
   const lead = `${opts.multi ? `#${n} ` : ''}${run.urgency === 'urgent' ? 'Heads up: ' : ''}`;
   const who = run.signal.actor ?? 'Someone';
   const text = run.signal.text ? clip(run.signal.text, 160) : undefined;
   // Something you asked for in chat is not "someone said": it is your own request, so it reads as "ready to ...".
   const own = run.signal.surface === CHIEF_ACTION_SURFACE;
   const said = text && !own ? `${who} ${VERB[run.signal.surface] ?? 'said'} "${text}"` : undefined;
-  const hint = replyHint(run, n, opts.multi);
+  const hint = opts.hint === false ? '' : replyHint(run, n, opts.multi);
   let body: string;
-  if (run.status === 'awaiting_human_plan') {
+  if (isTodo(run)) {
+    // A to-do someone handed you: the task first, who asked in brackets. Nothing is ever sent for it.
+    body = `${clip(run.humanStep ?? run.goal ?? '', 200).replace(/[.]+$/, '')}${run.signal.text ? ` (${who}: "${quoteOf(run.signal.text)}")` : ''}`;
+  } else if (run.status === 'awaiting_human_plan') {
     const goal = clip(run.goal ?? run.actionType ?? run.handlerId, 160);
     body = `${said ? `${said}. ` : ''}Want me to ${lowerFirst(goal).replace(/[.?!]+$/, '')}?${run.question ? ` ${clip(run.question, 240)}` : ''}`;
   } else if (run.status === 'awaiting_human_execute') {
@@ -157,7 +186,7 @@ export function formatLoopItem(run: LoopRun, n: number, opts: { multi?: boolean 
   }
   // "Heads up: your turn ..." reads better than "Heads up: Your turn ...". Names stay capitalized.
   if (run.urgency === 'urgent' && /^(Your|Want|Ready) /.test(body)) body = body[0]!.toLowerCase() + body.slice(1);
-  const lines = [`${lead}${body} ${hint}`];
+  const lines = [`${lead}${body}${hint ? ` ${hint}` : ''}`];
   if (run.promotionHint) lines.push(run.promotionHint);
   return lines.join('\n');
 }
@@ -180,9 +209,18 @@ function actionOf(result: unknown): { tool: string; to?: string } | undefined {
 }
 
 /** Several items in one check-in message. */
+/**
+ * v16: several items in one check-in, read like a person catching you up: urgent first, two short lines each, and how
+ * to answer said once at the end (never repeated per item).
+ */
 export function formatCheckin(items: Array<{ run: LoopRun; n: number }>): string {
   if (!items.length) return 'All clear: nothing is waiting on you.';
   if (items.length === 1) return formatLoopItem(items[0]!.run, items[0]!.n);
-  const head = `${items.length} things waiting on you. Start each answer with its number, like "#${items[0]!.n} 1".`;
-  return [head, ...items.map(({ run, n }) => formatLoopItem(run, n, { multi: true }))].join('\n\n');
+  const ordered = [...items].sort((a, b) => Number(b.run.urgency === 'urgent') - Number(a.run.urgency === 'urgent') || a.n - b.n);
+  const drafts = ordered.filter(({ run }) => run.status === 'awaiting_human_verify');
+  const todos = ordered.filter(({ run }) => run.status !== 'awaiting_human_verify');
+  const how: string[] = [];
+  if (drafts.length) how.push(`Answer with the number: "#${drafts[0]!.n} send", "#${drafts[0]!.n} skip" or "#${drafts[0]!.n} edit: your version".`);
+  if (todos.length) how.push(`"#${todos[0]!.n} 1" when ${todos.length === 1 ? 'that one is' : 'one is'} done, "#${todos[0]!.n} 2" to drop it.`);
+  return [`Catching you up on ${items.length}:`, ...ordered.map(({ run, n }) => formatCheckinItem(run, n)), how.join(' ')].join('\n\n');
 }

@@ -771,8 +771,12 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         process.once('SIGTERM', () => stop.abort());
         const hook = config.start?.webhook;
         const hookToken = hook?.token ?? process.env.RUFUS_WEBHOOK_TOKEN;
+        // The phone webhook is a bonus sense: if it cannot bind (network not up yet at boot), Rufus still runs.
         const webhook = hook || process.env.RUFUS_WEBHOOK_TOKEN
-          ? await startSignalWebhook({ dir, token: hookToken ?? '', ...(hook?.port !== undefined ? { port: hook.port } : {}), ...(hook?.host ? { host: hook.host } : {}), ...(now ? { now } : {}) })
+          ? await startSignalWebhook({ dir, token: hookToken ?? '', ...(hook?.port !== undefined ? { port: hook.port } : {}), ...(hook?.host ? { host: hook.host } : {}), ...(now ? { now } : {}) }).catch((err: unknown) => {
+              io.err(`Signal webhook not started (Rufus keeps running without it): ${err instanceof Error ? err.message : String(err)}`);
+              return undefined;
+            })
           : undefined;
         if (webhook) io.out(`Signal webhook listening on ${webhook.url}/signal (Bearer token required).`);
         try {

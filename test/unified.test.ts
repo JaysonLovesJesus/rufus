@@ -174,9 +174,10 @@ describe('formatLoopItem: short plain text, no buttons', () => {
       { run: run({}), n: 1 },
       { run: run({ id: 'loop_2', signal: { id: 't', surface: 'chat', kind: 'm', text: 'Lunch?', actor: 'Alex' } }), n: 2 },
     ]);
-    expect(text).toContain('2 things waiting on you. Start each answer with its number, like "#1 1".');
-    expect(text).toContain('#2 Alex texted "Lunch?"');
-    expect(text).toContain('(#2 1 to send, #2 2 to skip');
+    expect(text).toMatch(/^Catching you up on 2:/);
+    expect(text).toContain('#2 Alex: "Lunch?"');
+    expect(text).toContain('Answer with the number: "#1 send", "#1 skip" or "#1 edit: your version".');
+    expect(text.match(/send/g)).toHaveLength(1); // how to answer is said once, not per item
   });
 
   it('assignNumbers keeps numbers stable and reuses the smallest free one', () => {
@@ -208,9 +209,9 @@ describe('rufus start: the unified daemon', () => {
     const due = await s.daemon.tick();
     expect(due.checkin).toHaveLength(2);
     expect(s.chat.sent).toHaveLength(2);
-    expect(s.chat.last()).toMatch(/^2 things waiting on you\./);
-    expect(s.chat.last()).toContain('#1 Sam texted "Lunch Thursday?"');
-    expect(s.chat.last()).toContain('#3 Alex texted "Any notes on the deck?"');
+    expect(s.chat.last()).toMatch(/^Catching you up on 2:/);
+    expect(s.chat.last()).toContain('#1 Sam: "Lunch Thursday?"');
+    expect(s.chat.last()).toContain('#3 Alex: "Any notes on the deck?"');
     expect(s.chat.buttons).toBe(0);
   });
 
@@ -274,7 +275,7 @@ describe('rufus start: the unified daemon', () => {
     expect(r.checkin).toHaveLength(2);
     expect(s.chat.last()).toMatch(/^Now: 2026-11-25 08:00/);
     expect(s.chat.last()).toContain('Waiting on you (2):');
-    expect(s.chat.last()).toContain('2 things waiting on you.');
+    expect(s.chat.last()).toContain('Catching you up on 2:');
     s.chat.human('#2 1');
     expect((await s.daemon.tick()).decided).toMatchObject([{ n: 2, verdict: 'accept' }]);
     expect(s.log).toEqual(['Re: Deck notes?']);

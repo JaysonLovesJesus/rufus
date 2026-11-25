@@ -419,8 +419,8 @@ describe('proactive heartbeat', () => {
       expect(chat.sent).toHaveLength(1);
       const brief = chat.sent[0]!;
       expect(brief.split('\n')).toHaveLength(3);
-      expect(brief).toContain("Good morning. It's Wednesday, 07:15.");
-      expect(brief).toContain('Today: 09:00 Deep work, 12:00 Gym.');
+      expect(brief).toContain("Good morning. It's Wednesday, 7:15am.");
+      expect(brief).toContain('Today: Deep work at 9am, Gym at 12pm.');
       expect(brief).toContain('Nothing is waiting on you.');
       expect(await loop.pending()).toEqual([]); // the unlock itself is never a Verify item
 
