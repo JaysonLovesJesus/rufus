@@ -3,6 +3,10 @@ import type { Engine } from '../engine/engine';
 import { LessonCapError, describeTension } from '../learning/lessons';
 import { addSpectrum, emptySpectrum, formatSpectrum, spectrumOf, spectrumTotal } from '../engine/spectrum';
 import type { HumanCard, RunResult } from '../types';
+import { loadAnchor } from '../anchor/anchor';
+import { CorpusStore, queryCorpus } from '../corpus';
+import type { MasterLoop } from '../engine/loop';
+import { buildPersona, loadSoul, withPersona } from '../soul/soul';
 
 /** What the Chief of Staff says back, plus any cards whose full text is already in that reply. */
 export interface ChiefReply {
@@ -26,6 +30,10 @@ export interface ChiefOfStaffOptions {
   engine: Engine;
   /** Named provider for free-form chat (a key of the engine's `providers`). Default: the default provider. */
   provider?: string;
+  /** The workspace, for SOUL.md, the Anchor and the corpus. Default: the engine's workspace. */
+  dir?: string;
+  /** The Master Loop, so status and chat also see the items waiting on you there. */
+  loop?: MasterLoop;
 }
 
 const STATUS_WORDS = new Set(['status', 'pending', 'what needs me', 'whats pending', "what's pending", 'what is pending', 'what needs my attention']);
@@ -57,10 +65,14 @@ const SYSTEM = [
 export class ChiefOfStaff {
   private readonly engine: Engine;
   private readonly providerName?: string;
+  private readonly dir: string;
+  private readonly loop?: MasterLoop;
 
   constructor(opts: ChiefOfStaffOptions) {
     this.engine = opts.engine;
     this.providerName = opts.provider;
+    this.dir = opts.dir ?? opts.engine.store.dir;
+    this.loop = opts.loop;
   }
 
   /** Is this message an explicit chief command (so a channel should route it here even while a card is open)? */
@@ -137,12 +149,13 @@ export class ChiefOfStaff {
   // ---------- commands (all plain code) ----------
 
   private async status(): Promise<string> {
-    const [cards, runs] = await Promise.all([this.engine.pending(), this.engine.store.listRuns()]);
+    const [cards, runs, loopWaiting] = await Promise.all([this.engine.pending(), this.engine.store.listRuns(), this.loop ? this.loop.pending() : Promise.resolve([])]);
     const active = runs.filter((r) => r.status === 'running' || r.status === 'waiting_human');
+    const loopLines = loopWaiting.length ? [`Loop items waiting on you (${loopWaiting.length}): ${loopWaiting.slice(0, 5).map((r) => oneLine(`${r.actionType ?? r.handlerId}: ${r.goal ?? ''}`, 80)).join('; ')}. Say "checkin" to see them.`] : [];
     // Where the work went across all runs: how much stayed in code and a fast model, how much needed smart or you.
     const spectrum = runs.reduce((sum, r) => addSpectrum(sum, spectrumOf(r)), emptySpectrum());
     const where = spectrumTotal(spectrum) ? [`Handled by (${runs.length} run${runs.length === 1 ? '' : 's'}): ${formatSpectrum(spectrum)}`] : [];
-    if (!cards.length && !active.length) return ['All clear: nothing is waiting on you and no flows are running.', ...where].join('\n');
+    if (!cards.length && !active.length) return [loopLines.length ? 'No flow cards are waiting and no flows are running.' : 'All clear: nothing is waiting on you and no flows are running.', ...loopLines, ...where].join('\n');
     const lines: string[] = [];
     if (cards.length) {
       lines.push(`Waiting on you (${cards.length}):`);
@@ -153,7 +166,7 @@ export class ChiefOfStaff {
       lines.push(`Running (${others.length}):`);
       for (const r of others) lines.push(`- ${r.flowId} (${r.id})`);
     }
-    return [...lines, ...where].join('\n');
+    return [...lines, ...loopLines, ...where].join('\n');
   }
 
   private async lessons(): Promise<string> {
@@ -234,15 +247,32 @@ export class ChiefOfStaff {
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         .slice(0, 5)
         .map((r) => ({ id: r.id, flow: r.flowId, status: r.status, updatedAt: r.updatedAt, ...(r.error ? { error: oneLine(r.error, 100) } : {}) })),
+      ...(this.loop
+        ? {
+            loopWaiting: (await this.loop.pending()).slice(0, 10).map((r) => ({ actionType: r.actionType, goal: r.goal, status: r.status, urgency: r.urgency ?? 'normal' })),
+          }
+        : {}),
     };
+  }
+
+  /** SOUL.md + the Anchor + the corpus facts closest to the message, for the chat system prompt. Never throws. */
+  async persona(text: string): Promise<string> {
+    try {
+      const [soul, anchor, corpus] = await Promise.all([loadSoul(this.dir), loadAnchor(this.dir), new CorpusStore(this.engine.store.corpusFile).load()]);
+      const facts = corpus.length && text.trim() ? queryCorpus(corpus.filter((i) => i.source !== 'feedback'), { query: text, limit: 3 }).filter((h) => h.matched.length || h.similarity !== undefined) : [];
+      const examples = corpus.length && text.trim() ? queryCorpus(corpus.filter((i) => i.source === 'feedback'), { query: text, limit: 3 }).filter((h) => h.matched.length) : [];
+      return buildPersona({ ...(soul ? { soul } : {}), anchor, facts, examples });
+    } catch {
+      return '';
+    }
   }
 
   private async chat(text: string): Promise<ChiefReply> {
     const reply = (t: string, unavailable = false): ChiefReply => ({ text: t, cards: [], via: 'chat', ...(unavailable ? { unavailable } : {}) });
     try {
-      const snapshot = await this.snapshot();
+      const [snapshot, persona] = await Promise.all([this.snapshot(), this.persona(text)]);
       const out = await this.engine.providerFor(this.providerName).complete({
-        system: SYSTEM,
+        system: withPersona(SYSTEM, persona),
         messages: [{ role: 'user', content: `Live snapshot (exact data gathered by code):\n\`\`\`json\n${JSON.stringify(snapshot, null, 2)}\n\`\`\`\n\nTheir message:\n${text}` }],
         meta: { runId: 'chief', flowId: 'chief', step: 'chat', attempt: 1 },
       });

@@ -395,6 +395,86 @@ export interface BeeperConfig {
   chatId?: string;
   /** The chat is a note-to-self, so your own messages count as replies. */
   selfChat?: boolean;
+  /** Beeper Desktop's local API for tools and sensors. Default http://127.0.0.1:23373 (falls back to `url`). */
+  apiUrl?: string;
+}
+
+/** A local CLI wrapped as a tool (`config.tools.commands["calendar.read"]`). */
+export interface CommandToolConfig {
+  /** The program to run (no shell). */
+  command: string;
+  /** Arguments; `{{key}}` is replaced with the tool call's `args.key`. The args also arrive on stdin as JSON. */
+  args?: string[];
+  description?: string;
+  /** True when it only reads (may run while planning/executing). Default from the name: `*.read` is read-only. */
+  readOnly?: boolean;
+  /** `external`, `money`, `login`: always needs a human's yes unless trusted. */
+  sensitivity?: Array<'external' | 'money' | 'login'>;
+  /** Default 30000. */
+  timeoutMs?: number;
+  cwd?: string;
+}
+
+/** Real tool hands. */
+export interface ToolsConfig {
+  /** Local CLI tools by name: `calendar.read`, `calendar.write`, `gmail.read`, `gmail.draft`, `shell.run`, or your own. */
+  commands?: Record<string, CommandToolConfig>;
+  /** Tools whose sensitive action may run without a per-run yes. Empty by default: think before adding one. */
+  trusted?: string[];
+  /** `false` turns off the built-in `beeper.read` / `beeper.send` even when Beeper is configured. */
+  beeper?: boolean;
+}
+
+/** The Beeper sensor: new incoming messages from people, across your chats. */
+export interface BeeperSensorConfig {
+  /** Chats never sensed (your Rufus chat is always skipped). */
+  ignoreChatIds?: string[];
+  /** Also sense group chats. Default true. */
+  groups?: boolean;
+  /** Skip muted chats. Default true. */
+  skipMuted?: boolean;
+  /** Messages read per chat per pass. Default 20. */
+  limitPerChat?: number;
+  /** Chats whose title matches this (case-insensitive regex) are bots and skipped. Default `\bbot\b|bot$`. */
+  botPattern?: string;
+}
+
+/** A read-only command whose JSON output becomes signals (`config.sensors.commands[]`). */
+export interface CommandSensorConfig {
+  id: string;
+  /** `calendar`, `email`, ... Default `id`. */
+  surface?: string;
+  /** Default `<surface>.item`. */
+  kind?: string;
+  command: string;
+  args?: string[];
+  timeoutMs?: number;
+  cwd?: string;
+  /** Where the list is in the JSON (`items`, `data.events`). Default: the top-level array or `items`/`events`/`messages`/`threads`/`data`. */
+  itemsPath?: string;
+  idField?: string;
+  textField?: string;
+  actorField?: string;
+  timestampField?: string;
+  /** On the first pass, remember what is already there without emitting it. Default true (no flood on Day 1). */
+  baseline?: boolean;
+  urgency?: 'urgent' | 'normal';
+}
+
+export interface SensorsConfig {
+  /** `true` (defaults) or settings. Needs Beeper configured (`beeper` or `RUFUS_BEEPER_TOKEN`). */
+  beeper?: boolean | BeeperSensorConfig;
+  commands?: CommandSensorConfig[];
+}
+
+/** `rufus start`: the unified daemon. */
+export interface StartConfig {
+  /** How often to sense and read replies. Default `30s`. */
+  interval?: string;
+  /** How often normal (non-urgent) items are delivered as one check-in. Default `2h`. */
+  checkinEvery?: string;
+  /** Which chat to talk through, when both are configured. */
+  channel?: 'telegram' | 'beeper';
 }
 
 /** Guardrails against piling up prompt rules. */
@@ -446,4 +526,10 @@ export interface RufusConfig {
   learning?: LearningConfig;
   mine?: MineConfig;
   embeddings?: EmbeddingConfig;
+  /** Real tool hands (v12). */
+  tools?: ToolsConfig;
+  /** Live app sensors for `rufus start` (v12). */
+  sensors?: SensorsConfig;
+  /** The unified daemon (v12). */
+  start?: StartConfig;
 }

@@ -40,71 +40,64 @@ import {
 import { formatTrust, TrustStore } from './engine/trust';
 import { formatLoopReport, formatLoopRun, MasterLoop, type Sensor, type SignalHandler } from './engine/loop';
 import { appendSignal, inboxSensor, scheduleBlockHandler } from './engine/loop-builtins';
+import { configuredChannels } from './channels/select';
+import { initSoul } from './soul/soul';
+import { buildTools } from './tools/tools';
+import { buildSensors, messageTriageHandler } from './sensors';
+import { UnifiedDaemon, type StartTickReport } from './unified/daemon';
+import { nowSummary } from './unified/now';
+import { assignNumbers, loadStartState, requestCheckin, saveStartState } from './unified/state';
 import { demoInput, demoProvider, triageDraft } from '../examples/triage-draft.flow';
 
-const USAGE = `rufus - AI + Code + Human chief-of-staff engine
+const USAGE = `rufus - your AI + Code + Human chief of staff
 
-Usage: rufus [--dir <workspace>] <command>
+Usage: rufus [--dir <workspace>] <command>      (workspace: ~/.rufus, or $RUFUS_HOME)
 
-  init                         create the workspace (default ~/.rufus, or $RUFUS_HOME)
-  flows                        list available flows
-  run <flowId> [inputJson]     start a flow
-  pending                      show cards waiting for you ("Your Turn")
-  answer <cardId> <reply...>   answer a card: a number, an option name, or your own words
-  bridge [--once] [--interval <sec>] [--channel telegram|beeper]
-                               text new cards to your chat and apply your replies
-  lessons [--prune [--older-than <days>] [--max-unused <n>]]
-                               show saved lessons (layer, and any in tension with your latest replies), or prune stale ones
-  propose <scope> <rule...> [--layer code|context|principle] [--sample N] [--force]
-                               replay the scope with the rule on trial; save it only if nothing regresses
-  demo [--reply <text>]        run the example flow (add --reply to answer it right away)
-  tick                         one scheduler pass: start flows whose trigger is due (for cron/launchd)
-  watch [--interval <30s>]     keep ticking in the foreground (default every 60s)
-  emit <event> [payloadJson]   fire flows with an onEvent(<event>) trigger
-  seed <file> --flow <flowId> [--step <aiStep>] [--limit N] [--dry-run] [--include-noise]
-                               Day 1: load real past (incoming -> reply) pairs from a JSON/JSONL file as replay cases
-  mine [--ai] [--provider <name>] [--limit N] [--scope <scope>] [--half-life <days>] [--json] [--save]
-                               what your history says: voice, rules, recurring intents, drift from saved lessons (free, offline);
-                               --ai adds workflow blueprints and lessons from a provider
-  replay <flowId> [--limit N] [--provider <name>]
-                               re-run saved human-reviewed cases against today's flow and verify checks
-  replay --scope <flow:id|role:name|global> [--sample N]
-                               replay a scope; global replays a small golden sample of every flow
-  compare <flowId> [--limit N] [--provider <name>]
-                               plain AI vs. code-assisted AI on your saved cases, same verify
-  backtest [--count N] [--channel <name>] [--mode offline|ai] [--provider fast|smart|<name>] [--latest] [--limit N] [--json]
-                               time-travel check: pick N real past moments, rewind to just before each (ONLY earlier pairs and
-                               corpus items are visible), predict your reply from the closest and newest real examples, and
-                               compare with what you actually did. Offline (default) is free; --provider runs a live AI.
+Primary commands:
+  start [--once] [--interval <30s>] [--checkin <2h>] [--channel telegram|beeper]
+                               the one daemon: senses your apps and inbox.jsonl, plans, executes, verifies, and texts
+                               you what needs you as plain text (urgent now, the rest batched into check-ins).
+                               Reply 1 = accept, 2 = reject, edit: <your version>, #2 1 when several are open
+  now                          one screen: today's schedule and goals, what waits on you, what Rufus did on its own,
+                               Earned Trust. Also asks a running \`rufus start\` for a check-in
+  anchor                       your Anchor: goals, projects, boundaries and today's schedule
+    anchor init | goal <title...> [--priority high|medium|low] [--horizon today|week|month] [--notes <text>]
+    anchor block <HH:MM-HH:MM> <focus|meeting|break|scroll|personal|protected> <title...> [--date YYYY-MM-DD] [--allow-overlap]
+  trust [promote|demote <actionType>]
+                               Earned Trust per action type: check (you verify) or autonomous
+  decide <runId|#n> accept|edit|reject [note...] [--output <your version>]
+                               your verdict from the terminal: updates trust, applies, and becomes an example
+  chat <message...>            talk to your chief of staff (status, flows, lessons, run, learn, or anything)
   collect <source> <path...> [--limit N] [--dry-run] [--ignore a,b] [--me addr,addr]
-                               add local activity to your life corpus. <source> is files (notes/markdown/CSV/JSON
-                               folders), calendar (.ics or JSON), browser (history JSON/JSONL or a Chrome/Arc/Safari
-                               history database), email (.mbox, .eml, or JSONL) or ai-prompts (JSON/JSONL AI chat
-                               transcripts; ONLY your own messages are kept, never the assistant's). Deduplicated; --dry-run writes nothing
+                               add local activity to your life corpus: files, calendar, browser, email, ai-prompts
+                               (only your own messages, never the assistant's)
   embed [--provider local|ollama|gemini|http] [--model <name>]
-                               cache vectors for your corpus, chats and past replies (incremental: only new or changed
-                               items are embedded). Runs by itself on collect. Default local: offline, $0
-  context [query] [--source a,b] [--since <days>] [--limit N] [--half-life <days>] [--json]
-                               your Life Context Snapshot (recency-weighted), or a $0 keyword lookup across chats, email,
-                               browsing, files and calendar
-  chat <message...>            talk to your chief of staff: status, flows, lessons, run <flow> [json],
-                               learn <scope>: <rule>, or ask anything in your own words
+                               cache vectors for your corpus and history (incremental; default local, offline, $0)
 
-The Master Loop (Sense -> Plan -> Execute -> Verify -> Record):
-  anchor                       show your Anchor: goals, projects, boundaries and today's schedule
-  anchor init                  create anchor.json with the default boundaries (external, money, logins need your yes)
-  anchor goal <title...> [--priority high|medium|low] [--horizon today|week|month] [--notes <text>]
-  anchor block <HH:MM-HH:MM> <kind> <title...> [--date YYYY-MM-DD] [--allow-overlap]
-                               kind: focus, meeting, break, scroll, personal, protected (overlaps are refused)
-  trust                        Earned Trust per action type: check (you verify) or autonomous
-  trust promote|demote <actionType>
+Your words: <workspace>/SOUL.md (created by init) goes into every chat and loop prompt, with the Anchor and the
+closest examples. Tools and sensors live in config.json ("tools", "sensors", "start"); see the README.
+
+Advanced / Legacy:
+  init                         create the workspace (config.json, SOUL.md template)
+  flows | run <flowId> [json] | pending | answer <cardId> <reply...>
+                               durable flows and their cards (rufus start delivers cards too)
+  bridge [--once] [--interval <sec>] [--channel telegram|beeper]
+                               cards-only chat bridge (superseded by start)
+  loop [--once | status] [--interval <60s>]
+                               the Master Loop alone: inbox + flows/*.loop.ts, no chat (superseded by start)
   signal <surface> <kind> [text...] [--data <json>]
-                               drop a signal into inbox.jsonl for the loop to pick up
-  loop --once                  one pass: sense new signals, plan, execute, verify, record. No signals: idle, $0
-  loop [--interval <60s>]      keep passing in the foreground
-  loop status                  runs waiting for you
-  decide <runId> accept|edit|reject [note...] [--output <your version>]
-                               your verdict: updates Earned Trust and becomes an example Rufus learns from
+                               drop a signal into inbox.jsonl
+  tick | watch [--interval <30s>] | emit <event> [payloadJson]
+                               the flow scheduler (at / every / onEvent triggers)
+  lessons [--prune [--older-than <days>] [--max-unused <n>]] | propose <scope> <rule...> [--layer ...] [--sample N] [--force]
+  seed <file> --flow <flowId> [--step <aiStep>] [--limit N] [--dry-run] [--include-noise]
+  mine [--ai] [--provider <name>] [--limit N] [--scope <scope>] [--half-life <days>] [--json] [--save]
+  replay <flowId> [--limit N] [--provider <name>] | replay --scope <flow:id|role:name|global> [--sample N]
+  compare <flowId> [--limit N] [--provider <name>]
+  backtest [--count N] [--channel <name>] [--mode offline|ai] [--provider fast|smart|<name>] [--latest] [--limit N] [--json]
+                               time-travel check against your real past replies (offline is free)
+  context [query] [--source a,b] [--since <days>] [--limit N] [--half-life <days>] [--json]
+  demo [--reply <text>]        run the example flow
 `;
 
 export interface Io {
@@ -187,8 +180,23 @@ function summarizeScoped(r: ScopedReplayReport): string {
 }
 
 export interface MainOptions {
-  /** Override the channel used by `bridge` (default: Telegram or Beeper, whichever is configured). */
+  /** Override the channel used by `bridge` and `start` (default: Telegram or Beeper, whichever is configured). */
   channel?: LiveChannel;
+  /** Injectable for tests: the fetch used by Beeper tools and sensors. */
+  fetch?: typeof fetch;
+  /** Injectable for tests: the clock. */
+  now?: () => Date;
+}
+
+function describeStartTick(r: StartTickReport): string[] {
+  const lines: string[] = [];
+  if (r.loop && r.loop.status !== 'idle') lines.push(...formatLoopReport(r.loop).filter((l) => !l.startsWith('Decide with')));
+  for (const d of r.decided) lines.push(`#${d.n} ${d.verdict} -> ${d.status}`);
+  if (r.sentNow.length) lines.push(`sent ${r.sentNow.length} item(s) right away`);
+  if (r.checkin.length) lines.push(`check-in: sent ${r.checkin.length} item(s)`);
+  if (r.batched.length) lines.push(`${r.batched.length} item(s) waiting for the next check-in`);
+  if (r.bridge) lines.push(...describeBridgeTick(r.bridge));
+  return lines;
 }
 
 function describeBridgeTick(r: TickReport): string[] {
@@ -217,7 +225,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const allowOverlap = bool('--allow-overlap');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
-  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data']) {
+  for (const flag of ['--dir', '--checkin', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
@@ -278,10 +286,13 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   };
 
   switch (cmd) {
-    case 'init':
+    case 'init': {
+      const soul = await initSoul(dir);
       io.out(`Workspace ready at ${dir}`);
       io.out(`Put your flows in ${store.flowsDir} as *.flow.ts, and set "provider" in config.json.`);
+      if (soul) io.out(`Wrote a SOUL.md template at ${path.join(dir, 'SOUL.md')}: put who you are and how Rufus should act in your own words.`);
       return;
+    }
 
     case 'flows':
       for (const { meta } of engine.listFlows()) io.out(`${meta.id}  -  ${meta.description}`);
@@ -680,13 +691,16 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
       if (data !== undefined && (typeof data !== 'object' || data === null || Array.isArray(data))) throw new Error('--data must be a JSON object.');
       const text = words.join(' ').trim();
       const s = await appendSignal(dir, { surface, kind, ...(text ? { text } : {}), ...(data ? { data: data as Record<string, unknown> } : {}) });
-      io.out(`Queued signal ${s.id} (${surface}/${kind}). Run rufus loop --once to handle it.`);
+      io.out(`Queued signal ${s.id} (${surface}/${kind}). rufus start (or rufus loop --once) handles it.`);
       return;
     }
 
+    case 'start':
+    case 'now':
     case 'loop':
     case 'decide': {
       const parts = await loadWorkspaceLoopParts(store);
+      const now = options.now;
       const loop = new MasterLoop({
         dir,
         providers: {
@@ -694,15 +708,71 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
           ...(built.providers.fast ? { fast: built.providers.fast } : {}),
           ...(built.providers.smart ? { smart: built.providers.smart } : {}),
         },
+        tools: buildTools(config, { ...(options.fetch ? { fetch: options.fetch } : {}) }),
+        ...(now ? { now } : {}),
       });
       for (const s of parts.sensors) loop.addSensor(s);
       if (!parts.sensors.some((s) => s.id === 'inbox')) loop.addSensor(inboxSensor(dir));
+      if (cmd === 'start') for (const s of buildSensors(config, { ...(options.fetch ? { fetch: options.fetch } : {}) })) if (!loop.listSensors().some((x) => x.id === s.id)) loop.addSensor(s);
       for (const h of parts.handlers) loop.addHandler(h);
       if (!parts.handlers.some((h) => h.id === scheduleBlockHandler.id)) loop.addHandler(scheduleBlockHandler);
+      // Chat and email triage is part of the unified path (`start`); the legacy `loop` keeps its v11 handler set.
+      const triage = messageTriageHandler();
+      if (cmd !== 'loop' && !parts.handlers.some((h) => h.id === triage.id)) loop.addHandler(triage);
+
+      if (cmd === 'now') {
+        const state = await loadStartState(dir);
+        assignNumbers(state, await loop.pending());
+        await saveStartState(dir, state);
+        for (const line of await nowSummary({ loop, engine, numbers: state.numbers, ...(now ? { now: now() } : {}) })) io.out(line);
+        await requestCheckin(dir);
+        return;
+      }
+
+      if (cmd === 'start') {
+        const intervalMs = parseDuration(flags['--interval'] ?? config.start?.interval ?? '30s');
+        const checkinEveryMs = parseDuration(flags['--checkin'] ?? config.start?.checkinEvery ?? '2h');
+        const channelName = flags['--channel'] ?? config.start?.channel;
+        const channel = options.channel ?? (channelName !== undefined || configuredChannels(config).length ? selectChannel(config, { channel: channelName, workspaceDir: dir }).channel : undefined);
+        const daemon = new UnifiedDaemon({
+          loop,
+          engine,
+          ...(channel ? { channel } : {}),
+          output: (t) => io.out(t),
+          chief: new ChiefOfStaff({ engine, provider: config.chief?.provider, loop }),
+          checkinEveryMs,
+          ...(now ? { now } : {}),
+        });
+        const report = (r: StartTickReport): void => {
+          for (const line of describeStartTick(r)) io.out(line);
+          for (const e of r.errors) io.err(`problem (will retry): ${e}`);
+        };
+        if (once) {
+          const r = await daemon.tick();
+          report(r);
+          if (r.errors.length) process.exitCode = 1;
+          return;
+        }
+        const sensors = loop.listSensors().map((x) => x.id).join(', ');
+        io.out(`Rufus is running (every ${flags['--interval'] ?? config.start?.interval ?? '30s'}; check-ins every ${flags['--checkin'] ?? config.start?.checkinEvery ?? '2h'}). Sensors: ${sensors}. Tools: ${loop.tools.list().map((t) => t.name).join(', ') || 'none'}. ${channel ? 'Talking through your chat.' : 'No chat configured: items print here; answer with rufus decide.'} Ctrl+C to stop.`);
+        const stop = new AbortController();
+        process.once('SIGINT', () => stop.abort());
+        process.once('SIGTERM', () => stop.abort());
+        return daemon.run({ intervalMs, signal: stop.signal, onTick: report });
+      }
 
       if (cmd === 'decide') {
-        const [runId, verdict, ...words] = rest;
-        if (!runId || !verdict || !['accept', 'edit', 'reject'].includes(verdict)) throw new Error('Usage: rufus decide <runId> accept|edit|reject [note...] [--output <your version>]');
+        const [ref, verdict, ...words] = rest;
+        if (!ref || !verdict || !['accept', 'edit', 'reject'].includes(verdict)) throw new Error('Usage: rufus decide <runId|#n> accept|edit|reject [note...] [--output <your version>]');
+        let runId = ref;
+        const short = ref !== undefined ? /^#?(\d{1,4})$/.exec(ref) : null;
+        if (short) {
+          const state = await loadStartState(dir);
+          const numbers = assignNumbers(state, await loop.pending());
+          const hit = Object.entries(numbers).find(([, n]) => n === Number(short[1]));
+          if (!hit) throw new Error(`Nothing is waiting as #${short[1]}. See rufus now.`);
+          runId = hit[0];
+        }
         const output = flags['--output'];
         const editedOutput = output === undefined ? undefined : (() => {
           try {

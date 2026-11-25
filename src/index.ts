@@ -251,6 +251,48 @@ export {
   type HumanDecision,
   type DecisionResult,
   type MasterLoopOptions,
+  type Urgency,
+  type LoopTools,
+  type LoopToolCall,
 } from './engine/loop';
+export { loadSoul, initSoul, anchorBrief, buildPersona, withPersona, SOUL_FILE, SOUL_TEMPLATE, MAX_SOUL_CHARS, type PersonaInput } from './soul/soul';
+export {
+  ToolRegistry,
+  ToolGatedError,
+  ToolError,
+  gateReason,
+  commandTool,
+  beeperTools,
+  buildTools,
+  formatTools,
+  runCommand,
+  fillArgs,
+  parseOutput,
+  KNOWN_COMMAND_TOOLS,
+  DEFAULT_COMMAND_TIMEOUT_MS,
+  type ToolDefinition,
+  type ToolContext,
+  type CommandRunner,
+  type RunCommandOptions,
+  type BuildToolsOptions,
+} from './tools/tools';
+export { BeeperApi, beeperApiOptions, DEFAULT_BEEPER_API_URL, type BeeperApiOptions, type BeeperChat, type BeeperApiMessage } from './tools/beeper-api';
+export {
+  beeperSensor,
+  commandSensor,
+  buildSensors,
+  messageTriageHandler,
+  classifyByCode,
+  DEFAULT_BOT_PATTERN,
+  type BeeperSensorOptions,
+  type CommandSensorOptions,
+  type MessageTriageOptions,
+  type TriageLabel,
+  type TriageResult,
+} from './sensors';
+export { parseLoopReply, formatLoopItem, formatCheckin, replyHint, draftOf, type LoopReply } from './unified/loop-text';
+export { UnifiedDaemon, DEFAULT_CHECKIN_MS, type UnifiedDaemonOptions, type StartTickReport } from './unified/daemon';
+export { nowSummary, type NowOptions } from './unified/now';
+export { assignNumbers, loadStartState, saveStartState, requestCheckin, takeCheckinRequest, freshStartState, START_STATE_FILE, CHECKIN_REQUEST_FILE, type StartState } from './unified/state';
 export { inboxSensor, appendSignal, scheduleBlockHandler, INBOX_FILE } from './engine/loop-builtins';
 export { cleanMessageText, stripHtml, decodeEntities, isPlaceholderText, filterNoise, type FilterNoiseResult } from './history/noise';

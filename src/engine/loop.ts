@@ -9,6 +9,8 @@ import { checkBoundaries, loadAnchor, type Anchor, type Sensitivity } from '../a
 import { CorpusStore, queryCorpus, type CorpusHit, type CorpusItem } from '../corpus';
 import { clip, stableId } from '../corpus/types';
 import { FileStore } from '../store';
+import { buildPersona, loadSoul, withPersona } from '../soul/soul';
+import { ToolRegistry } from '../tools/tools';
 import type { AiProvider, Route, Spectrum, StagePlan, Tier, VerifyResult } from '../types';
 
 /**
@@ -22,7 +24,14 @@ import type { AiProvider, Route, Spectrum, StagePlan, Tier, VerifyResult } from 
  *                           2) Earned Trust + the Anchor's boundaries: `check` (or anything external, money, logins)
  *                              waits for a human; `autonomous` completes.
  *   Record  (code)          every run is saved; a human verdict updates trust AND becomes a corpus example right away.
+ *
+ * v12: every model call carries `SOUL.md` + the Anchor + the closest examples and facts; handlers get real tool hands
+ * (`ctx.tools`), gated so side effects only happen in `commit` and sensitive ones only after a human's yes; and each run
+ * carries an `urgency` so the daemon can deliver urgent items now and batch the rest.
  */
+
+/** `urgent` reaches you right away; `normal` waits for the next check-in. */
+export type Urgency = 'urgent' | 'normal';
 
 // ---------- signals and sensors ----------
 
@@ -37,6 +46,8 @@ export interface LoopSignal {
   actor?: string;
   /** ISO time it happened. */
   timestamp?: string;
+  /** A sensor's hint. The plan may override it. Default `normal`. */
+  urgency?: Urgency;
   data?: Record<string, unknown>;
 }
 
@@ -74,6 +85,10 @@ export interface LoopPlan extends StagePlan {
   humanStep?: string;
   /** What the action touches. `external`, `money` and `login` always need the human's yes. */
   sensitivity?: Sensitivity[];
+  /** Tools the commit will use (`beeper.send`). Their sensitivities count as the plan's, for the boundary check. */
+  uses?: string[];
+  /** `urgent` interrupts you now; `normal` (default) waits for the next check-in. Beats the signal's hint. */
+  urgency?: Urgency;
 }
 
 export interface LoopReplan {
@@ -92,6 +107,24 @@ export interface AskOptions {
   tier?: Tier;
   system?: string;
   json?: boolean;
+  /** `false` leaves SOUL.md, the Anchor, examples and facts out of this call's system prompt. Default: included. */
+  persona?: boolean;
+}
+
+/** One tool call made by a run, kept on the run for `rufus now` and audits. */
+export interface LoopToolCall {
+  tool: string;
+  stage: LoopStageContext['stage'];
+  ok: boolean;
+  error?: string;
+  at: string;
+}
+
+/** The tools a stage can use. Read-only tools run anywhere; side effects only in `commit`; sensitive ones need a yes. */
+export interface LoopTools {
+  has(name: string): boolean;
+  list(): Array<{ name: string; description: string; readOnly: boolean; sensitivity: Sensitivity[] }>;
+  call<R = unknown>(name: string, args?: Record<string, unknown>): Promise<R>;
 }
 
 export interface LoopStageContext {
@@ -113,8 +146,18 @@ export interface LoopStageContext {
   examples(opts?: { actionType?: string; query?: string; limit?: number }): CorpusHit[];
   /** Facts from the whole life corpus. Free: no AI. */
   facts(query: string, opts?: { sources?: string[]; limit?: number }): CorpusHit[];
-  /** One model call (counted on the run). Throws when no provider is configured. */
+  /** One model call (counted on the run). Throws when no provider is configured. Carries SOUL.md + the Anchor by default. */
   ai(prompt: string, opts?: AskOptions): Promise<string>;
+  /** True when a model is configured, so a handler can fall back to code (or a human) without one. */
+  hasAi: boolean;
+  /** `<workspace>/SOUL.md`, when present. */
+  soul?: string;
+  /** The persona block every `ai()` call gets: SOUL.md, the Anchor, the closest examples and facts. */
+  persona(): string;
+  /** Real tool hands (`beeper.send`, `calendar.read`, ...). */
+  tools: LoopTools;
+  /** True in `commit` after a human said yes to this run. */
+  approved: boolean;
 }
 
 export interface SignalMatch {
@@ -182,6 +225,8 @@ export interface LoopRun {
   actionType?: string;
   goal?: string;
   route?: Route;
+  /** `urgent` reaches you now; `normal` waits for a check-in. */
+  urgency?: Urgency;
   plan?: LoopPlan;
   /** For `awaiting_human_plan`: the draft, and what the human is asked. */
   draftPlan?: LoopPlan;
@@ -206,6 +251,8 @@ export interface LoopRun {
   decision?: HumanDecision & { stage: 'plan' | 'execute' | 'verify'; at: string };
   committed?: boolean;
   commitError?: string;
+  /** Tools this run called, in order. */
+  toolCalls?: LoopToolCall[];
   /** Model calls made by this run. */
   aiCalls: number;
   spectrum: Spectrum;
@@ -259,6 +306,10 @@ export interface MasterLoopOptions {
   /** Optional AI. `default` serves a tier that is not configured. */
   providers?: { fast?: AiProvider; smart?: AiProvider; default?: AiProvider };
   trust?: TrustStore;
+  /** Real tool hands for handlers (`ctx.tools`). Default: none. */
+  tools?: ToolRegistry;
+  /** SOUL.md text to use instead of reading `<dir>/SOUL.md`; `false` turns it off. Default: read the file each pass. */
+  soul?: string | false;
   now?: () => Date;
 }
 
@@ -293,6 +344,9 @@ export class MasterLoop {
   private readonly handlers: SignalHandler<any, any>[] = [];
   private readonly providers: NonNullable<MasterLoopOptions['providers']>;
   private readonly now: () => Date;
+  readonly tools: ToolRegistry;
+  private readonly soulOption?: string | false;
+  private soul?: string;
 
   constructor(opts: MasterLoopOptions) {
     this.dir = opts.dir;
@@ -300,6 +354,8 @@ export class MasterLoop {
     this.now = opts.now ?? (() => new Date());
     this.trust = opts.trust ?? new TrustStore(opts.dir, { now: this.now });
     this.providers = opts.providers ?? {};
+    this.tools = opts.tools ?? new ToolRegistry();
+    this.soulOption = opts.soul;
     for (const s of opts.sensors ?? []) this.addSensor(s);
     for (const h of opts.handlers ?? []) this.addHandler(h);
   }
@@ -374,10 +430,16 @@ export class MasterLoop {
     await this.fs.writeJson(path.join(this.runsDir, `${run.id}.json`), run);
   }
 
+  /** Re-reads SOUL.md (unless given or turned off), so an edit takes effect on the next pass. */
+  private async refreshSoul(): Promise<void> {
+    this.soul = this.soulOption === false ? undefined : typeof this.soulOption === 'string' ? this.soulOption.trim() || undefined : await loadSoul(this.dir);
+  }
+
   /** One full pass. Zero new signals: `{ status: 'idle', cost: 0 }` and no model is ever called. */
   async runOnce(): Promise<LoopTickReport> {
     const now = this.now();
     const report: LoopTickReport = { status: 'idle', cost: 0, signals: 0, runs: [], unhandled: [], duplicates: 0, errors: [] };
+    await this.refreshSoul();
 
     // ---- Sense (code only) ----
     const anchor = await loadAnchor(this.dir, now);
@@ -431,9 +493,41 @@ export class MasterLoop {
     return report;
   }
 
-  private context(run: LoopRun, anchor: Anchor, corpus: CorpusItem[], base: { stage: LoopStageContext['stage']; attempt: number; route?: Route; replan?: LoopReplan; humanInput?: string }): LoopStageContext {
+  private context(run: LoopRun, anchor: Anchor, corpus: CorpusItem[], base: { stage: LoopStageContext['stage']; attempt: number; route?: Route; replan?: LoopReplan; humanInput?: string; approved?: boolean }): LoopStageContext {
     const defaultTier: Tier = base.stage === 'execute' && base.route === 'smart' ? 'smart' : 'fast';
     const signalText = run.signal.text ?? '';
+    const examples: LoopStageContext['examples'] = (o = {}) => {
+      const pool = corpus.filter((i) => i.source === 'feedback' && (!o.actionType || i.tags?.includes(o.actionType)));
+      return queryCorpus(pool, { query: o.query ?? signalText, limit: o.limit ?? 3, now: this.now() });
+    };
+    const facts: LoopStageContext['facts'] = (query, o = {}) => queryCorpus(corpus, { query, sources: o.sources, limit: o.limit ?? 5, now: this.now() });
+    let persona: string | undefined;
+    const personaOf = (): string =>
+      (persona ??= buildPersona({
+        ...(this.soul ? { soul: this.soul } : {}),
+        anchor,
+        examples: corpus.length ? examples({ ...(run.actionType ? { actionType: run.actionType } : {}), limit: 3 }) : [],
+        facts: corpus.length && signalText.trim() ? queryCorpus(corpus.filter((i) => i.source !== 'feedback'), { query: signalText, limit: 3, now: this.now() }).filter((h) => h.matched.length || h.similarity !== undefined) : [],
+      }));
+    const approved = base.stage === 'commit' && base.approved === true;
+    const registry = this.tools;
+    const tools: LoopTools = {
+      has: (name) => registry.has(name),
+      list: () => registry.list().map((t) => ({ name: t.name, description: t.description, readOnly: t.readOnly === true, sensitivity: [...(t.sensitivity ?? [])] })),
+      call: async <R = unknown>(name: string, args: Record<string, unknown> = {}): Promise<R> => {
+        const entry: LoopToolCall = { tool: name, stage: base.stage, ok: false, at: this.now().toISOString() };
+        (run.toolCalls ??= []).push(entry);
+        try {
+          const out = await registry.call<R>(name, args, { dir: this.dir, now: this.now(), runId: run.id, stage: base.stage, approved });
+          entry.ok = true;
+          return out;
+        } catch (err) {
+          entry.error = (err as Error).message;
+          throw err;
+        }
+      },
+    };
+    const hasAi = !!(this.providers.fast ?? this.providers.smart ?? this.providers.default);
     return {
       dir: this.dir,
       runId: run.id,
@@ -445,11 +539,13 @@ export class MasterLoop {
       ...(base.replan ? { replan: base.replan } : {}),
       ...(base.humanInput ? { humanInput: base.humanInput } : {}),
       now: this.now(),
-      examples: (o = {}) => {
-        const pool = corpus.filter((i) => i.source === 'feedback' && (!o.actionType || i.tags?.includes(o.actionType)));
-        return queryCorpus(pool, { query: o.query ?? signalText, limit: o.limit ?? 3, now: this.now() });
-      },
-      facts: (query, o = {}) => queryCorpus(corpus, { query, sources: o.sources, limit: o.limit ?? 5, now: this.now() }),
+      examples,
+      facts,
+      hasAi,
+      ...(this.soul ? { soul: this.soul } : {}),
+      persona: personaOf,
+      tools,
+      approved,
       ai: async (prompt, o = {}) => {
         const tier = o.tier ?? defaultTier;
         const other: Tier = tier === 'fast' ? 'smart' : 'fast';
@@ -457,8 +553,9 @@ export class MasterLoop {
         if (!provider) throw new Error(`No AI provider is configured (needed for a ${tier} call in "${run.handlerId}" ${base.stage}).`);
         run.aiCalls++;
         run.spectrum[tier]++;
+        const system = o.system ?? 'You are Rufus, a careful chief of staff. Answer exactly what is asked.';
         return provider.complete({
-          system: o.system ?? 'You are Rufus, a careful chief of staff. Answer exactly what is asked.',
+          system: o.persona === false ? system : withPersona(system, personaOf()),
           messages: [{ role: 'user', content: prompt }],
           ...(o.json ? { json: true } : {}),
           meta: { runId: run.id, flowId: `loop:${run.handlerId}`, step: base.stage, attempt: base.attempt },
@@ -506,6 +603,7 @@ export class MasterLoop {
         if (plan.needsHumanPlan) {
           run.actionType = plan.actionType;
           run.goal = plan.goal;
+          run.urgency = plan.urgency ?? run.signal.urgency ?? 'normal';
           run.draftPlan = plan;
           run.question = plan.question?.trim() || `This is unclear. Is this the right plan? Goal: ${plan.goal}`;
           run.trail.push({ attempt, route: plan.route, goal: plan.goal, outcome: 'human', reason: 'plan needs a human' });
@@ -517,8 +615,10 @@ export class MasterLoop {
       run.route = plan.route;
       run.plan = plan;
       run.replans = attempt;
+      run.urgency = plan.urgency ?? run.signal.urgency ?? 'normal';
 
-      const bounds = checkBoundaries(anchor, plan.actionType, plan.sensitivity ?? []);
+      const sensitivity = [...new Set([...(plan.sensitivity ?? []), ...this.tools.sensitivityOf(plan.uses ?? [])])];
+      const bounds = checkBoundaries(anchor, plan.actionType, sensitivity);
       if (bounds.blockedBy.length) {
         run.blockedBy = bounds.blockedBy.map((b) => b.rule);
         run.status = 'blocked';
@@ -581,14 +681,14 @@ export class MasterLoop {
     }
   }
 
-  private async commit(run: LoopRun, handler: SignalHandler<any, any> | undefined, anchor: Anchor, corpus: CorpusItem[], output: unknown): Promise<void> {
+  private async commit(run: LoopRun, handler: SignalHandler<any, any> | undefined, anchor: Anchor, corpus: CorpusItem[], output: unknown, approved = false): Promise<void> {
     if (!handler?.commit) {
       run.committed = false;
       if (!handler) run.commitError = `handler "${run.handlerId}" is not registered here, so nothing was applied`;
       return;
     }
     try {
-      await handler.commit(output, run.plan!, run.signal, this.context(run, anchor, corpus, { stage: 'commit', attempt: run.replans, ...(run.route ? { route: run.route } : {}) }));
+      await handler.commit(output, run.plan!, run.signal, this.context(run, anchor, corpus, { stage: 'commit', attempt: run.replans, ...(run.route ? { route: run.route } : {}), approved }));
       run.committed = true;
       delete run.commitError;
     } catch (err) {
@@ -608,6 +708,7 @@ export class MasterLoop {
     if (!['accept', 'edit', 'reject'].includes(decision?.verdict)) throw new Error(`verdict must be accept, edit or reject (got ${JSON.stringify(decision?.verdict)}).`);
     const run = await this.getRun(runId);
     if (!AWAITING.includes(run.status)) throw new Error(`Run ${runId} is not waiting for a decision (it is ${run.status}).`);
+    await this.refreshSoul();
     const stage = run.status === 'awaiting_human_plan' ? 'plan' : run.status === 'awaiting_human_execute' ? 'execute' : 'verify';
     const now = this.now();
     const note = decision.note?.trim() || undefined;
@@ -632,7 +733,7 @@ export class MasterLoop {
       trust = await this.trust.recordFeedback(run.actionType!, decision.verdict, note);
       if (decision.verdict !== 'reject') {
         const output = decision.verdict === 'edit' && decision.editedOutput !== undefined ? decision.editedOutput : run.result;
-        await this.commit(run, handler, await loadAnchor(this.dir, now), [], output);
+        await this.commit(run, handler, await loadAnchor(this.dir, now), [], output, true);
       }
     }
     run.status = finalStatus;
@@ -658,6 +759,7 @@ export function normalizeSignal(raw: unknown, defaultSurface: string): LoopSigna
     ...(text(r.text) ? { text: text(r.text)! } : {}),
     ...(text(r.actor) ? { actor: text(r.actor)! } : {}),
     ...(text(r.timestamp) ? { timestamp: text(r.timestamp)! } : {}),
+    ...(r.urgency === 'urgent' || r.urgency === 'normal' ? { urgency: r.urgency } : {}),
     ...(data ? { data } : {}),
   };
 }

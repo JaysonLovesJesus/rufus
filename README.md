@@ -18,6 +18,8 @@ A small, domain-agnostic **AI + Code + Human** chief-of-staff engine, in five pi
 
 Around all five pieces runs **[one Master Loop](#the-one-master-loop-v11)**: `Sense → Plan → Execute → Verify → Record`, steered by your **Anchor** (goals, projects, boundaries, today's schedule) and gated by **Earned Trust** (every action works from Day 1, you check it until it has earned autonomy).
 
+**The one primary path is [`rufus start`](#one-daemon-rufus-start-v12)**: a single daemon that senses your apps, works the loop with real tools, and texts you only what needs you, in plain text you answer with `1`, `2` or `edit: ...`. `rufus now` is the one-screen status.
+
 ### Run 100% on Google Gemini
 
 No Claude needed. Put a key in your environment (`export GEMINI_API_KEY=...`; it is sent in the `x-goog-api-key` header, never in a URL) and use this `config.json` in your workspace:
@@ -576,6 +578,129 @@ plan ──▶ execute ──▶ verify ──ok──▶ done
 
 The result is `{ status: 'passed' | 'human', route, goal, plan, result | answer, replans, trail }`; `trail` lists every pass (route, outcome, reason). Use `defineStagedFlow(meta, spec)` for a flow that is one unit, or `ctx.staged(name, spec)` inside any `defineFlow`. Every stage outcome is saved with the run, so a resume (or a human's answer) never plans, calls a model or verifies twice. In `run.spectrum`, plan and verify count as code, execute counts as its route, and the helpers inside a stage are not counted a second time. Replay and case capture work on the `ctx.ai` steps inside a stage like any other (put a `verify` on the step for the replay gate; the stage `verify` checks the goal). Existing flows are untouched: `ctx.code`, `ctx.ai`, `ctx.escalate` and `ctx.human` behave exactly as before.
 
+## One daemon: `rufus start` (v12)
+
+```
+           SOUL.md + Anchor + closest examples ─────────────┐ (in every prompt)
+                                                            ▼
+ Sensors ──▶ Master Loop: Plan ─▶ Execute ─▶ Verify ─▶ Record ──▶ Tools (commit only)
+ beeper,       (inbox.jsonl,        │            │                 beeper.send, gmail.draft,
+ commands      flows/*.loop.ts)     │            └ waits on you ─┐ calendar.write, shell.run ...
+                                    ▼                            ▼
+                       urgent: now ── normal: batched ──▶ your chat (plain text) ◀── 1 / 2 / edit: ...
+                                                              ▲
+                                     flow cards + Chief of Staff ride along (CardBridge)
+```
+
+```sh
+rufus init           # workspace + a SOUL.md template
+rufus start          # the one daemon (Ctrl+C to stop); --once for a single pass
+rufus now            # one screen: today, goals, what waits on you, what ran on its own, trust
+```
+
+What one pass does:
+
+1. **Reads your replies** in your chat (Telegram or Beeper). Loop items are resolved right there; anything else goes to the CardBridge (flow cards, then the Chief of Staff).
+2. **Runs the Master Loop**: `inbox.jsonl`, `flows/*.loop.ts` and the sensors in `config.json`. No new signals: idle, $0.
+3. **Delivers what needs you.** `urgent` items go out immediately. `normal` items wait for the next **check-in** (every `start.checkinEvery`, default `2h`; or when you text `checkin` / `now`, or run `rufus now`), so Rufus never pings you for every tiny event.
+
+### Beeper-safe plain-text Verify
+
+Many chat apps (Beeper included, even when it shows your Telegram chats) do not render Telegram's inline buttons. So every paused item is short plain text, and every answer is something you can type in two keystrokes:
+
+```
+[#1] Sam: "Can we move lunch to Thursday?"
+Draft: Thursday works. 12:30?
+Reply: 1 = accept, 2 = reject, or type your edit
+```
+
+| You type | Means |
+| --- | --- |
+| `1`, `y`, `yes`, `ok`, `👍` | accept (`1 <note>` adds a note) |
+| `2`, `n`, `no` | reject (`2 too formal` or `no: not now` gives the reason) |
+| `edit: <your version>` | your version replaces the draft and is what gets applied |
+| plain text right after a lone item | the same as `edit:` (a question ending in `?` goes to the Chief of Staff instead) |
+| `#2 1`, `#2 2 <reason>`, `#2 edit: ...`, `#2 <text>` | the same, for item #2 when several are open |
+| `checkin` / `now` | the one-screen summary plus everything waiting, right away |
+
+When a flow card is open too, a bare `1` answers the card; loop items then need their `#n`. Plan items read `1 = go ahead, 2 = drop it, or type a better plan`; real-life steps read `1 = done, 2 = skip`. In code: `parseLoopReply(text)`, `formatLoopItem(run, n)`, `formatCheckin(items)`. From the terminal: `rufus decide #1 accept`.
+
+### `SOUL.md`: your words in every prompt
+
+`<workspace>/SOUL.md` is free-form: who you are, your voice, your priorities, your "never"s. `loadSoul(dir)` reads it (HTML comments are notes to yourself and are dropped, so the template `rufus init` writes changes nothing until you write in it). It is injected automatically, with a compact Anchor summary (`anchorBrief`) and the closest corpus examples and facts (`buildPersona`), into:
+
+- every Chief of Staff chat reply;
+- every Master Loop `ctx.ai(...)` call in plan, execute and verify (opt out per call with `{ persona: false }`, or per loop with `new MasterLoop({ soul: false })`). `ctx.soul` and `ctx.persona()` are there for handlers that build their own prompts.
+
+A workspace without SOUL.md, an Anchor or a corpus gets exactly the old prompts.
+
+### Real tool hands
+
+A `ToolDefinition` is `{ name, description, sensitivity?, readOnly?, execute(args, ctx) }`, kept in a `ToolRegistry`. Handlers use them as `ctx.tools.call(name, args)` (`ctx.tools.has`, `ctx.tools.list`), and every call is recorded on the run (`run.toolCalls`). Two guardrails live in the registry itself:
+
+1. **Side effects only in `commit`.** Read-only tools run while planning, executing or verifying; anything else throws `ToolGatedError` before `commit` (after Verify).
+2. **Sensitive tools need your yes.** A tool marked `external`, `money` or `login` runs only once you approved the run, unless you trusted it by name in `config.tools.trusted`. List a tool in the plan's `uses: ['beeper.send']` and its sensitivity joins the Anchor's boundary check, so the run waits for you even when the action type is autonomous. An autonomous commit that tries an undeclared external send is stopped and reported (`commitError`).
+
+Built in, all configured in `config.json` with nothing personal in code:
+
+- `beeper.read` / `beeper.send` (Beeper Desktop's local API at `beeper.apiUrl`, default `http://127.0.0.1:23373`; `beeper.send` is `external`). On whenever Beeper is configured (`"tools": { "beeper": false }` turns them off).
+- `commandTool(name, cfg)` for any local CLI: well-known names `calendar.read`, `calendar.write`, `gmail.read`, `gmail.draft` and `shell.run` (external by default) get sensible defaults. No shell: the args go on stdin as JSON and fill `{{key}}` placeholders. Output is parsed as JSON when it is JSON. Timeouts (default 30s), a missing command and a non-zero exit each give a clear `ToolError`.
+
+### Live app sensors ($0)
+
+- `beeperSensor`: new incoming messages from people across your Beeper chats. It skips your own messages, deleted and non-text ones, bot chats (title or sender matching `botPattern`, default `bot`), muted and archived chats, your Rufus chat (`beeper.chatId`) and `ignoreChatIds`. The first pass only sets the cursor: history is never replayed as work.
+- `commandSensor`: runs a read-only command that prints JSON (a calendar or mail CLI), diffs item ids against what it has seen, and emits only new ones. The first pass records what is there without emitting it (`baseline: false` to emit).
+- `messageTriageHandler` (built into `rufus start` for `chat` and `email` signals): code ignores acknowledgements (`ok thanks`, `👍`) and flags `urgent`/`asap`; anything else gets one fast model call with SOUL.md, the Anchor and your past decisions to classify `ignore | batch | urgent` and draft a concise reply. The draft must pass a code check (short, no `[Name]` placeholders, a failure re-drafts once), is marked `external`, and is only sent with `beeper.send` (or saved with `gmail.draft` for email) after your yes. Without a model it becomes your step ("Reply to Sam: ...").
+
+### `config.json` for v12
+
+```json
+{
+  "version": 1,
+  "telegram": { "chatId": "<your chat id>" },
+  "beeper": { "apiUrl": "http://127.0.0.1:23373" },
+  "start": { "interval": "30s", "checkinEvery": "2h", "channel": "telegram" },
+  "sensors": {
+    "beeper": { "ignoreChatIds": [], "groups": true },
+    "commands": [
+      { "id": "calendar", "surface": "calendar", "kind": "calendar.event", "command": "my-calendar-cli", "args": ["list", "--json"] }
+    ]
+  },
+  "tools": {
+    "commands": {
+      "calendar.read": { "command": "my-calendar-cli", "args": ["list", "--json", "--day", "{{date}}"] },
+      "gmail.draft": { "command": "my-mail-cli", "args": ["draft"] }
+    },
+    "trusted": []
+  }
+}
+```
+
+Tokens belong in the environment (`RUFUS_TELEGRAM_TOKEN`, `RUFUS_BEEPER_TOKEN`). Without any chat configured, `rufus start` prints items in the terminal and you answer with `rufus decide #n ...`.
+
+### `rufus now`
+
+```
+Now: 2026-11-25 08:00
+Today:
+  > 07:30-09:00 focus Deep work
+    12:00-13:00 personal Gym
+Goals: [high] Ship the beta
+Waiting on you (2):
+  [#1] (urgent) verify: reply.chat: Draft a concise reply to Sam's chat message -> "Thursday works. 12:30?"
+  [#2] verify: triage.ignore: Ignore Alex's chat message (a short acknowledgement, nothing to answer)
+Done on its own (last 24h): 1
+  schedule.block: Put "Standup" (meeting) on 2026-11-25 at 09:30-09:45 without overlapping anything.
+Earned Trust:
+  reply.chat  check  accepted 4 · edited 1 · rejected 0 · clean streak 2/10
+```
+
+It also asks a running `rufus start` for a check-in on its next pass.
+
+### What is primary and what is legacy
+
+`rufus --help` now leads with eight **primary commands**: `start`, `now`, `anchor`, `trust`, `decide`, `chat`, `collect`, `embed`. Everything else (`bridge`, `loop`, `signal`, `run`/`pending`/`answer`, `tick`/`watch`/`emit`, `lessons`/`propose`, `seed`, `mine`, `replay`, `compare`, `backtest`, `context`, `demo`) still works exactly as before under **Advanced / Legacy**. `rufus bridge` and `rufus loop` are each half of what `rufus start` does.
+
 ## The One Master Loop (v11)
 
 Everything Rufus does on its own goes through one small, mostly-code loop:
@@ -673,6 +798,14 @@ Requires Node 20+ and pnpm.
 
 ```sh
 pnpm install
+pnpm rufus init                 # workspace + SOUL.md template
+pnpm rufus start                # the one daemon (see "One daemon: rufus start")
+pnpm rufus now                  # one screen: what matters and what waits on you
+```
+
+The flow engine underneath, step by step:
+
+```sh
 pnpm rufus demo                 # code -> ai (verify retry) -> human pause
 pnpm rufus pending              # your turn
 pnpm rufus answer <cardId> 1    # resume and finish
@@ -766,6 +899,10 @@ src/corpus/     `CorpusItem`, `CorpusStore`, `SourceAdapter`s (files, browser, c
 src/recency.ts  exponential and rank-based recency weights, shared by history and the corpus
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop
 src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Telegram and Beeper adapters
+src/soul/       SOUL.md loader and the persona block (SOUL.md + Anchor + examples + facts) for every prompt
+src/tools/      ToolRegistry (side effects only in commit, sensitive tools need a yes), Beeper and command tools
+src/sensors/    beeperSensor, commandSensor, messageTriageHandler
+src/unified/    `rufus start` (UnifiedDaemon), plain-text Verify (parseLoopReply / formatLoopItem), batching, `rufus now`
 src/chief/      ChiefOfStaff: fast code commands + code-assembled free-form chat
 src/cli.ts      the `rufus` command
 examples/       a generic triage-and-draft flow
