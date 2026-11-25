@@ -1,7 +1,9 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
-import type { HumanCard, TelegramConfig } from '../types';
+import type { HumanCard, TelegramConfig, TranscribeCommand } from '../types';
 import type { IncomingMessage, LiveChannel } from './bridge';
+import { commandTranscriber, type Transcriber } from './transcribe';
 
 export const DEFAULT_TELEGRAM_API = 'https://api.telegram.org';
 /** Telegram rejects messages longer than 4096 characters. */
@@ -32,6 +34,11 @@ export interface TelegramOptions {
   timeoutMs?: number;
   /** Where the `getUpdates` offset is saved, so a restart never re-reads handled updates. Memory only if unset. */
   stateFile?: string;
+  /**
+   * Turns voice notes and audio into text: a local command (see `TranscribeCommand`) or,
+   * for tests, a function. Unset: voice notes and audio are skipped.
+   */
+  transcribe?: TranscribeCommand | Transcriber;
   /** Injectable for tests. Defaults to the global `fetch`. */
   fetch?: typeof fetch;
 }
@@ -48,15 +55,19 @@ export function resolveTelegramOptions(file: TelegramConfig = {}, env: NodeJS.Pr
     throw new Error(`Telegram is not configured: set ${missing.join(' and ')} (or "telegram" in config.json).`);
   }
   const apiUrl = env.RUFUS_TELEGRAM_API_URL || file.apiUrl;
-  return { token: token!, chatId: chatId!.trim(), ...(apiUrl ? { apiUrl } : {}) };
+  const transcribe = file.transcribe?.command ? file.transcribe : undefined;
+  return { token: token!, chatId: chatId!.trim(), ...(apiUrl ? { apiUrl } : {}), ...(transcribe ? { transcribe } : {}) };
 }
 
 interface TelegramChat { id: number | string }
 interface TelegramUser { is_bot?: boolean }
+interface TelegramFileRef { file_id: string; mime_type?: string }
 interface TelegramMessage {
   message_id: number;
   date?: number;
   text?: string;
+  voice?: TelegramFileRef;
+  audio?: TelegramFileRef;
   chat?: TelegramChat;
   from?: TelegramUser;
 }
@@ -75,13 +86,19 @@ interface TelegramUpdate {
 /** Telegram Bot API over plain `fetch`, no dependencies. Short-polls `getUpdates`; never reads other chats. */
 export class TelegramChannel implements LiveChannel {
   private readonly base: string;
+  private readonly fileBase: string;
   private readonly doFetch: typeof fetch;
+  private readonly transcriber?: Transcriber;
   private offset?: number;
   private loaded = false;
 
   constructor(private readonly opts: TelegramOptions) {
-    this.base = `${(opts.apiUrl ?? DEFAULT_TELEGRAM_API).replace(/\/+$/, '')}/bot${opts.token}`;
+    const api = (opts.apiUrl ?? DEFAULT_TELEGRAM_API).replace(/\/+$/, '');
+    this.base = `${api}/bot${opts.token}`;
+    this.fileBase = `${api}/file/bot${opts.token}`;
     this.doFetch = opts.fetch ?? fetch;
+    const t = opts.transcribe;
+    this.transcriber = typeof t === 'function' ? t : t?.command ? commandTranscriber(t) : undefined;
   }
 
   /** Sends to the configured chat (split if longer than Telegram allows). Returns the last message id. */
@@ -95,7 +112,10 @@ export class TelegramChannel implements LiveChannel {
     return this.sendText(text, keyboard.length ? { inline_keyboard: keyboard } : undefined);
   }
 
-  /** New messages from the configured chat, oldest first. Other chats, bots and non-text updates are skipped. */
+  /**
+   * New messages from the configured chat, oldest first. Voice notes and audio arrive as their
+   * transcript when `transcribe` is set. Other chats, bots and other non-text updates are skipped.
+   */
   async poll(since?: string): Promise<IncomingMessage[]> {
     await this.loadOffset();
     const updates = await this.call<TelegramUpdate[]>('getUpdates', {
@@ -119,11 +139,14 @@ export class TelegramChannel implements LiveChannel {
         continue;
       }
       const m = u.message;
-      if (!m || !this.isFromHuman(m) || !m.text?.trim()) continue;
+      if (!m || !this.isFromHuman(m)) continue;
+      const audio = m.voice ?? m.audio;
+      if (!m.text?.trim() && !(audio?.file_id && this.transcriber)) continue;
       const at = m.date ? new Date(m.date * 1000).toISOString() : undefined;
       // Telegram dates are whole seconds, so treat the second `since` falls in as still new.
       if (sinceMs !== undefined && m.date && (m.date + 1) * 1000 <= sinceMs) continue;
-      out.push({ id: `tg_${u.update_id}`, text: m.text, ...(at ? { at } : {}) });
+      const text = m.text?.trim() ? m.text : await this.transcribeAudio(audio!.file_id);
+      if (text) out.push({ id: `tg_${u.update_id}`, text, ...(at ? { at } : {}) });
     }
     return out;
   }
@@ -139,6 +162,44 @@ export class TelegramChannel implements LiveChannel {
   }
 
   // ---------- internals ----------
+
+  /**
+   * Downloads a voice note or audio file and returns its transcript. Never throws: on failure it
+   * tells the chat briefly (best effort) and returns undefined, so one bad file can't stop polling.
+   * The update is already confirmed, so a failing file is not retried forever.
+   */
+  private async transcribeAudio(fileId: string): Promise<string | undefined> {
+    let dir: string | undefined;
+    try {
+      const file = await this.call<{ file_path?: string }>('getFile', { file_id: fileId });
+      if (!file.file_path) throw new Error('Telegram gave no file path (file too big?)');
+      const res = await this.download(file.file_path);
+      dir = await mkdtemp(path.join(os.tmpdir(), 'rufus-voice-'));
+      const ext = path.extname(file.file_path).replace(/[^.\w]/g, '') || '.ogg';
+      const local = path.join(dir, `voice${ext}`);
+      await writeFile(local, Buffer.from(await res.arrayBuffer()));
+      const text = (await this.transcriber!(local)).trim();
+      if (!text) throw new Error('no speech found');
+      return text;
+    } catch (err) {
+      const reason = this.scrub(err instanceof Error ? err.message : String(err)).slice(0, 200);
+      await this.sendText(`Couldn't transcribe that voice note (${reason}). Try again, or send it as text.`).catch(() => undefined);
+      return undefined;
+    } finally {
+      if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private async download(filePath: string): Promise<Response> {
+    let res: Response;
+    try {
+      res = await this.doFetch(`${this.fileBase}/${filePath}`, { signal: AbortSignal.timeout(this.opts.timeoutMs ?? 60_000) });
+    } catch (err) {
+      throw new TelegramOfflineError(this.scrub(err instanceof Error ? err.message : String(err)));
+    }
+    if (!res.ok) throw new TelegramApiError(res.status, 'file download failed');
+    return res;
+  }
 
   private fromCallback(u: TelegramUpdate): IncomingMessage | undefined {
     const cb = u.callback_query!;

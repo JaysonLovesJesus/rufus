@@ -1,4 +1,5 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { access, readFile, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -7,7 +8,9 @@ import {
   TelegramApiError,
   TelegramChannel,
   TelegramOfflineError,
+  commandTranscriber,
   defineFlow,
+  transcribeArgs,
   resolveTelegramOptions,
   selectChannel,
   type HumanCard,
@@ -20,11 +23,21 @@ const CHAT = '4242';
 const opts = { token: TOKEN, chatId: CHAT };
 
 type Call = { method: string; params: any };
-/** A fake Bot API. `handlers` answer by method name; unlisted methods return `{ ok: true, result: true }`. */
-function fakeTelegram(handlers: Record<string, (params: any) => unknown> = {}) {
+/**
+ * A fake Bot API. `handlers` answer by method name; unlisted methods return `{ ok: true, result: true }`.
+ * `files` serves downloads from `/file/bot<token>/<path>` (recorded as method `file:<path>`); unknown paths 404.
+ */
+function fakeTelegram(handlers: Record<string, (params: any) => unknown> = {}, files: Record<string, string> = {}) {
   const calls: Call[] = [];
   const fn = (async (url: string | URL | Request, init: RequestInit = {}) => {
     const u = String(url);
+    const filePrefix = `https://api.telegram.org/file/bot${TOKEN}/`;
+    if (u.startsWith(filePrefix)) {
+      const filePath = u.slice(filePrefix.length);
+      calls.push({ method: `file:${filePath}`, params: {} });
+      const body = files[filePath];
+      return body === undefined ? new Response('not found', { status: 404 }) : new Response(body, { status: 200 });
+    }
     expect(u.startsWith(`https://api.telegram.org/bot${TOKEN}/`)).toBe(true);
     const method = u.slice(u.lastIndexOf('/') + 1);
     const params = init.body ? JSON.parse(init.body as string) : {};
@@ -140,6 +153,140 @@ describe('TelegramChannel.poll', () => {
   });
 });
 
+describe('TelegramChannel voice notes', () => {
+  const voice = (update_id: number, file_id = `voice-${update_id}`, extra: Record<string, unknown> = {}) =>
+    msg(update_id, '', { text: undefined, voice: { file_id, duration: 3, mime_type: 'audio/ogg' }, ...extra });
+  const withFile = { getFile: (p: any) => ({ file_id: p.file_id, file_path: `voice/${p.file_id}.oga` }) };
+  const exists = (p: string) => access(p).then(() => true, () => false);
+
+  it('downloads the voice note, hands the file to `transcribe`, and delivers the transcript like a text', async () => {
+    const t = fakeTelegram({ getUpdates: () => [msg(1, 'first'), voice(2), msg(3, 'last')], ...withFile }, { 'voice/voice-2.oga': 'OGG-BYTES' });
+    const seen: { path: string; body: string }[] = [];
+    const transcribe = async (file: string) => {
+      seen.push({ path: file, body: await readFile(file, 'utf8') });
+      return '  remind me to call the plumber tomorrow \n';
+    };
+    const got = await new TelegramChannel({ ...opts, fetch: t.fn, transcribe }).poll();
+    expect(got).toEqual([
+      { id: 'tg_1', text: 'first', at: new Date(1_800_000_000_000).toISOString() },
+      { id: 'tg_2', text: 'remind me to call the plumber tomorrow', at: new Date(1_800_000_000_000).toISOString() },
+      { id: 'tg_3', text: 'last', at: new Date(1_800_000_000_000).toISOString() },
+    ]);
+    expect(t.of('getFile').map((c) => c.params)).toEqual([{ file_id: 'voice-2' }]);
+    expect(t.of('file:voice/voice-2.oga')).toHaveLength(1);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.body).toBe('OGG-BYTES');
+    expect(path.relative(os.tmpdir(), seen[0]!.path)).toMatch(/^rufus-voice-/);
+    expect(path.extname(seen[0]!.path)).toBe('.oga');
+    expect(await exists(seen[0]!.path)).toBe(false); // temp file cleaned up
+    expect(t.of('sendMessage')).toEqual([]);
+  });
+
+  it('handles audio files the same way', async () => {
+    const t = fakeTelegram(
+      { getUpdates: () => [msg(4, '', { text: undefined, audio: { file_id: 'aud', mime_type: 'audio/mpeg' } })], getFile: () => ({ file_path: 'music/a.mp3' }) },
+      { 'music/a.mp3': 'MP3' },
+    );
+    const got = await new TelegramChannel({ ...opts, fetch: t.fn, transcribe: async () => 'an audio memo' }).poll();
+    expect(got.map((m) => m.text)).toEqual(['an audio memo']);
+  });
+
+  it('skips voice notes quietly when `transcribe` is not configured', async () => {
+    const t = fakeTelegram({ getUpdates: () => [voice(1), msg(2, 'text still works')] });
+    const ch = new TelegramChannel({ ...opts, fetch: t.fn });
+    expect((await ch.poll()).map((m) => m.text)).toEqual(['text still works']);
+    expect(t.of('getFile')).toEqual([]);
+    expect(t.of('sendMessage')).toEqual([]);
+    await ch.poll();
+    expect(t.of('getUpdates')[1]!.params.offset).toBe(3); // still confirmed, never re-delivered
+  });
+
+  it('cleans up the temp file and keeps polling when `transcribe` fails, with a short note to the chat', async () => {
+    const t = fakeTelegram({ getUpdates: () => [voice(1), msg(2, 'after')], ...withFile }, { 'voice/voice-1.oga': 'OGG' });
+    let tempPath = '';
+    const transcribe = async (file: string) => {
+      tempPath = file;
+      throw new Error('model missing');
+    };
+    const got = await new TelegramChannel({ ...opts, fetch: t.fn, transcribe }).poll();
+    expect(got.map((m) => m.text)).toEqual(['after']);
+    expect(tempPath).not.toBe('');
+    expect(await exists(tempPath)).toBe(false);
+    expect(await exists(path.dirname(tempPath))).toBe(false);
+    const notes = t.of('sendMessage').map((c) => c.params.text as string);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/Couldn't transcribe that voice note \(model missing\)/);
+  });
+
+  it('treats an empty transcript as a failure instead of delivering a blank message', async () => {
+    const t = fakeTelegram({ getUpdates: () => [voice(1)], ...withFile }, { 'voice/voice-1.oga': 'OGG' });
+    const got = await new TelegramChannel({ ...opts, fetch: t.fn, transcribe: async () => '   ' }).poll();
+    expect(got).toEqual([]);
+    expect(t.of('sendMessage')[0]!.params.text).toMatch(/no speech found/);
+  });
+
+  it('survives a failed download (no temp file, no crash) and never leaks the token', async () => {
+    const t = fakeTelegram({ getUpdates: () => [voice(1)], ...withFile }); // file not served: 404
+    const transcribe = vi.fn(async () => 'never');
+    const got = await new TelegramChannel({ ...opts, fetch: t.fn, transcribe }).poll();
+    expect(got).toEqual([]);
+    expect(transcribe).not.toHaveBeenCalled();
+    const note = t.of('sendMessage')[0]!.params.text as string;
+    expect(note).toMatch(/file download failed/);
+    expect(note).not.toContain(TOKEN);
+  });
+
+  it('survives getFile failing, even when the error note cannot be sent', async () => {
+    const t = fakeTelegram({
+      getUpdates: () => [voice(1), msg(2, 'ok')],
+      getFile: () => new Response(JSON.stringify({ ok: false, description: 'file is too big' }), { status: 400 }),
+      sendMessage: () => new Response(JSON.stringify({ ok: false }), { status: 500 }),
+    });
+    const got = await new TelegramChannel({ ...opts, fetch: t.fn, transcribe: async () => 'never' }).poll();
+    expect(got.map((m) => m.text)).toEqual(['ok']);
+  });
+
+  it('does not download voice notes older than `since`', async () => {
+    const t = fakeTelegram({ getUpdates: () => [voice(1, 'old', { date: 1_000 })], ...withFile });
+    const got = await new TelegramChannel({ ...opts, fetch: t.fn, transcribe: async () => 'x' }).poll(new Date(1_500_000).toISOString());
+    expect(got).toEqual([]);
+    expect(t.of('getFile')).toEqual([]);
+  });
+
+  it('ignores voice notes from other chats and bots without downloading them', async () => {
+    const t = fakeTelegram({ getUpdates: () => [voice(1, 'a', { chat: { id: 999 } }), voice(2, 'b', { from: { id: 8, is_bot: true } })], ...withFile });
+    expect(await new TelegramChannel({ ...opts, fetch: t.fn, transcribe: async () => 'x' }).poll()).toEqual([]);
+    expect(t.of('getFile')).toEqual([]);
+  });
+
+  it('runs a configured command: "{file}" is replaced with the audio path, stdout is the transcript', async () => {
+    const t = fakeTelegram({ getUpdates: () => [voice(1)], ...withFile }, { 'voice/voice-1.oga': 'hello from the file' });
+    const script = "const fs=require('fs');process.stdout.write('\\n'+process.argv[2]+':'+fs.readFileSync(process.argv[1],'utf8')+'\\n')";
+    const transcribe = { command: process.execPath, args: ['-e', script, '{file}', 'TAG'] };
+    const got = await new TelegramChannel({ ...opts, fetch: t.fn, transcribe }).poll();
+    expect(got.map((m) => m.text)).toEqual(['TAG:hello from the file']);
+  });
+});
+
+describe('commandTranscriber', () => {
+  it('appends the file path as the last arg when "{file}" is absent', () => {
+    expect(transcribeArgs(['--fast'], '/tmp/a.ogg')).toEqual(['--fast', '/tmp/a.ogg']);
+    expect(transcribeArgs(undefined, '/tmp/a.ogg')).toEqual(['/tmp/a.ogg']);
+    expect(transcribeArgs(['-f', '{file}', '-q'], '/tmp/a.ogg')).toEqual(['-f', '/tmp/a.ogg', '-q']);
+  });
+
+  it('runs without a shell and returns trimmed stdout', async () => {
+    const run = commandTranscriber({ command: process.execPath, args: ['-e', "process.stdout.write('  ' + process.argv[1] + '  ')"] });
+    expect(await run('/tmp/x y; rm -rf.ogg')).toBe('/tmp/x y; rm -rf.ogg');
+  });
+
+  it('rejects with a short reason when the command fails or times out', async () => {
+    await expect(commandTranscriber({ command: process.execPath, args: ['-e', "console.error('boom'); process.exit(3)"] })('/f')).rejects.toThrow(/exit 3: boom/);
+    await expect(commandTranscriber({ command: process.execPath, args: ['-e', 'setTimeout(() => {}, 5000)'], timeoutMs: 100 })('/f')).rejects.toThrow(/timed out/);
+    await expect(commandTranscriber({ command: '/no/such/transcriber' })('/f')).rejects.toThrow();
+  });
+});
+
 describe('TelegramChannel errors', () => {
   const offline = (async () => {
     throw new TypeError(`fetch failed for https://api.telegram.org/bot${TOKEN}/getUpdates`);
@@ -230,6 +377,12 @@ describe('Telegram config', () => {
       token: 'env-token',
       chatId: '-1',
     });
+  });
+
+  it('passes a configured transcribe command through, and ignores one without a command', () => {
+    const transcribe = { command: 'node', args: ['/opt/stt.mjs', '{file}'], timeoutMs: 60_000 };
+    expect(resolveTelegramOptions({ token: 't', chatId: 1, transcribe }, {})).toEqual({ token: 't', chatId: '1', transcribe });
+    expect(resolveTelegramOptions({ token: 't', chatId: 1, transcribe: { command: '' } }, {})).toEqual({ token: 't', chatId: '1' });
   });
 
   it('says exactly what is missing', () => {

@@ -20,6 +20,7 @@ export type * from './types';
 export { CardBridge, type CardBridgeOptions, type IncomingMessage, type LiveChannel, type TickReport } from './channels/bridge';
 export { BeeperChannel, BeeperOfflineError, BeeperApiError, createBeeperChannel, resolveBeeperOptions, type BeeperOptions } from './channels/beeper';
 export { TelegramChannel, TelegramOfflineError, TelegramApiError, createTelegramChannel, resolveTelegramOptions, type TelegramOptions } from './channels/telegram';
+export { commandTranscriber, transcribeArgs, type Transcriber } from './channels/transcribe';
 export { selectChannel, configuredChannels, type ChannelName } from './channels/select';
 export { extractPairsFromMessages, extractHistoryFromMessages, cleanText, type HistoryMessage, type ExtractOptions, type ExtractResult, type ReplyHabit } from './history/extract';
 export { noiseKind, pairNoiseKind, type NoiseKind, type NoiseCounts } from './history/noise';

@@ -386,6 +386,19 @@ export interface TelegramConfig {
   chatId?: string | number;
   /** Bot API base URL, for a self-hosted Bot API server. Default https://api.telegram.org */
   apiUrl?: string;
+  /** Turns voice notes and audio into text with a local command. Unset: voice notes are skipped. */
+  transcribe?: TranscribeCommand;
+}
+
+/**
+ * A local speech-to-text command. `"{file}"` in `args` is replaced with the downloaded
+ * audio path; without it, the path is appended as the last arg. Trimmed stdout is the transcript.
+ */
+export interface TranscribeCommand {
+  command: string;
+  args?: string[];
+  /** Default 120000 (2 minutes). */
+  timeoutMs?: number;
 }
 
 /** Beeper Desktop API settings. Env vars (RUFUS_BEEPER_*) override these; prefer env for the token. */

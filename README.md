@@ -135,7 +135,7 @@ Or `config.json`: `"telegram": { "token": "...", "chatId": 123456789 }` (env var
 - **Only your chat is heard.** Messages from any other chat, and from bots, are ignored.
 - The `getUpdates` offset is saved in `<workspace>/telegram-state.json`, so a restart never re-handles a message.
 - If Telegram is unreachable the bridge reports it, keeps running, and delivers once it's back. The token is never printed in errors.
-- Voice notes are not transcribed by Telegram; send text.
+- Voice notes and audio files are transcribed locally (free, nothing leaves your machine) when you set `"telegram": { "transcribe": { "command": "...", "args": ["...", "{file}"] } }`. Rufus downloads the audio to a temp file, runs the command (`"{file}"` becomes the path; without it the path goes last), and treats its trimmed stdout as your message. The temp file is always deleted. Any speech-to-text CLI works, for example a small script that converts with `ffmpeg` and runs `whisper-cli -m <model> -f <wav> -nt -np`. Without `transcribe`, voice notes are skipped; if transcription fails, Rufus says so in one line and keeps going.
 
 ## Connecting Beeper (or your own channel)
 
