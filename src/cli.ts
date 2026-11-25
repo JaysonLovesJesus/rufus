@@ -389,6 +389,9 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         buckets: bucketsFromConfig(config.mine),
         minPairs: config.mine?.minPairs,
         minShare: config.mine?.minShare,
+        minSlicePairs: config.mine?.minSlicePairs,
+        minDistinctContacts: config.mine?.minDistinctContacts,
+        maxTopContactShare: config.mine?.maxTopContactShare,
       });
       if (save && report.pairsAnalyzed) await store.writeJson(store.mineReportFile, report);
       if (asJson) io.out(JSON.stringify(report, null, 2));

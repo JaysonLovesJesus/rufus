@@ -65,6 +65,37 @@ export interface StyleSlice {
   lowercaseRate: number;
   /** Median minutes from incoming to reply, over pairs that carry a delay. */
   medianReplyMins?: number;
+  /** How many different senders these replies went to. A slice with 1-2 senders is a person, not a pattern. */
+  distinctContacts: number;
+  /** Share (0-1) of this slice's replies that went to its single most frequent sender. */
+  topContactShare: number;
+}
+
+/**
+ * When a slice (a channel, a closeness tier, DM vs. group, ...) is allowed to become a generalized rule. Without
+ * this, one chatty person on a quiet channel looks like "how you write on that channel" (confounding).
+ */
+export interface SliceGate {
+  /** Fewest replies in the slice. Default 30. */
+  minSlicePairs: number;
+  /** Fewest different contacts. Default 5. */
+  minDistinctContacts: number;
+  /** No single contact may make up more than this share (0-1) of the slice. Default 0.4. */
+  maxTopContactShare: number;
+  /** Share of a slice's contacts that must individually deviate the same way as the slice. Default 0.6. */
+  minContactAgreement: number;
+}
+
+export const DEFAULT_SLICE_GATE: SliceGate = { minSlicePairs: 30, minDistinctContacts: 5, maxTopContactShare: 0.4, minContactAgreement: 0.6 };
+
+/** Why a slice is too thin or too concentrated to generalize, or `undefined` when it passes the gate. */
+export function sliceGateIssue(s: Pick<StyleSlice, 'count' | 'distinctContacts' | 'topContactShare'>, gate: Partial<SliceGate> = {}): string | undefined {
+  const g = { ...DEFAULT_SLICE_GATE, ...gate };
+  const pct = `${Math.round(s.topContactShare * 100)}%`;
+  if (s.count < g.minSlicePairs) return `only ${s.count} repl${s.count === 1 ? 'y' : 'ies'} (need ${g.minSlicePairs})`;
+  if (s.distinctContacts < g.minDistinctContacts) return `only ${s.distinctContacts} contact${s.distinctContacts === 1 ? '' : 's'} (need ${g.minDistinctContacts}); top contact ${pct}`;
+  if (s.topContactShare > g.maxTopContactShare) return `top contact is ${pct} of it (max ${Math.round(g.maxTopContactShare * 100)}%)`;
+  return undefined;
 }
 
 const round3 = (n: number): number => Math.round(n * 1000) / 1000;
@@ -90,8 +121,12 @@ export function styleOf(pairs: HistoryPair[]): StyleSlice {
     return first === first.toLowerCase() && first !== first.toUpperCase();
   }).length;
   const delays = pairs.map(delayMins).filter((m): m is number => m !== undefined);
+  const perSender = new Map<string, number>();
+  for (const p of pairs) perSender.set(p.sender, (perSender.get(p.sender) ?? 0) + 1);
   return {
     count: n,
+    distinctContacts: perSender.size,
+    topContactShare: n ? round3(Math.max(...perSender.values()) / n) : 0,
     medianWords: median(counts),
     p90Words: percentile(counts, 0.9),
     greetingRate: rate(replies.filter((r) => GREETING.test(r)).length),

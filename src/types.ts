@@ -203,6 +203,12 @@ export interface MineConfig {
   minPairs?: number;
   /** Share of replies a rule must hold for, 0-1 (default 0.9). */
   minShare?: number;
+  /** Fewest replies a situation (channel, closeness, DM/group, ...) needs before it can become a generalized rule (default 30). */
+  minSlicePairs?: number;
+  /** ... and fewest different contacts in it (default 5). */
+  minDistinctContacts?: number;
+  /** ... and the largest share (0-1) any single contact may have of it (default 0.4). */
+  maxTopContactShare?: number;
 }
 
 export interface RufusConfig {

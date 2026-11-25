@@ -52,6 +52,7 @@ export {
   formatAnalysis,
   formatContext,
   situationalRules,
+  situationalAnalysis,
   type ContextBreakdown,
   mineHistory,
   formatMine,

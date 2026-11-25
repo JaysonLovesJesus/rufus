@@ -4,7 +4,7 @@ import type { LessonLayer } from '../learning/layers';
 import type { AiProvider, MineConfig, RufusConfig } from '../types';
 import { loadPairs } from './seed';
 import type { HistoryPair } from './types';
-import { RHYTHM_LABELS, TIERS, buildContactProfiles, styleOf as styleOfPairs, tierBySender, channelName, chatKindOf, rhythmOf, type ClosenessTier, type ContactProfiles, type StyleSlice } from './profiles';
+import { DEFAULT_SLICE_GATE, RHYTHM_LABELS, TIERS, buildContactProfiles, sliceGateIssue, styleOf as styleOfPairs, tierBySender, channelName, chatKindOf, rhythmOf, type ClosenessTier, type ContactProfiles, type SliceGate, type StyleSlice } from './profiles';
 import { DEFAULT_BUCKETS, EMOJI, GREETING, OTHER_BUCKET, SHORT_WORDS, SIGN_OFF, classify, median, percentile, round1, snippet, tally, top, words, type IntentBucket } from './stats';
 
 export { DEFAULT_BUCKETS, OTHER_BUCKET, SHORT_WORDS, classify, type IntentBucket };
@@ -85,6 +85,8 @@ export interface HistoryAnalysis {
   rules: CandidateRule[];
   /** Situational rules (layer `context`): only where a situation's style differs meaningfully from your overall style. */
   contextRules: CandidateRule[];
+  /** Situations that differ from your overall style but were NOT turned into a rule: too few replies, too few contacts, dominated by one or two people, or only a minority of contacts agree. Handled per contact instead. */
+  suppressedSlices: string[];
   /** The same history split by who, DM vs. group, channel and conversation rhythm. No contact names. */
   context: ContextBreakdown;
   intents: Array<{ bucket: string; label: string; count: number; pct: number }>;
@@ -93,7 +95,7 @@ export interface HistoryAnalysis {
 }
 
 /** Situation-by-situation statistics (contact names left out; see `buildContactProfiles` for those). */
-export type ContextBreakdown = Omit<ContactProfiles, 'contacts'> & { contacts: number };
+export type ContextBreakdown = Omit<ContactProfiles, 'contacts'> & { contacts: number; gate: SliceGate };
 
 export interface AnalyzeOptions {
   buckets?: IntentBucket[];
@@ -106,7 +108,22 @@ export interface AnalyzeOptions {
   topN?: number;
   /** A situation needs at least this many replies before a context rule is proposed. Default 5. */
   minSegment?: number;
+  /** A situation needs at least this many replies to become a generalized rule. Default 30. */
+  minSlicePairs?: number;
+  /** ... and replies to at least this many different contacts. Default 5. */
+  minDistinctContacts?: number;
+  /** ... with no single contact above this share (0-1) of it. Default 0.4. */
+  maxTopContactShare?: number;
+  /** ... and at least this share (0-1) of its contacts must individually deviate the same way. Default 0.6. */
+  minContactAgreement?: number;
 }
+
+export const sliceGateFrom = (o: Partial<SliceGate> = {}): SliceGate => ({
+  minSlicePairs: o.minSlicePairs ?? DEFAULT_SLICE_GATE.minSlicePairs,
+  minDistinctContacts: o.minDistinctContacts ?? DEFAULT_SLICE_GATE.minDistinctContacts,
+  maxTopContactShare: o.maxTopContactShare ?? DEFAULT_SLICE_GATE.maxTopContactShare,
+  minContactAgreement: o.minContactAgreement ?? DEFAULT_SLICE_GATE.minContactAgreement,
+});
 
 function voiceOf(pairs: HistoryPair[]): VoiceFingerprint {
   const replies = pairs.map((p) => p.reply.trim());
@@ -182,10 +199,36 @@ const pctText = (rate: number): string => `${Math.round(rate * 100)}%`;
  * from your overall median by at least 3 words and 40%, or its greeting / sign-off rate differs by 30 points.
  * Support is exact: how many replies in that situation are on the rule's side of your overall median (or do / don't greet).
  */
-export function situationalRules(pairs: HistoryPair[], profiles: ContactProfiles, opts: { minSegment?: number; max?: number } = {}): CandidateRule[] {
+export function situationalRules(pairs: HistoryPair[], profiles: ContactProfiles, opts: SituationalRuleOptions = {}): CandidateRule[] {
+  return situationalAnalysis(pairs, profiles, opts).rules;
+}
+
+export interface SituationalRuleOptions extends Partial<SliceGate> {
+  minSegment?: number;
+  max?: number;
+}
+
+/** Of the contacts in a situation, how many individually deviate (by their own median / rate) the same way as the situation does. Every contact counts once, however chatty. */
+function contactAgreement(group: HistoryPair[], direction: 1 | -1, metric: (pairs: HistoryPair[]) => number, baseline: number): { agree: number; of: number } {
+  const bySender = new Map<string, HistoryPair[]>();
+  for (const p of group) bySender.set(p.sender, [...(bySender.get(p.sender) ?? []), p]);
+  let agree = 0;
+  for (const list of bySender.values()) if (Math.sign(metric(list) - baseline) === direction) agree++;
+  return { agree, of: bySender.size };
+}
+
+/**
+ * `situationalRules` plus a transparent list of situations that differ from your overall style but were held back.
+ * A situation may only become a generalized rule when it has enough replies, enough different contacts, no
+ * dominant contact, and (the confounding check) at least `minContactAgreement` of its contacts, each weighted equally,
+ * individually deviate from your overall baseline the same way. Otherwise it is a person (or topic) effect, not a
+ * channel / closeness / DM-group effect, and it is reported in `suppressed` and left to the per-contact lookup.
+ */
+export function situationalAnalysis(pairs: HistoryPair[], profiles: ContactProfiles, opts: SituationalRuleOptions = {}): { rules: CandidateRule[]; suppressed: string[] } {
   const minSegment = opts.minSegment ?? 5;
+  const gate = sliceGateFrom(opts);
   const total = pairs.length;
-  if (!total) return [];
+  if (!total) return { rules: [], suppressed: [] };
   const overall = styleOfPairs(pairs);
   const tierOf = new Map(profiles.contacts.map((c) => [c.sender, c.tier] as const));
   const multiChannel = profiles.byChannel.length > 1;
@@ -206,6 +249,7 @@ export function situationalRules(pairs: HistoryPair[], profiles: ContactProfiles
   }
 
   const seen = new Set<string>();
+  const suppressed: string[] = [];
   const found: Array<{ rule: CandidateRule; weight: number }> = [];
   for (const seg of segments.map((g, i) => ({ g, i })).sort((a, b) => b.g.depth - a.g.depth || a.i - b.i).map(({ g }) => g)) {
     const signature = seg.pairs.map((p) => p.id).sort().join('|');
@@ -219,6 +263,30 @@ export function situationalRules(pairs: HistoryPair[], profiles: ContactProfiles
     const greetDiffers = Math.abs(greetGap) >= 0.3;
     const signDiffers = Math.abs(signGap) >= 0.3;
     if (!wordsDiffer && !greetDiffers && !signDiffers) continue;
+
+    // Guardrail: a generalized rule needs breadth (replies, contacts, no dominant contact) ...
+    const what = wordsDiffer ? `${wordGap > 0 ? 'longer' : 'shorter'} replies` : greetDiffers ? (greetGap > 0 ? 'more greetings' : 'fewer greetings') : signGap > 0 ? 'more sign-offs' : 'fewer sign-offs';
+    const held = (why: string): void => {
+      suppressed.push(`${seg.label} (${st.count} replies across ${st.distinctContacts} contact${st.distinctContacts === 1 ? '' : 's'}; top contact ${pctText(st.topContactShare)}) — ${what} but ${why}; handled per-contact instead.`);
+    };
+    const issue = sliceGateIssue(st, gate);
+    if (issue) {
+      held(`${issue}, too thin or concentrated to generalize`);
+      continue;
+    }
+    // ... and the pattern must hold per person, not just on average: each contact weighs the same, whatever their volume.
+    const direction: 1 | -1 = (wordsDiffer ? wordGap : greetDiffers ? greetGap : signGap) > 0 ? 1 : -1;
+    const metric = wordsDiffer
+      ? (g: HistoryPair[]): number => median(g.map((p) => words(p.reply)))
+      : greetDiffers
+        ? (g: HistoryPair[]): number => g.filter((p) => GREETING.test(p.reply.trim())).length / g.length
+        : (g: HistoryPair[]): number => g.filter((p) => SIGN_OFF.test(p.reply.trim())).length / g.length;
+    const baseline = wordsDiffer ? overall.medianWords : greetDiffers ? overall.greetingRate : overall.signOffRate;
+    const ag = contactAgreement(seg.pairs, direction, metric, baseline);
+    if (ag.agree < ag.of * gate.minContactAgreement) {
+      held(`only ${ag.agree} of ${ag.of} contacts individually show it (need ${pctText(gate.minContactAgreement)}), so it is likely a person or topic effect, not a pattern of the situation`);
+      continue;
+    }
 
     const replies = seg.pairs.map((p) => p.reply.trim());
     const clauses: string[] = [];
@@ -252,7 +320,7 @@ export function situationalRules(pairs: HistoryPair[], profiles: ContactProfiles
       },
     });
   }
-  return found.sort((a, b) => b.weight - a.weight || a.rule.id.localeCompare(b.rule.id)).slice(0, opts.max ?? 6).map((f) => f.rule);
+  return { rules: found.sort((a, b) => b.weight - a.weight || a.rule.id.localeCompare(b.rule.id)).slice(0, opts.max ?? 6).map((f) => f.rule), suppressed };
 }
 
 /**
@@ -295,8 +363,11 @@ export function analyzeHistory(pairs: HistoryPair[], opts: AnalyzeOptions = {}):
 
   const profiles = buildContactProfiles(pairs, { buckets });
   const { contacts, ...rest } = profiles;
-  const context: ContextBreakdown = { ...rest, contacts: contacts.length };
-  const contextRules = total < minPairs ? [] : situationalRules(pairs, profiles, { minSegment: opts.minSegment ?? 5 });
+  const gate = sliceGateFrom(opts);
+  const context: ContextBreakdown = { ...rest, contacts: contacts.length, gate };
+  const situational = total < minPairs ? { rules: [], suppressed: [] } : situationalAnalysis(pairs, profiles, { minSegment: opts.minSegment ?? 5, ...gate });
+  const contextRules = situational.rules;
+  const suppressedSlices = situational.suppressed;
 
   const cell = new Map<string, HistoryPair[]>();
   const labels = new Map<string, string>([...buckets.map((b) => [b.id, b.label] as [string, string]), [OTHER_BUCKET.id, OTHER_BUCKET.label]]);
@@ -331,6 +402,7 @@ export function analyzeHistory(pairs: HistoryPair[], opts: AnalyzeOptions = {}):
     voice,
     rules,
     contextRules,
+    suppressedSlices,
     context,
     intents,
     clusters,
@@ -344,23 +416,28 @@ function evenly<T>(items: T[], n: number): T[] {
   return Array.from({ length: n }, (_, i) => items[Math.floor((i * items.length) / n)]!);
 }
 
+/** " (3 contacts — person-specific, not generalized)" next to the reply count: why a small or one-person slice is not a global rule. */
+const contactsNote = (c: StyleSlice, gate: SliceGate): string => {
+  const n = c.distinctContacts;
+  return ` (${n} contact${n === 1 ? '' : 's'}${sliceGateIssue(c, gate) ? ' — person-specific, not generalized' : ''})`;
+};
 const pc = (rate: number): string => `${Math.round(rate * 100)}%`;
-const sliceLine = (label: string, c: StyleSlice, extra = ''): string =>
-  `  ${label}: ${c.count} repl${c.count === 1 ? 'y' : 'ies'}${extra}, median ${c.medianWords} words (90th pct ${c.p90Words}), greeting ${pc(c.greetingRate)}, sign-off ${pc(c.signOffRate)}, emoji ${pc(c.emojiRate)}, lowercase ${pc(c.lowercaseRate)}${c.medianReplyMins !== undefined ? `, replies in ~${c.medianReplyMins} min` : ''}`;
+const sliceLine = (label: string, c: StyleSlice, extra = '', gate?: SliceGate): string =>
+  `  ${label}: ${c.count} repl${c.count === 1 ? 'y' : 'ies'}${gate ? contactsNote(c, gate) : ''}${extra}, median ${c.medianWords} words (90th pct ${c.p90Words}), greeting ${pc(c.greetingRate)}, sign-off ${pc(c.signOffRate)}, emoji ${pc(c.emojiRate)}, lowercase ${pc(c.lowercaseRate)}${c.medianReplyMins !== undefined ? `, replies in ~${c.medianReplyMins} min` : ''}`;
 
 /** The situational breakdown: who, DM vs. group, channel, conversation rhythm. One flat average hides all of this. */
 export function formatContext(c: ContextBreakdown): string[] {
   if (!c.total) return [];
   const lines: string[] = ['', 'Your voice by situation (a single average hides this):'];
   lines.push('  By closeness (from how often you actually talk):');
-  for (const t of c.byTier.filter((t) => t.count)) lines.push(sliceLine(`  ${t.tier}`, t, ` from ${t.contacts} contact${t.contacts === 1 ? '' : 's'}`));
+  for (const t of c.byTier.filter((t) => t.count)) lines.push(sliceLine(`  ${t.tier}`, t, '', c.gate));
   if (c.byChatKind.length) {
     lines.push('  DM vs. group chat:');
-    for (const k of c.byChatKind) lines.push(sliceLine(`  ${k.kind === 'dm' ? 'DM' : 'group chat'}`, k));
+    for (const k of c.byChatKind) lines.push(sliceLine(`  ${k.kind === 'dm' ? 'DM' : 'group chat'}`, k, '', c.gate));
     if (c.known.chatKind < c.total) lines.push(`    (${c.total - c.known.chatKind} older pair(s) do not say whether they were group chats.)`);
   } else lines.push('  DM vs. group chat: unknown. Pairs from extractPairsFromMessages carry it; older ones do not.');
   lines.push('  By channel:');
-  for (const ch of c.byChannel) lines.push(sliceLine(`  ${channelName(ch.channel)}`, ch, ch.replyRate !== undefined ? `, you answer ${pc(ch.replyRate)} of what arrives` : ''));
+  for (const ch of c.byChannel) lines.push(sliceLine(`  ${channelName(ch.channel)}`, ch, ch.replyRate !== undefined ? `, you answer ${pc(ch.replyRate)} of what arrives` : '', c.gate));
   if (c.byRhythm.length) {
     lines.push('  By conversation rhythm (time since the previous message in the thread):');
     for (const r of c.byRhythm) lines.push(sliceLine(`  ${RHYTHM_LABELS[r.rhythm]} (${r.rhythm === 'live' ? '< 10 min' : r.rhythm === 'cold' ? '> 24 h' : 'same day'})`, r));
@@ -398,6 +475,10 @@ export function formatAnalysis(a: HistoryAnalysis): string[] {
     for (const r of [...a.rules, ...a.contextRules]) lines.push(`  [${r.layer}] ${r.rule}  (${r.support.count}/${r.support.of})`);
   } else {
     lines.push('No candidate rules: nothing was true of enough replies.');
+  }
+  if (a.suppressedSlices?.length) {
+    lines.push('', 'Not generalized (differs from your overall style, but too thin, too concentrated, or only a few contacts agree):');
+    for (const note of a.suppressedSlices) lines.push(`  ${note}`);
   }
   for (const note of a.notes) lines.push(note);
   return lines;
@@ -531,6 +612,8 @@ export async function synthesizeHistory(
     topContactShares: analysis.topContacts.slice(0, 5).map((c, i) => ({ contact: `contact ${i + 1}`, count: c.count })),
     voice: analysis.voice,
     candidateRules: [...analysis.rules, ...analysis.contextRules].map(({ id, layer, rule, support }) => ({ id, layer, rule, support })),
+    // Differences that were deliberately NOT generalized (confounded by one or two people). Do not turn these into rules.
+    notGeneralized: analysis.suppressedSlices,
     // Situational slices, anonymized: tiers are counts of contacts, never names.
     situations: {
       byCloseness: analysis.context.byTier.filter((t) => t.count),

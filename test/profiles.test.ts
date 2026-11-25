@@ -20,6 +20,7 @@ import {
   normalizePair,
   rhythmFromGap,
   seedHistory,
+  situationalAnalysis,
   situationalRules,
   type HistoryInput,
   type HistoryMessage,
@@ -249,7 +250,7 @@ describe('buildContactProfiles', () => {
   it('computes exact per-contact style', () => {
     const sam = p.contacts.find((c) => c.sender === 'Sam Rivera')!;
     expect(sam).toMatchObject({ channels: ['whatsapp'], dmCount: 10, groupCount: 0, liveShare: 1 });
-    expect(sam.style).toEqual({ count: 10, medianWords: 6, p90Words: 6, greetingRate: 0, signOffRate: 0, emojiRate: 0, exclamationRate: 0, lowercaseRate: 1, medianReplyMins: 1 });
+    expect(sam.style).toEqual({ count: 10, medianWords: 6, p90Words: 6, greetingRate: 0, signOffRate: 0, emojiRate: 0, exclamationRate: 0, lowercaseRate: 1, medianReplyMins: 1, distinctContacts: 1, topContactShare: 1 });
     expect(Object.keys(sam.byRhythm)).toEqual(['live']);
     const alex = p.contacts.find((c) => c.sender === 'Alex Chen')!;
     expect(alex.style).toMatchObject({ count: 8, medianWords: 14, greetingRate: 1, signOffRate: 1, lowercaseRate: 0, medianReplyMins: 90 });
@@ -305,10 +306,13 @@ describe('reply rates from silence', () => {
   });
 });
 
+// The tiny fixture above has 1-4 contacts per situation; these thresholds switch the breadth guardrails off so the rule mechanics can be tested on it.
+const RELAXED = { minSlicePairs: 5, minDistinctContacts: 1, maxTopContactShare: 1 };
+
 describe('situationalRules', () => {
   it('emits context rules only where a situation really differs, with exact support', () => {
     const pairs = history();
-    const rules = situationalRules(pairs, buildContactProfiles(pairs));
+    const rules = situationalRules(pairs, buildContactProfiles(pairs), RELAXED);
     expect(rules.every((r) => r.layer === 'context')).toBe(true);
     const byText = (re: RegExp) => rules.find((r) => re.test(r.rule));
     const inner = byText(/inner-circle WhatsApp DMs/)!;
@@ -332,7 +336,7 @@ describe('situationalRules', () => {
       isGroup: i % 4 === 0,
       gapSincePreviousMs: (i % 3) * 20 * HOUR,
     }));
-    expect(situationalRules(flat, buildContactProfiles(flat))).toEqual([]);
+    expect(situationalRules(flat, buildContactProfiles(flat), RELAXED)).toEqual([]);
     const small = history().slice(0, 4);
     expect(analyzeHistory(small).contextRules).toEqual([]); // below minPairs
   });
@@ -454,16 +458,16 @@ describe('seed noise filtering', () => {
 
 describe('mine: situational breakdown', () => {
   it('shows closeness, DM vs. group, channel and rhythm, plus context rules, in the report', () => {
-    const lines = formatAnalysis(analyzeHistory(history())).join('\n');
+    const lines = formatAnalysis(analyzeHistory(history(), RELAXED)).join('\n');
     expect(lines).toContain('Your voice by situation');
-    expect(lines).toMatch(/inner-circle: 10 replies from 1 contact, median 6 words \(90th pct 6\), greeting 0%, sign-off 0%/);
-    expect(lines).toMatch(/regular: 8 replies from 1 contact, median 14 words/);
-    expect(lines).toMatch(/occasional: 7 replies from 2 contacts, median 30 words/);
-    expect(lines).toMatch(/DM: 22 replies, median 14 words/);
-    expect(lines).toMatch(/group chat: 4 replies, median 30 words/);
-    expect(lines).toMatch(/WhatsApp: 11 replies, median 6 words/);
-    expect(lines).toMatch(/SMS: 7 replies, median 30 words/);
-    expect(lines).toMatch(/Email: 8 replies, median 14 words.*greeting 100%, sign-off 100%/);
+    expect(lines).toMatch(/inner-circle: 10 replies \(1 contact(?: — person-specific, not generalized)?\), median 6 words \(90th pct 6\), greeting 0%, sign-off 0%/);
+    expect(lines).toMatch(/regular: 8 replies \(1 contact(?: — [^)]*)?\), median 14 words/);
+    expect(lines).toMatch(/occasional: 7 replies \(2 contacts(?: — [^)]*)?\), median 30 words/);
+    expect(lines).toMatch(/DM: 22 replies \(3 contacts\), median 14 words/);
+    expect(lines).toMatch(/group chat: 4 replies \(2 contacts — person-specific, not generalized\), median 30 words/);
+    expect(lines).toMatch(/WhatsApp: 11 replies \(\d contacts?(?: — [^)]*)?\), median 6 words/);
+    expect(lines).toMatch(/SMS: 7 replies \(2 contacts(?: — [^)]*)?\), median 30 words/);
+    expect(lines).toMatch(/Email: 8 replies \(1 contact(?: — [^)]*)?\), median 14 words.*greeting 100%, sign-off 100%/);
     expect(lines).toMatch(/live back-and-forth \(< 10 min\): 10 replies/);
     expect(lines).toMatch(/cold restart \(> 24 h\): 7 replies/);
     expect(lines).toContain('[context] For inner-circle WhatsApp DMs, keep replies ~6 words, no greeting, no sign-off.  (10/10)');
@@ -484,7 +488,7 @@ describe('mine: situational breakdown', () => {
     await store.writeText(store.pairsFile, pairs.map((p) => JSON.stringify(p)).join('\n') + '\n');
     const smart = new FakeProvider([JSON.stringify({ blueprints: [], lessons: [{ rule: 'For inner-circle WhatsApp DMs, keep replies ~6 words.', layer: 'context' }] })]);
     const engine = new Engine({ store, providers: { smart } });
-    const report = await mineHistory(engine, { ai: true, provider: 'smart', sampleSize: 10 });
+    const report = await mineHistory(engine, { ai: true, provider: 'smart', sampleSize: 10, ...RELAXED });
     expect(report.ai!.lessons[0]).toMatchObject({ layer: 'context' });
 
     const sent = smart.calls[0]!.messages[0]!.content;
@@ -497,5 +501,100 @@ describe('mine: situational breakdown', () => {
     expect(sent).toMatch(/closeness tier.*DM vs\. group.*conversation rhythm/s);
     for (const name of ['Sam Rivera', 'Alex Chen', 'Dev Kapoor', 'Priya Patel', 'Jordan Lee', 'private earlier message']) expect(sent).not.toContain(name);
     expect(await readFile(store.pairsFile, 'utf8')).toContain('priorMessages'); // stored locally, just never sent
+  });
+});
+
+// ---- Confounding & contact-diversity guardrails ----
+
+describe('contact-diversity and sender-confounding guardrails', () => {
+  const SHORT = 'ok sounds good'; // 3 words: your everyday baseline
+  const LONG = phrase(16);
+
+  /** A busy baseline channel: 8 contacts x 8 short replies (all `regular`), so the overall median is 3 words. */
+  const baseline = (): HistoryPair[] => {
+    seq = 0;
+    const out: HistoryPair[] = [];
+    for (let c = 0; c < 8; c++) for (let i = 0; i < 8; i++) out.push(pair({ sender: `Wa Contact ${c}`, channel: 'whatsapp', reply: SHORT }));
+    return out;
+  };
+  const rule = <T extends { id: string }>(rules: T[], channel: string): T | undefined => rules.find((r) => r.id === `context-channel-${channel}`);
+  const NO_GATE = { minSlicePairs: 5, minDistinctContacts: 1, maxTopContactShare: 1 };
+
+  it('does not turn a channel dominated by 1-2 people into a channel rule, and says why', () => {
+    // 36 iMessage replies: one person has 25 of them, two others have 6 and 5. All long.
+    const pairs = baseline();
+    for (const [who, n] of [['Chatty Person', 25], ['Second Person', 6], ['Third Person', 5]] as const)
+      for (let i = 0; i < n; i++) pairs.push(pair({ sender: who, channel: 'imessage', reply: LONG }));
+
+    const profiles = buildContactProfiles(pairs);
+    const im = profiles.byChannel.find((c) => c.channel === 'imessage')!;
+    expect(im).toMatchObject({ count: 36, distinctContacts: 3, topContactShare: 0.694 });
+
+    const { rules, suppressed } = situationalAnalysis(pairs, profiles);
+    expect(rule(rules, 'imessage')).toBeUndefined();
+    expect(rules.some((r) => /iMessage/.test(r.rule))).toBe(false);
+    expect(suppressed.join('\n')).toMatch(/iMessage messages \(36 replies across 3 contacts; top contact 69%\) — longer replies but only 3 contacts \(need 5\).*handled per-contact instead/);
+
+    // Proof it is the guardrail: with it off, the old behaviour (a fake channel rule) comes back.
+    expect(rule(situationalAnalysis(pairs, profiles, NO_GATE).rules, 'imessage')!.rule).toContain('use fuller sentences');
+
+    // ...and it shows in the `rufus mine` report, right next to the reply count.
+    const report = formatAnalysis(analyzeHistory(pairs)).join('\n');
+    expect(report).toContain('iMessage: 36 replies (3 contacts — person-specific, not generalized)');
+    expect(report).toContain('WhatsApp: 64 replies (8 contacts)');
+    expect(report).toContain('Not generalized');
+    expect(analyzeHistory(pairs).suppressedSlices.some((n) => /iMessage/.test(n))).toBe(true);
+  });
+
+  it('suppresses a diverse-looking channel when only a minority of its contacts individually write longer', () => {
+    // 6 contacts, no one above 20%: 3 long writers (7 each) and 3 who write like your baseline (5 each).
+    // The slice median is long, but weighting each contact equally only 3 of 6 (50%) deviate.
+    const pairs = baseline();
+    for (let c = 0; c < 6; c++) for (let i = 0; i < (c < 3 ? 7 : 5); i++) pairs.push(pair({ sender: `Sms Contact ${c}`, channel: 'sms', reply: c < 3 ? LONG : SHORT }));
+    const profiles = buildContactProfiles(pairs);
+    expect(profiles.byChannel.find((c) => c.channel === 'sms')).toMatchObject({ count: 36, distinctContacts: 6 });
+    const { rules, suppressed } = situationalAnalysis(pairs, profiles);
+    expect(rule(rules, 'sms')).toBeUndefined();
+    expect(suppressed.join('\n')).toMatch(/SMS messages \(36 replies across 6 contacts; top contact 19%\).*only 3 of 6 contacts individually show it/);
+  });
+
+  it('does emit a channel rule when 5+ contacts each individually write longer', () => {
+    const pairs = baseline();
+    for (let c = 0; c < 6; c++) for (let i = 0; i < 6; i++) pairs.push(pair({ sender: `Sms Contact ${c}`, channel: 'sms', reply: c < 5 ? LONG : SHORT })); // 5 of 6 (83%) write long
+    const profiles = buildContactProfiles(pairs);
+    const { rules, suppressed } = situationalAnalysis(pairs, profiles);
+    const sms = rule(rules, 'sms')!;
+    expect(sms.rule).toBe('For SMS messages, use fuller sentences (~16 words), no greeting.');
+    expect(sms.support).toEqual({ count: 30, of: 36 });
+    expect(suppressed.some((n) => /SMS/.test(n))).toBe(false);
+    expect(formatAnalysis(analyzeHistory(pairs)).join('\n')).toContain('SMS: 36 replies (6 contacts)');
+  });
+
+  it('thresholds come from config (minSlicePairs / minDistinctContacts / maxTopContactShare)', () => {
+    const pairs = baseline();
+    for (let c = 0; c < 4; c++) for (let i = 0; i < 6; i++) pairs.push(pair({ sender: `Sms Contact ${c}`, channel: 'sms', reply: LONG })); // 24 replies, 4 contacts, 25% each
+    expect(rule(analyzeHistory(pairs).contextRules, 'sms')).toBeUndefined(); // default: 30 replies, 5 contacts
+    expect(rule(analyzeHistory(pairs, { minSlicePairs: 20, minDistinctContacts: 4 }).contextRules, 'sms')).toBeDefined();
+    expect(rule(analyzeHistory(pairs, { minSlicePairs: 20, minDistinctContacts: 4, maxTopContactShare: 0.2 }).contextRules, 'sms')).toBeUndefined();
+  });
+
+  it('buildSituationalContext still gives a known contact their own style when their channel rule was suppressed', () => {
+    const pairs = baseline();
+    for (const [who, n] of [['Chatty Person', 25], ['Second Person', 6], ['Third Person', 5]] as const)
+      for (let i = 0; i < n; i++) pairs.push(pair({ sender: who, channel: 'imessage', reply: LONG, isGroup: false }));
+    expect(rule(situationalAnalysis(pairs, buildContactProfiles(pairs)).rules, 'imessage')).toBeUndefined();
+
+    const ctx = buildSituationalContext({ channel: 'imessage', sender: 'Chatty Person', isGroup: false, incoming: 'hey, are you free later?' }, pairs);
+    expect(ctx.known).toBe(true);
+    expect(ctx.styleBasis).toBe('contact');
+    expect(ctx.contactPairs).toBe(25);
+    expect(ctx.style).toMatchObject({ medianWords: 16, count: 25, distinctContacts: 1 });
+    expect(ctx.voiceHint).toContain('median 16 words');
+    expect(ctx.examples[0]!.because).toContain('same sender');
+
+    // A different person on the same channel gets their own slice too, not the dominant person's.
+    const other = buildSituationalContext({ channel: 'imessage', sender: 'Wa Contact 1', isGroup: false, incoming: 'hey' }, pairs);
+    expect(other.styleBasis).toBe('contact');
+    expect(other.style!.medianWords).toBe(3);
   });
 });
