@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import type { Engine } from '../engine/engine';
 import type { FileStore } from '../store';
 import type { ReplayCase } from '../learning/cases';
-import { addNoise, emptyNoise, pairNoiseKind, type NoiseCounts } from './noise';
+import { addNoise, emptyNoise, filterNoise, type NoiseCounts } from './noise';
 import { normalizePair, type HistoryPair, type InvalidRecord, type PriorMessage } from './types';
 
 /** Epoch, for pairs with no timestamps: history sorts before anything a live run saves. */
@@ -159,11 +159,16 @@ export async function seedHistory(engine: Engine, file: string, opts: SeedOption
   records.forEach((raw, index) => {
     const r = normalizePair(raw);
     if ('error' in r) return void invalid.push({ index, reason: r.error });
-    const noise = opts.includeNoise ? undefined : pairNoiseKind(r.pair);
-    if (noise) return void addNoise(noiseSkipped, noise);
-    if (seenInFile.has(r.pair.id)) return void duplicatesInFile++;
-    seenInFile.add(r.pair.id);
-    pairs.push(r.pair);
+    // HTML bodies become plain text; placeholders, passcodes and tapbacks are skipped (the latter two unless includeNoise).
+    const filtered = filterNoise([r.pair], { includeNoise: opts.includeNoise });
+    if (!filtered.kept.length) {
+      for (const kind of ['otp', 'tapback', 'placeholder'] as const) for (let i = 0; i < (filtered.noise[kind] ?? 0); i++) addNoise(noiseSkipped, kind);
+      return;
+    }
+    const pair = filtered.kept[0]!;
+    if (seenInFile.has(pair.id)) return void duplicatesInFile++;
+    seenInFile.add(pair.id);
+    pairs.push(pair);
   });
   if (opts.limit !== undefined) pairs = pairs.slice(-Math.floor(opts.limit));
 
@@ -207,8 +212,9 @@ export function formatSeed(r: SeedReport): string[] {
     `  read ${r.read}, invalid ${r.invalid.length}, repeated in file ${r.duplicatesInFile}, already seeded ${r.alreadySeeded}`,
   ];
   if (r.noiseSkipped.total) {
-    const { otp, tapback } = r.noiseSkipped;
-    lines.push(`  skipped ${r.noiseSkipped.total} noise item(s): ${otp} one-time passcode(s) / verification code(s), ${tapback} tapback reaction(s). Add --include-noise to keep them.`);
+    const { otp, tapback, placeholder } = r.noiseSkipped;
+    const media = placeholder ? `, ${placeholder} media sync placeholder(s)` : '';
+    lines.push(`  skipped ${r.noiseSkipped.total} noise item(s): ${otp} one-time passcode(s) / verification code(s), ${tapback} tapback reaction(s)${media}. Add --include-noise to keep them.`);
   }
   for (const bad of r.invalid.slice(0, 5)) lines.push(`  skipped record ${bad.index + 1}: ${bad.reason}`);
   if (r.invalid.length > 5) lines.push(`  ...and ${r.invalid.length - 5} more skipped.`);

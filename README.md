@@ -16,6 +16,8 @@ A small, domain-agnostic **AI + Code + Human** chief-of-staff engine, in five pi
               └────────────── every human answer teaches the next run ──────────┘
 ```
 
+Around all five pieces runs **[one Master Loop](#the-one-master-loop-v11)**: `Sense → Plan → Execute → Verify → Record`, steered by your **Anchor** (goals, projects, boundaries, today's schedule) and gated by **Earned Trust** (every action works from Day 1, you check it until it has earned autonomy).
+
 ### Run 100% on Google Gemini
 
 No Claude needed. Put a key in your environment (`export GEMINI_API_KEY=...`; it is sent in the `x-goog-api-key` header, never in a URL) and use this `config.json` in your workspace:
@@ -269,7 +271,7 @@ interface HistoryPair {
 
 Have a chronological message export instead? `extractPairsFromMessages(messages, { selfIds, maxGapMs })` turns `{ id, threadId, channel, sender, isFromMe, text, timestamp }` into pairs: bursts from one sender merge into one turn, empty and media-only messages are ignored, and a reply only counts if it follows within `maxGapMs` (default 24h). Write the result as JSONL (one pair per line) or a JSON array.
 
-Extraction also records the **situation** of each pair (group or DM, the previous 4 turns, the gap since the previous turn, your reply delay, hour and weekday), **skips noise** (one-time passcodes / verification codes and bare tapback echoes such as `Liked "..."`; pass `includeNoise: true` to keep them), and counts the **silence**: `extractHistoryFromMessages(messages, opts)` returns `{ pairs, noise, ignored }`, where `ignored` says per channel and sender how many incoming turns you answered and how many you left alone.
+Extraction also records the **situation** of each pair (group or DM, the previous 4 turns, the gap since the previous turn, your reply delay, hour and weekday), **skips noise** (one-time passcodes / verification codes and bare tapback echoes such as `Liked "..."`; pass `includeNoise: true` to keep them), **cleans bridge text** (`cleanMessageText`: HTML bodies from Beeper/Matrix such as `<p>`, `<br>`, `<strong>`, `<ul><li>` become plain text with newlines, entities like `&quot;` `&amp;` `&#39;` are decoded, and sync placeholders such as `Old photo. Media will be requested from your phone automatically overnight.` are dropped and counted as `noise.placeholder`), and counts the **silence**: `extractHistoryFromMessages(messages, opts)` returns `{ pairs, noise, ignored }`, where `ignored` says per channel and sender how many incoming turns you answered and how many you left alone.
 
 ```sh
 # 1. Load pairs as replay cases for a flow (and keep them in history/pairs.jsonl)
@@ -294,7 +296,7 @@ rufus propose flow:reply-drafter "Keep replies to at most 12 words." --layer cod
 { "mine": { "buckets": [{ "id": "invoices", "label": "Invoice questions", "pattern": "invoice|receipt|refund" }], "minPairs": 10, "invariantMinShare": 0.98, "minExceptions": 5, "minLift": 2, "minSlicePairs": 30, "minDistinctContacts": 5, "maxTopContactShare": 0.4, "provider": "smart" } }
 ```
 
-`seed` also skips noise pairs (2FA / OTP codes, tapback echoes) and reports how many it skipped; `--include-noise` keeps them. A seeded case's `input` also carries `isGroup`, `gapSincePreviousMs` and `priorMessages` when the pair has them.
+`seed` also cleans HTML in pair text and skips noise pairs (2FA / OTP codes, tapback echoes, media sync placeholders; `filterNoise(pairs)` does the same in code) and reports how many it skipped; `--include-noise` keeps them. A seeded case's `input` also carries `isGroup`, `gapSincePreviousMs` and `priorMessages` when the pair has them.
 
 **Context, not one average.** A single global "median 8 words" flattens what matters: who you are talking to, how close you are, DM or group, which channel, and whether the thread is live or cold. `buildContactProfiles(pairs)` computes, from real history and with no AI, a **closeness tier** per contact (`inner-circle` >= 20 pairs, or >= 10 and mostly live; `regular` 5-19; `occasional` 2-4; `new` 1) and the same exact style numbers (`count`, `medianWords`, `p90Words`, `greetingRate`, `signOffRate`, `emojiRate`, `exclamationRate`, `lowercaseRate`, `medianReplyMins`) per contact, tier, DM vs. group, channel, rhythm (`live` < 10 min, `same-day`, `cold` > 24h) and channel x intent. `mine` prints that breakdown, and emits `[context]` candidate rules (`For inner-circle WhatsApp DMs, keep replies ~6 words, no greeting.`) only where a situation differs meaningfully from your overall style.
 
@@ -574,6 +576,86 @@ plan ──▶ execute ──▶ verify ──ok──▶ done
 
 The result is `{ status: 'passed' | 'human', route, goal, plan, result | answer, replans, trail }`; `trail` lists every pass (route, outcome, reason). Use `defineStagedFlow(meta, spec)` for a flow that is one unit, or `ctx.staged(name, spec)` inside any `defineFlow`. Every stage outcome is saved with the run, so a resume (or a human's answer) never plans, calls a model or verifies twice. In `run.spectrum`, plan and verify count as code, execute counts as its route, and the helpers inside a stage are not counted a second time. Replay and case capture work on the `ctx.ai` steps inside a stage like any other (put a `verify` on the step for the replay gate; the stage `verify` checks the goal). Existing flows are untouched: `ctx.code`, `ctx.ai`, `ctx.escalate` and `ctx.human` behave exactly as before.
 
+## The One Master Loop (v11)
+
+Everything Rufus does on its own goes through one small, mostly-code loop:
+
+```
+ Sense ──▶ Plan ──▶ Execute ──▶ Verify ──▶ Record
+ (code)    (code + AI?)  (code + AI?)  │cross-check fail: re-plan, route up (bounded)
+   │                                   │trust "check" or external/money/login: wait for you
+   └ no signals: idle, $0              └trust "autonomous": done ──▶ commit
+```
+
+| Stage | Who | What happens |
+| --- | --- | --- |
+| **Sense** | code | Each `Sensor` reports what is new since its saved cursor (`loop-state.json`). The Anchor is loaded. Zero signals: `{ status: 'idle', cost: 0 }`, no model is called. A signal is never handled twice. |
+| **Plan** | code + optional AI | A `SignalHandler` turns the signal into a concrete `goal`, an `actionType` (`reply.chat`, `schedule.block`, ...) and a route chosen up front: `code`, `fast`, `smart` or `human`. It can pull facts (`ctx.facts(query)`) and past verdicts (`ctx.examples({ actionType })`) from the corpus for free. Genuinely unclear? `needsHumanPlan: true` pauses with the **draft plan** and a question. |
+| **Execute** | code + optional AI | The work, on the planned route only (`ctx.ai(prompt)` is counted on the run). A real-life step ("record the intro video") is `needsHumanExecute: true` with a clear `humanStep`. Side effects wait for `commit`. |
+| **Verify** | code, AI, human | 1) `crossCheck` (code checks AI, or AI checks code). A failure **re-plans** with the reason (`ctx.replan`), the route only moves up, at most `maxReplans` times. 2) **Earned Trust** + the Anchor's boundaries: `check` waits in `awaiting_human_verify` with the verified result; `autonomous` completes and commits. External sends, money and logins always wait for a yes. A `never` boundary blocks the action before it runs. |
+| **Record** | code | Every run is saved in `loop-runs/<id>.json`. `resolveHumanDecision(runId, { verdict, editedOutput?, note? })` updates trust, commits the accepted (or edited) output, and appends the verdict to `corpus/items.jsonl` (source `feedback`), so the very next plan can retrieve it. |
+
+```ts
+import { MasterLoop, inboxSensor, type SignalHandler } from './src';
+
+const reply: SignalHandler<{ text: string }> = {
+  id: 'reply',
+  match: { surface: 'chat', kind: 'message.received' },
+  plan: (signal, ctx) => ({
+    goal: `Answer ${signal.actor} with a concrete time`,
+    actionType: 'reply.chat',
+    route: ctx.replan ? ctx.replan.nextRoute : 'fast',
+    sensitivity: ['external'],              // sending is external: always asks first
+  }),
+  execute: async (plan, signal, ctx) => ({
+    text: await ctx.ai(`Reply to: ${signal.text}\nPast verdicts: ${ctx.examples({ actionType: 'reply.chat' }).map((h) => h.item.summary).join('\n')}`),
+  }),
+  crossCheck: (draft) => (/\d/.test(draft.text) ? { ok: true } : { ok: false, reason: 'no time in the reply' }),
+  commit: async (draft) => sendSomewhere(draft.text),
+};
+
+const loop = new MasterLoop({ dir: workspace, sensors: [inboxSensor(workspace)], handlers: [reply], providers: { fast, smart } });
+await loop.runOnce();                                             // Sense -> ... -> Record
+await loop.resolveHumanDecision(runId, { verdict: 'accept' });   // trust + commit + example
+```
+
+From the CLI, drop sensors and handlers into `flows/*.loop.ts` (any exported `Sensor` or `SignalHandler`, or arrays of them). Built in: the `inbox` sensor (`<workspace>/inbox.jsonl`, one signal per line, so any script or webhook can feed the loop) and the all-code `schedule.block` handler (signal kind `schedule.request`; proposes a block, refuses overlaps, writes the Anchor once approved).
+
+```sh
+rufus signal anchor schedule.request "Gym" --data '{"range":"12:00-13:00","kind":"personal"}'
+rufus loop --once                # one pass; prints what ran, what waits on you, and the model-call cost
+rufus loop status                # runs waiting for you
+rufus decide <runId> accept      # or: edit [note] --output '<your version>' | reject [note]
+rufus loop                       # keep passing every 60s (--interval 5m)
+```
+
+### The Anchor: what matters right now
+
+`<workspace>/anchor.json` is small and domain-agnostic: `goals` (`priority` high/medium/low, `horizon` today/week/month, `active`), `projects` (`active`/`paused`/`done`, `nextStep`, `path`), `boundaries` (`require_approval`, `protect_time`, `never`, with optional `appliesTo` action types or sensitivities) and today's `schedule` (`HH:MM` blocks of kind `focus`, `meeting`, `break`, `scroll`, `personal` or `protected`, each `planned`/`done`/`skipped`). Planning another day archives the current one in `pastSchedules`, never losing it.
+
+```sh
+rufus anchor init                                   # default boundaries: external sends, money and logins need your yes
+rufus anchor goal Ship the beta --priority high --horizon week
+rufus anchor block 09:00-11:00 protected Deep work  # overlaps are refused; a protected block always wins
+rufus anchor                                        # the summary
+```
+
+In code: `loadAnchor`, `saveAnchor`, `upsertGoal`, `upsertScheduleBlock` (throws `ScheduleOverlapError` naming the conflicts; `allowOverlap` for ordinary blocks), `checkBoundaries(anchor, actionType, sensitivity)` and `formatAnchorSummary`. Approvals let Rufus do external sends, payments and logins once you say yes, never silently.
+
+### Earned Trust: works on Day 1, autonomous once earned
+
+`<workspace>/trust.json` tracks each `actionType`: `autonomy` (`check` or `autonomous`, always starting at `check`), `accepted`, `edited`, `rejected`, `consecutiveClean`, `promotionThreshold` (default 10) and `promotionSuggested`.
+
+- **accept** adds to the clean streak. At the threshold Rufus asks: *"You've approved `schedule.block` cleanly 10 times in a row - want me to stop checking with you?"* It only asks; you promote.
+- **edit** resets the streak and withdraws the suggestion.
+- **reject** does the same, and an `autonomous` action drops straight back to `check`.
+
+```sh
+rufus trust                          # one line per action type, plus any promotion question
+rufus trust promote schedule.block   # stop checking with me
+rufus trust demote schedule.block    # check with me again
+```
+
 ## Learning guardrails: no monkey-patching
 
 Every correction is tempting to append as one more line in the prompt. Piled up, those lines contradict each other and the model ignores them. Four guardrails keep learning honest:
@@ -597,7 +679,7 @@ pnpm rufus answer <cardId> 1    # resume and finish
 pnpm rufus lessons
 ```
 
-Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `propose <scope> <rule...>`, `demo`, `tick`, `watch`, `emit`, `replay`, `compare <flowId>`, `seed`, `mine`, `collect <source> <path>`, `context [query]`, `chat <message...>`.
+Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `propose <scope> <rule...>`, `demo`, `tick`, `watch`, `emit`, `replay`, `compare <flowId>`, `seed`, `mine`, `collect <source> <path>`, `context [query]`, `chat <message...>`, and for the Master Loop `anchor`, `trust`, `signal`, `loop`, `decide`.
 
 ### Your own flows and your own data
 
@@ -675,10 +757,11 @@ defineFlow({ id: 'inbox', name: 'Inbox', description: '...', provider: 'claude' 
 
 ```
 src/providers/  native providers (Google Gemini over fetch)
-src/engine/     defineFlow, defineStagedFlow, Engine, step runner, `stages` (plan -> execute -> verify with re-plan escalation), AI verify loop, providers, spectrum (code / fast / smart / human)
+src/anchor/     the Anchor: goals, projects, boundaries, schedule (overlap detection)
+src/engine/     defineFlow, defineStagedFlow, Engine, step runner, `stages` (plan -> execute -> verify with re-plan escalation), AI verify loop, providers, spectrum (code / fast / smart / human), `loop` (the Master Loop) + built-ins, `trust` (Earned Trust)
 src/store/      atomic JSON file store (no native deps)
 src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay; compare (plain vs. assisted)
-src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`, `retrieveSimilarExamples`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `backtest` (strictly causal time-travel check), `ideals` (explicit lessons as constraints, drift), `mine` (voice, invariants, intents, recency, optional AI blueprints)
+src/history/    HistoryPair, message extraction, `noise` (passcodes, tapbacks, HTML and sync-placeholder cleanup), `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`, `retrieveSimilarExamples`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `backtest` (strictly causal time-travel check), `ideals` (explicit lessons as constraints, drift), `mine` (voice, invariants, intents, recency, optional AI blueprints)
 src/corpus/     `CorpusItem`, `CorpusStore`, `SourceAdapter`s (files, browser, calendar, email, ai-prompts), recurrence, `buildCorpusSummary` / hybrid `queryCorpus`, `embeddings` (providers, `EmbeddingCache`)
 src/recency.ts  exponential and rank-based recency weights, shared by history and the corpus
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { addNoise, emptyNoise, noiseKind, type NoiseCounts } from './noise';
+import { addNoise, cleanMessageText, emptyNoise, isPlaceholderText, noiseKind, type NoiseCounts } from './noise';
 import type { HistoryPair, PriorMessage } from './types';
 
 /** One message from any chronological export. */
@@ -45,7 +45,7 @@ export interface ReplyHabit {
 
 export interface ExtractResult {
   pairs: HistoryPair[];
-  /** Messages skipped as automated codes or reaction echoes (always zero with `includeNoise`). */
+  /** Messages skipped as automated codes or reaction echoes (zero with `includeNoise`), plus media sync placeholders (always skipped). */
   noise: NoiseCounts;
   /** Per channel + sender: answered vs. unanswered incoming turns. Sorted by volume. */
   ignored: ReplyHabit[];
@@ -57,10 +57,12 @@ export const DEFAULT_BURST_GAP_MS = 10 * 60 * 1000;
 /** Placeholders chat exports leave where an image, sticker or file was. */
 const MEDIA_ONLY = /^\s*(?:[\[<(]\s*)?(?:image|photo|picture|video|audio|voice(?: message| note)?|sticker|gif|attachment|file|document|media|contact|location|live location)(?:\s+(?:omitted|attached|removed|sent))?(?:\s*[\]>)])?\s*$|^\s*<media omitted>\s*$|^\s*[￼\s]+$/i;
 
-/** Text worth learning from: non-empty and not just a media placeholder. */
+/**
+ * Text worth learning from: plain text (HTML bodies from Beeper/Matrix bridges are flattened and entities decoded), and
+ * not just a media or sync placeholder (`<image omitted>`, `Old photo. Media will be requested from your phone ...`).
+ */
 export function cleanText(text: unknown): string {
-  if (typeof text !== 'string') return '';
-  const t = text.replace(/\r\n?/g, '\n').trim();
+  const t = cleanMessageText(text);
   return !t || MEDIA_ONLY.test(t) ? '' : t;
 }
 
@@ -80,7 +82,8 @@ const clip = (t: string): string => (t.length > PRIOR_TEXT_MAX ? `${t.slice(0, P
 
 /**
  * Chronological messages -> `(incoming -> your reply)` pairs, plus what was skipped.
- *  - Empty and media-only messages are ignored; so are one-time passcodes and bare tapbacks (unless `includeNoise`).
+ *  - HTML bodies become plain text. Empty, media-only and sync-placeholder messages are ignored (placeholders are
+ *    counted as `noise.placeholder`); so are one-time passcodes and bare tapbacks (unless `includeNoise`).
  *  - A burst of consecutive messages from one sender becomes one turn (joined with newlines).
  *  - A pair is someone else's turn followed directly by one of yours, within `maxGapMs`.
  *  - Every pair carries its situation: group or DM, the last few turns, the gap since the previous turn, how fast you
@@ -123,7 +126,11 @@ export function extractHistoryFromMessages(messages: HistoryMessage[], opts: Ext
     const turns: Turn[] = [];
     for (const m of ordered) {
       const text = cleanText(m.text);
-      if (!text) continue;
+      if (!text) {
+        // Sync placeholders are counted (so a report can say how many there were); plain empties are not.
+        if (typeof m.text === 'string' && isPlaceholderText(m.text)) addNoise(noise, 'placeholder');
+        continue;
+      }
       if (!opts.includeNoise) {
         const kind = noiseKind(text);
         if (kind) {

@@ -7,6 +7,12 @@ import {
   FileStore,
   analyzeHistory,
   buildContactProfiles,
+  cleanMessageText,
+  cleanText,
+  decodeEntities,
+  filterNoise,
+  isPlaceholderText,
+  stripHtml,
   buildSituationalContext,
   closenessTier,
   defineFlow,
@@ -404,6 +410,78 @@ describe('buildSituationalContext', () => {
     await seedHistory(engine, file, { flowId: 'ctx' });
     const [c] = await engine.cases.forFlow('ctx');
     expect(c!.input).toMatchObject({ isGroup: false, gapSincePreviousMs: 2 * MIN, priorMessages: [{ text: 'ok' }] });
+  });
+});
+
+describe('chat text cleanup (Beeper / bridge noise)', () => {
+  it('turns HTML bodies into plain text with newlines, and decodes entities', () => {
+    expect(cleanMessageText('<p>Hey!</p><p>Are you <strong>free</strong> at 7?</p>')).toBe('Hey!\nAre you free at 7?');
+    expect(cleanMessageText('line one<br>line two<br/>line three<br />end')).toBe('line one\nline two\nline three\nend');
+    expect(cleanMessageText('<ul><li>milk</li><li>eggs</li></ul>')).toBe('milk\neggs');
+    expect(cleanMessageText('<a href="https://example.org">the link</a> &amp; more')).toBe('the link & more');
+    expect(cleanMessageText('He said &quot;hi&quot; &amp; I said &#39;yo&#39; &lt;3 &gt;_&lt;')).toBe('He said "hi" & I said \'yo\' <3 >_<');
+    expect(decodeEntities('&#x1F600; &#128512; &apos;&nbsp;&bogus;')).toBe('😀 😀 \' &bogus;');
+    // Matrix reply fallbacks quote someone else's message: dropped.
+    expect(cleanMessageText('<mx-reply><blockquote>Old message</blockquote></mx-reply>My answer')).toBe('My answer');
+  });
+
+  it('leaves ordinary text alone, including things that only look like tags', () => {
+    for (const t of ['I <3 you', 'a < b and c > d', '<I love you>', 'see you at 7', 'x <b y']) expect(stripHtml(t), t).toBe(t);
+    expect(cleanMessageText('  keep\r\nmy  spacing  ')).toBe('keep\nmy  spacing');
+    expect(cleanMessageText(42)).toBe('');
+  });
+
+  it('recognises Beeper/WhatsApp sync placeholders and drops them', () => {
+    for (const kind of ['photo', 'video', 'sticker', 'audio', 'file'])
+      expect(isPlaceholderText(`Old ${kind}. Media will be requested from your phone automatically overnight.`), kind).toBe(true);
+    expect(cleanMessageText('Old photo. Media will be requested from your phone automatically overnight.')).toBe('');
+    expect(cleanText('<p>Old video. Media will be requested from your phone automatically overnight.</p>')).toBe('');
+    for (const t of ['Old photo of us at the beach', 'my phone will request media overnight lol', 'Old friends are the best']) expect(isPlaceholderText(t), t).toBe(false);
+  });
+
+  it('extracts clean pairs: HTML flattened, placeholders skipped and counted', () => {
+    const r = extractHistoryFromMessages([
+      msg('1', 'Sam Rivera', 'Old photo. Media will be requested from your phone automatically overnight.', '2026-01-05T09:58:00Z'),
+      msg('2', 'Sam Rivera', '<p>are you <em>free</em> thursday?</p>', '2026-01-05T10:00:00Z'),
+      msg('3', 'me', 'yes &amp; friday too<br>3pm?', '2026-01-05T10:02:00Z'),
+      msg('4', 'me', 'Old sticker. Media will be requested from your phone automatically overnight.', '2026-01-05T10:03:00Z'),
+    ]);
+    expect(r.pairs).toHaveLength(1);
+    expect(r.pairs[0]).toMatchObject({ incoming: 'are you free thursday?', reply: 'yes & friday too\n3pm?' });
+    expect(r.noise).toEqual({ otp: 0, tapback: 0, placeholder: 2, total: 2 });
+  });
+
+  it('filterNoise cleans pair text and drops placeholders, codes and tapbacks', () => {
+    const pairs = [
+      { id: 'a', incoming: '<p>dinner?</p>', reply: 'yes &amp; bring wine' },
+      { id: 'b', incoming: 'Old audio. Media will be requested from your phone automatically overnight.', reply: 'ok' },
+      { id: 'c', incoming: 'Your verification code is 482913', reply: 'ok' },
+      { id: 'd', incoming: 'see you', reply: 'Liked "see you"' },
+    ];
+    const r = filterNoise(pairs);
+    expect(r.kept).toEqual([{ id: 'a', incoming: 'dinner?', reply: 'yes & bring wine' }]);
+    expect(r.noise).toEqual({ otp: 1, tapback: 1, placeholder: 1, total: 3 });
+    expect(filterNoise(pairs, { includeNoise: true }).kept.map((p) => p.id)).toEqual(['a', 'c', 'd']); // placeholders never teach
+  });
+
+  it('seed cleans HTML and skips placeholders, and says so', async () => {
+    const dir = await tempDir();
+    const engine = new Engine({ store: new FileStore(dir) });
+    engine.register(defineFlow({ id: 'reply', name: 'Reply', description: 'x', role: 'assistant' }, async () => 'x'));
+    const file = path.join(dir, 'h.jsonl');
+    await writeFile(
+      file,
+      [
+        { id: 'a', channel: 'beeper', sender: 'Sam Rivera', incoming: '<p>lunch&#63;</p>', reply: 'sure<br>noon' },
+        { id: 'b', channel: 'beeper', sender: 'Sam Rivera', incoming: 'Old photo. Media will be requested from your phone automatically overnight.', reply: 'nice' },
+      ]
+        .map((r) => JSON.stringify(r))
+        .join('\n'),
+    );
+    const report = await seedHistory(engine, file, { flowId: 'reply' });
+    expect(report.noiseSkipped).toMatchObject({ placeholder: 1, total: 1 });
+    expect(formatSeed(report).join('\n')).toContain('1 media sync placeholder(s)');
+    expect((await loadPairs(engine.store)).map((p) => [p.id, p.incoming, p.reply])).toEqual([['a', 'lunch?', 'sure\nnoon']]);
   });
 });
 

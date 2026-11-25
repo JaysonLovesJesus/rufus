@@ -24,6 +24,22 @@ import { Scheduler, type TickResult } from './scheduler/scheduler';
 import { parseDuration } from './scheduler/triggers';
 import { FileStore } from './store';
 import type { Flow, RunResult } from './types';
+import {
+  BLOCK_KINDS,
+  formatAnchorSummary,
+  initAnchor,
+  loadAnchor,
+  parseTimeRange,
+  saveAnchor,
+  upsertGoal,
+  upsertScheduleBlock,
+  type BlockKind,
+  type GoalHorizon,
+  type GoalPriority,
+} from './anchor/anchor';
+import { formatTrust, TrustStore } from './engine/trust';
+import { formatLoopReport, formatLoopRun, MasterLoop, type Sensor, type SignalHandler } from './engine/loop';
+import { appendSignal, inboxSensor, scheduleBlockHandler } from './engine/loop-builtins';
 import { demoInput, demoProvider, triageDraft } from '../examples/triage-draft.flow';
 
 const USAGE = `rufus - AI + Code + Human chief-of-staff engine
@@ -73,6 +89,22 @@ Usage: rufus [--dir <workspace>] <command>
                                browsing, files and calendar
   chat <message...>            talk to your chief of staff: status, flows, lessons, run <flow> [json],
                                learn <scope>: <rule>, or ask anything in your own words
+
+The Master Loop (Sense -> Plan -> Execute -> Verify -> Record):
+  anchor                       show your Anchor: goals, projects, boundaries and today's schedule
+  anchor init                  create anchor.json with the default boundaries (external, money, logins need your yes)
+  anchor goal <title...> [--priority high|medium|low] [--horizon today|week|month] [--notes <text>]
+  anchor block <HH:MM-HH:MM> <kind> <title...> [--date YYYY-MM-DD] [--allow-overlap]
+                               kind: focus, meeting, break, scroll, personal, protected (overlaps are refused)
+  trust                        Earned Trust per action type: check (you verify) or autonomous
+  trust promote|demote <actionType>
+  signal <surface> <kind> [text...] [--data <json>]
+                               drop a signal into inbox.jsonl for the loop to pick up
+  loop --once                  one pass: sense new signals, plan, execute, verify, record. No signals: idle, $0
+  loop [--interval <60s>]      keep passing in the foreground
+  loop status                  runs waiting for you
+  decide <runId> accept|edit|reject [note...] [--output <your version>]
+                               your verdict: updates Earned Trust and becomes an example Rufus learns from
 `;
 
 export interface Io {
@@ -109,6 +141,28 @@ function describeTick(r: TickResult, io: Io): void {
   } else {
     io.out(`skipped ${r.flowId}: ${r.status.replace('-', ' ')}`);
   }
+}
+
+/** Workspace loop modules: any `flows/*.loop.{ts,js,mjs}` exporting sensors and signal handlers (or arrays of them). */
+async function loadWorkspaceLoopParts(store: FileStore): Promise<{ sensors: Sensor[]; handlers: SignalHandler<any, any>[] }> {
+  let files: string[];
+  try {
+    files = await fs.readdir(store.flowsDir);
+  } catch {
+    return { sensors: [], handlers: [] };
+  }
+  const sensors: Sensor[] = [];
+  const handlers: SignalHandler<any, any>[] = [];
+  for (const f of files.filter((f) => /\.loop\.(ts|js|mjs)$/.test(f)).sort()) {
+    const mod = (await import(pathToFileURL(path.join(store.flowsDir, f)).href)) as Record<string, unknown>;
+    for (const v of Object.values(mod).flatMap((x) => (Array.isArray(x) ? x : [x]))) {
+      const o = v as Record<string, unknown> | null;
+      if (!o || typeof o !== 'object' || typeof o.id !== 'string') continue;
+      if (typeof o.poll === 'function') sensors.push(o as unknown as Sensor);
+      else if (typeof o.plan === 'function' && typeof o.execute === 'function' && o.match) handlers.push(o as unknown as SignalHandler<any, any>);
+    }
+  }
+  return { sensors, handlers };
 }
 
 async function describe(result: RunResult, io: Io, store: FileStore): Promise<void> {
@@ -160,9 +214,10 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const asJson = bool('--json');
   const save = bool('--save');
   const latest = bool('--latest');
+  const allowOverlap = bool('--allow-overlap');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
-  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode']) {
+  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
@@ -554,6 +609,149 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
       const hits = queryCorpus(items, { query, sources, sinceDays: since, limit, halfLifeDays: halfLife, embeddings });
       if (asJson) io.out(JSON.stringify(hits, null, 2));
       else for (const line of formatHits(hits, query)) io.out(line);
+      return;
+    }
+
+    case 'anchor': {
+      const [sub, ...words] = rest;
+      if (!sub) {
+        const anchor = await loadAnchor(dir);
+        for (const line of formatAnchorSummary(anchor)) io.out(line);
+        return;
+      }
+      if (sub === 'init') {
+        const { created } = await initAnchor(dir);
+        io.out(created ? `Anchor created at ${path.join(dir, 'anchor.json')} (external sends, money and logins always need your yes).` : `Anchor already exists at ${path.join(dir, 'anchor.json')}; left as is.`);
+        return;
+      }
+      if (sub === 'goal') {
+        const title = words.join(' ').trim();
+        if (!title) throw new Error('Usage: rufus anchor goal <title...> [--priority high|medium|low] [--horizon today|week|month]');
+        const r = upsertGoal(await loadAnchor(dir), {
+          title,
+          priority: flags['--priority'] as GoalPriority | undefined,
+          horizon: flags['--horizon'] as GoalHorizon | undefined,
+          notes: flags['--notes'],
+        });
+        await saveAnchor(dir, r.anchor);
+        io.out(`${r.created ? 'Added' : 'Updated'} goal ${r.goal.id}: [${r.goal.priority}] ${r.goal.title} (${r.goal.horizon}).`);
+        return;
+      }
+      if (sub === 'block') {
+        const [range, kind, ...titleWords] = words;
+        if (!range || !kind || !titleWords.length) throw new Error(`Usage: rufus anchor block <HH:MM-HH:MM> <${BLOCK_KINDS.join('|')}> <title...> [--date YYYY-MM-DD] [--allow-overlap]`);
+        if (!(BLOCK_KINDS as readonly string[]).includes(kind)) throw new Error(`kind must be one of ${BLOCK_KINDS.join(', ')}.`);
+        const r = upsertScheduleBlock(
+          await loadAnchor(dir),
+          { ...parseTimeRange(range), kind: kind as BlockKind, title: titleWords.join(' '), source: 'manual' },
+          { date: flags['--date'], allowOverlap },
+        );
+        await saveAnchor(dir, r.anchor);
+        io.out(`${r.created ? 'Added' : 'Updated'} ${r.block.start}-${r.block.end} ${r.block.kind} "${r.block.title}" on ${r.anchor.schedule.date}.`);
+        if (r.overlaps.length) io.out(`Note: overlaps ${r.overlaps.map((b) => `${b.start}-${b.end} "${b.title}"`).join(', ')} (allowed with --allow-overlap).`);
+        return;
+      }
+      throw new Error('Usage: rufus anchor [init | goal <title...> | block <HH:MM-HH:MM> <kind> <title...>]');
+    }
+
+    case 'trust': {
+      const [sub, actionType] = rest;
+      const trust = new TrustStore(dir);
+      if (!sub) {
+        for (const line of formatTrust(await trust.all())) io.out(line);
+        return;
+      }
+      if ((sub === 'promote' || sub === 'demote') && actionType) {
+        const r = sub === 'promote' ? await trust.promote(actionType) : await trust.demote(actionType);
+        io.out(
+          r.autonomy === 'autonomous'
+            ? `${r.actionType} is now autonomous: verified results complete without asking (external sends, money and logins still ask).`
+            : `${r.actionType} is back to check: you verify every result.`,
+        );
+        return;
+      }
+      throw new Error('Usage: rufus trust [promote|demote <actionType>]');
+    }
+
+    case 'signal': {
+      const [surface, kind, ...words] = rest;
+      if (!surface || !kind) throw new Error('Usage: rufus signal <surface> <kind> [text...] [--data <json>]');
+      const data = flags['--data'] !== undefined ? (JSON.parse(flags['--data']) as unknown) : undefined;
+      if (data !== undefined && (typeof data !== 'object' || data === null || Array.isArray(data))) throw new Error('--data must be a JSON object.');
+      const text = words.join(' ').trim();
+      const s = await appendSignal(dir, { surface, kind, ...(text ? { text } : {}), ...(data ? { data: data as Record<string, unknown> } : {}) });
+      io.out(`Queued signal ${s.id} (${surface}/${kind}). Run rufus loop --once to handle it.`);
+      return;
+    }
+
+    case 'loop':
+    case 'decide': {
+      const parts = await loadWorkspaceLoopParts(store);
+      const loop = new MasterLoop({
+        dir,
+        providers: {
+          ...(built.provider ? { default: built.provider } : {}),
+          ...(built.providers.fast ? { fast: built.providers.fast } : {}),
+          ...(built.providers.smart ? { smart: built.providers.smart } : {}),
+        },
+      });
+      for (const s of parts.sensors) loop.addSensor(s);
+      if (!parts.sensors.some((s) => s.id === 'inbox')) loop.addSensor(inboxSensor(dir));
+      for (const h of parts.handlers) loop.addHandler(h);
+      if (!parts.handlers.some((h) => h.id === scheduleBlockHandler.id)) loop.addHandler(scheduleBlockHandler);
+
+      if (cmd === 'decide') {
+        const [runId, verdict, ...words] = rest;
+        if (!runId || !verdict || !['accept', 'edit', 'reject'].includes(verdict)) throw new Error('Usage: rufus decide <runId> accept|edit|reject [note...] [--output <your version>]');
+        const output = flags['--output'];
+        const editedOutput = output === undefined ? undefined : (() => {
+          try {
+            return JSON.parse(output) as unknown;
+          } catch {
+            return output;
+          }
+        })();
+        const note = words.join(' ').trim();
+        const r = await loop.resolveHumanDecision(runId, { verdict: verdict as 'accept' | 'edit' | 'reject', ...(editedOutput !== undefined ? { editedOutput } : {}), ...(note ? { note } : {}) });
+        io.out(`Recorded ${verdict} on ${runId}: now ${r.run.status}${r.run.committed ? ' (applied)' : ''}.`);
+        if (r.run.commitError) io.err(`Not applied: ${r.run.commitError}`);
+        if (r.trust) io.out(`Trust for ${r.trust.record.actionType}: ${r.trust.record.autonomy}, clean streak ${r.trust.record.consecutiveClean}/${r.trust.record.promotionThreshold}${r.trust.demoted ? ' (demoted back to check)' : ''}.`);
+        if (r.promotionHint) io.out(r.promotionHint);
+        if (r.run.status !== 'accepted' && r.run.status !== 'edited' && r.run.status !== 'rejected') for (const line of formatLoopRun(r.run)) io.out(line);
+        io.out(`Saved as an example (${r.example.id}).`);
+        return;
+      }
+
+      if (rest[0] === 'status') {
+        const waiting = await loop.pending();
+        if (!waiting.length) return io.out('No loop runs waiting on you.');
+        io.out(`Waiting on you (${waiting.length}):`);
+        for (const run of waiting) for (const line of formatLoopRun(run)) io.out(line);
+        return;
+      }
+      if (once) {
+        const report = await loop.runOnce();
+        for (const line of formatLoopReport(report)) io.out(line);
+        if (report.errors.length) process.exitCode = 1;
+        return;
+      }
+      const intervalMs = parseDuration(flags['--interval'] ?? '60s');
+      io.out(`Master Loop running every ${flags['--interval'] ?? '60s'}. Ctrl+C to stop.`);
+      const stop = new AbortController();
+      process.once('SIGINT', () => stop.abort());
+      process.once('SIGTERM', () => stop.abort());
+      while (!stop.signal.aborted) {
+        try {
+          const report = await loop.runOnce();
+          if (report.status !== 'idle' || report.errors.length) for (const line of formatLoopReport(report)) io.out(line);
+        } catch (err) {
+          io.err(`loop pass failed: ${(err as Error).message}`);
+        }
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, intervalMs);
+          stop.signal.addEventListener('abort', () => (clearTimeout(t), resolve()), { once: true });
+        });
+      }
       return;
     }
 
