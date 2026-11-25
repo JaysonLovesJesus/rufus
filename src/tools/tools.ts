@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { SENSITIVITIES, type Sensitivity } from '../anchor/anchor';
 import type { BeeperConfig, CommandToolConfig, RufusConfig } from '../types';
 import { BeeperApi, beeperApiOptions, type BeeperApiOptions } from './beeper-api';
+import { webTools, type HostLookup } from './web-tools';
 
 /**
  * Real Tool Hands: the things Rufus can actually do in your apps (read a chat, send a message, read a calendar, draft an
@@ -267,15 +268,21 @@ export interface BuildToolsOptions {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
   run?: CommandRunner;
+  /** DNS for `web.fetch`'s private-address check (tests). Default: the system resolver. */
+  lookup?: HostLookup;
 }
 
-/** The registry from `config.json`: Beeper tools when Beeper is configured, plus each `config.tools.commands` entry. */
+/**
+ * The registry from `config.json`: the read-only web tools (`web.search`, `web.fetch`; off with `tools.web: false`),
+ * Beeper tools when Beeper is configured, plus each `config.tools.commands` entry.
+ */
 export function buildTools(config: RufusConfig, opts: BuildToolsOptions = {}): ToolRegistry {
   const env = opts.env ?? process.env;
   const registry = new ToolRegistry({ trusted: config.tools?.trusted ?? [] });
   if (beeperConfigured(config.beeper, env) && config.tools?.beeper !== false) {
     for (const t of beeperTools({ ...beeperApiOptions(config.beeper, env), ...(opts.fetch ? { fetch: opts.fetch } : {}) })) registry.register(t);
   }
+  if (config.tools?.web !== false) for (const t of webTools({ ...(opts.fetch ? { fetch: opts.fetch } : {}), ...(opts.lookup ? { lookup: opts.lookup } : {}) })) registry.register(t);
   for (const [name, cfg] of Object.entries(config.tools?.commands ?? {})) registry.register(commandTool(name, cfg, opts.run));
   return registry;
 }

@@ -288,6 +288,35 @@ export {
   type RunCommandOptions,
   type BuildToolsOptions,
 } from './tools/tools';
+export {
+  webTools,
+  searchWeb,
+  fetchPage,
+  parseSearchResults,
+  htmlToText,
+  htmlTitle,
+  isBlockedAddress,
+  assertPublicUrl,
+  WEB_SEARCH_TOOL,
+  WEB_FETCH_TOOL,
+  DEFAULT_WEB_TIMEOUT_MS,
+  DEFAULT_FETCH_CHARS,
+  type WebSearchResult,
+  type WebPage,
+  type WebToolsOptions,
+  type HostLookup,
+} from './tools/web-tools';
+export {
+  buildDecisionCard,
+  formatDecisionCard,
+  constraintsBrief,
+  chatSafe,
+  MAX_CARD_CHARS,
+  type DecisionCard,
+  type DecisionCardInput,
+  type DecisionOption,
+  type ResearchSource,
+} from './unified/research';
 export { BeeperApi, beeperApiOptions, parseReactions, DEFAULT_BEEPER_API_URL, type BeeperApiOptions, type BeeperChat, type BeeperApiMessage, type BeeperMessage, type BeeperReaction } from './tools/beeper-api';
 export {
   extractReactionExamples,

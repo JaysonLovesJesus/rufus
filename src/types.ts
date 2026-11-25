@@ -436,6 +436,8 @@ export interface ToolsConfig {
   trusted?: string[];
   /** `false` turns off the built-in `beeper.read` / `beeper.send` even when Beeper is configured. */
   beeper?: boolean;
+  /** `false` turns off the built-in read-only `web.search` / `web.fetch` (v19). On by default; no API key needed. */
+  web?: boolean;
 }
 
 /** The Beeper sensor: new incoming messages from people, across your chats. */

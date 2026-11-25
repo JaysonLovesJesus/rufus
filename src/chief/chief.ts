@@ -145,6 +145,12 @@ function systemWithTools(tools: ToolRegistry, maxSteps: number): string {
           `When they correct you, tell you a preference, or share a fact worth keeping ("ignore WhatsApp call alerts", "keep messages less dense", "I'm meeting the pastor Friday"), FIRST save it with ${REMEMBER_TOOL} (verdict "reject" for things to ignore or stop doing, otherwise "note"), then confirm in a few words. Don't save small talk.`,
         ]
       : []),
+    ...(tools.has('web.search')
+      ? [
+          'When they ask about the outside world (prices, flights, gear, how-tos, docs, news), research before you answer: web.search, then web.fetch the best result or two if the snippets are not enough. Never guess facts you could look up.',
+          'When they are choosing between options, end with a clear pick in plain lines (no tables): Option A vs Option B, your pick and why in one line, then the next step. Fit it to their goals and boundaries.',
+        ]
+      : []),
     'A side-effect tool that reaches the outside (sending a message, running a command) is never run from chat: it is queued for their approval, so in your final reply say exactly what is ready and that they can reply 1 to do it.',
     'Other things still go through commands: "run <flowId> [json]" or "learn <scope>: <rule>". Nothing with side effects happens without their explicit yes.',
     'Tools:',

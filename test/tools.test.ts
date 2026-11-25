@@ -166,16 +166,17 @@ describe('buildTools (config.json)', () => {
       },
       { env: {}, fetch: f.fetch, run: async () => '[]' },
     );
-    expect(r.list().map((t) => t.name)).toEqual(['beeper.read', 'beeper.send', 'calendar.read', 'shell.run']);
+    expect(r.list().map((t) => t.name)).toEqual(['beeper.read', 'beeper.send', 'calendar.read', 'shell.run', 'web.fetch', 'web.search']);
     expect(r.isTrusted('calendar.read')).toBe(true);
     await r.call('beeper.read', { chatId: 'x' }, ctx());
     expect(f.calls[0]!.url).toBe('http://127.0.0.1:9999/v1/chats/x/messages?limit=20');
   });
 
-  it('nothing configured: no tools; the env token alone turns Beeper on; tools.beeper false turns it off', () => {
-    expect(buildTools({ version: 1 }, { env: {} }).list()).toEqual([]);
+  it('nothing configured: only the built-in web tools; the env token alone turns Beeper on; tools.beeper false turns it off', () => {
+    expect(buildTools({ version: 1 }, { env: {} }).list().map((t) => t.name)).toEqual(['web.fetch', 'web.search']);
+    expect(buildTools({ version: 1, tools: { web: false } }, { env: {} }).list()).toEqual([]);
     expect(buildTools({ version: 1 }, { env: { RUFUS_BEEPER_TOKEN: 't' } }).has('beeper.send')).toBe(true);
-    expect(buildTools({ version: 1, beeper: {}, tools: { beeper: false } }, { env: {} }).list()).toEqual([]);
+    expect(buildTools({ version: 1, beeper: {}, tools: { beeper: false, web: false } }, { env: {} }).list()).toEqual([]);
   });
 });
 
