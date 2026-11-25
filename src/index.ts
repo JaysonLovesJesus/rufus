@@ -1,4 +1,5 @@
-export { defineFlow, isFlow } from './engine/flow';
+export { defineFlow, defineStagedFlow, isFlow } from './engine/flow';
+export { runStaged, routeRank, upgradeRoute, ROUTES, DEFAULT_MAX_REPLANS, MAX_REPLANS_LIMIT, type Persist } from './engine/stages';
 export { Engine, type EngineOptions } from './engine/engine';
 export { AiVerificationError } from './engine/ai';
 export { summarizeSpectrum, formatSpectrum, spectrumOf, addSpectrum, emptySpectrum } from './engine/spectrum';
@@ -87,6 +88,28 @@ export {
   type WorkflowBlueprint,
   type CandidateLesson,
 } from './history/mine';
+export {
+  backtest,
+  causalSnapshot,
+  formatBacktest,
+  momentMs,
+  knownMs,
+  pickEvenly,
+  scoreMoment,
+  tokenF1,
+  toneAgreement,
+  toneOf,
+  wordDiff,
+  CausalityError,
+  type BacktestOptions,
+  type BacktestReport,
+  type BacktestMoment,
+  type BacktestScoreboard,
+  type BacktestExample,
+  type CausalSnapshot,
+  type MomentScores,
+  type PredictionBasis,
+} from './history/backtest';
 export { evaluateHoldout, splitHoldout, formatHoldout, invariantHolds, type HoldoutEvaluation, type HoldoutResult, type HoldoutOptions, type HoldoutSplit } from './history/eval';
 export { conditionalAnalysis, describeTrigger, DEFAULT_CONTRAST, FEATURE_LABELS, LONG_REPLY_WORDS, type ConditionalRule, type ContrastOptions, type Trigger as ConditionalTrigger, type FeatureId, type BehaviorId } from './history/contrast';
 export { DEFAULT_HALF_LIFE_DAYS, DEFAULT_HALF_LIFE_OBSERVATIONS, pairWeigher, type WeightOptions, type IdealOverride } from './history/profiles';

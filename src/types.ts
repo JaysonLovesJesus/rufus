@@ -168,11 +168,108 @@ export interface FlowMeta {
   trigger?: Trigger;
 }
 
+/** Options for `ctx.code`. */
+export interface CodeStepOptions {
+  /** Bookkeeping only: the step is saved and replayed like any other, but not counted in `run.spectrum` (used inside staged flows, whose stages are counted once). */
+  bookkeeping?: boolean;
+}
+
+// ---------- Three-stage flows: plan -> execute -> verify ----------
+
+/** Where a staged flow does the work, cheapest first: `code`, a `fast` model, a `smart` model, then a `human`. Same order as the Spectrum. */
+export type Route = Rung;
+
+export type StageName = 'plan' | 'execute' | 'verify';
+
+/**
+ * What `plan` returns: a concrete goal, and which rung should do the work. It is saved with the run, so keep it JSON.
+ * Add your own fields (a prompt, gathered context, retrieved examples, ...); `execute` and `verify` get the whole plan back.
+ */
+export interface StagePlan {
+  /** One explicit, concrete sentence: what "done" means. `verify` checks the result against it. */
+  goal: string;
+  /** Chosen upfront, in code. Prefer `code`, then `fast`, then `smart`; `human` skips straight to a person. */
+  route: Route;
+  /** Optional objective acceptance criteria (also for a model-based `verify` to read). */
+  criteria?: string[];
+  /** Why this route (shows on the human card and in the trail). */
+  reason?: string;
+  [extra: string]: unknown;
+}
+
+/** One pass of the plan -> execute -> verify loop, as recorded in `StagedResult.trail`. */
+export interface StageTrailEntry {
+  /** 0 for the first pass, 1 for the first re-plan, ... */
+  attempt: number;
+  route: Route;
+  goal: string;
+  outcome: 'passed' | 'failed' | 'human';
+  /** Why it failed verification, or why it went to a human. */
+  reason?: string;
+}
+
+/** Fed back into `plan` after `verify` fails, so the re-plan can fix the cause instead of retrying blindly. */
+export interface ReplanFeedback {
+  /** 1 for the first re-plan. */
+  attempt: number;
+  /** The exact reason `verify` (or the model's own check) gave. */
+  reason: string;
+  previousRoute: Route;
+  previousGoal: string;
+  previousPlan: StagePlan;
+  /** What `execute` produced (absent when `execute` itself failed its model check). */
+  lastResult?: unknown;
+  /** One rung above `previousRoute` (`smart` stays `smart`): the cheapest sensible upgrade. A re-plan never goes below `previousRoute`. */
+  nextRoute: Route;
+  trail: StageTrailEntry[];
+}
+
+/**
+ * The context every stage function gets: the normal flow steps (`code`, `ai`, `human`, ...), plus where we are.
+ * Inside a stage, `ai` defaults `tier` to the plan's route (execute) or `fast` (plan, verify): pass `tier` to override.
+ * Stage functions re-run on resume like any flow body, so keep what is outside `ctx.*` steps deterministic.
+ */
+export interface StageContext<I = unknown> extends FlowContext<I> {
+  readonly stage: StageName;
+  /** 0 on the first pass. */
+  readonly attempt: number;
+  /** The route of the plan being executed or verified. Undefined while planning. */
+  readonly route?: Route;
+  /** Set when this pass is a re-plan after a failed verification. */
+  readonly replan?: ReplanFeedback;
+}
+
+export interface HumanHandoff<P extends StagePlan = StagePlan> {
+  /** Why a person is needed: the plan said so, or verification kept failing. */
+  reason: string;
+  goal: string;
+  plan: P;
+  lastResult?: unknown;
+  trail: StageTrailEntry[];
+}
+
+export interface StagedSpec<I = unknown, R = unknown, P extends StagePlan = StagePlan> {
+  /** Stage 1. Gather context (code, hybrid retrieval of real examples, ...), define the goal, and pick the route upfront. */
+  plan(input: I, ctx: StageContext<I>): P | Promise<P>;
+  /** Stage 2. Do the work on `plan.route` only: no cheap-then-medium-then-expensive cascade. Return JSON. */
+  execute(plan: P, ctx: StageContext<I>): R | Promise<R>;
+  /** Stage 3. Cross-check the result against the Stage 1 goal. Code is the first choice; `ctx.ai` may review complex output. */
+  verify(result: R, plan: P, ctx: StageContext<I>): VerifyResult | Promise<VerifyResult>;
+  /** Re-plans allowed after a failed verification before a human is asked (0-5). Default 1. */
+  maxReplans?: number;
+  /** The card a person sees when the plan routes to `human` or verification keeps failing. A default card is used without it. */
+  human?: HumanStepSpec | ((handoff: HumanHandoff<P>) => HumanStepSpec);
+}
+
+export type StagedResult<R = unknown, P extends StagePlan = StagePlan> =
+  | { status: 'passed'; route: Route; goal: string; plan: P; result: R; replans: number; trail: StageTrailEntry[] }
+  | { status: 'human'; route: 'human'; goal: string; plan: P; answer: HumanAnswer; reason: string; replans: number; trail: StageTrailEntry[]; lastResult?: unknown };
+
 export interface FlowContext<I = unknown> {
   readonly runId: string;
   readonly input: I;
   /** Deterministic step. Runs once; the JSON result is replayed on resume. */
-  code<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+  code<T>(name: string, fn: () => T | Promise<T>, opts?: CodeStepOptions): Promise<T>;
   /** Code-assisted AI step. */
   ai(name: string, opts: AiStepOptions<string> & { parse?: undefined }): Promise<string>;
   ai<T>(name: string, opts: AiStepOptions<T> & { parse: (raw: string) => T }): Promise<T>;
@@ -184,6 +281,12 @@ export interface FlowContext<I = unknown> {
   escalate<T>(name: string, opts: EscalateOptions<T> & { parse: (raw: string) => T }): Promise<EscalateResult<T>>;
   /** Pause for a human. Resolves with their answer after `engine.answer()`. */
   human(name: string, spec: HumanStepSpec): Promise<HumanAnswer>;
+  /**
+   * Run a three-stage unit: `plan` (context, goal, route chosen upfront) -> `execute` (on that route only) -> `verify`
+   * (against the goal). If `verify` fails, the reason goes back into `plan` for a better plan and a higher route, up to
+   * `maxReplans` times; after that, or when a plan routes to `human`, a person decides.
+   */
+  staged<R, P extends StagePlan = StagePlan>(name: string, spec: StagedSpec<I, R, P>): Promise<StagedResult<R, P>>;
 }
 
 export interface Flow<I = any, O = any> {
@@ -197,6 +300,8 @@ export interface StepRecord {
   kind: 'code' | 'ai' | 'human';
   name: string;
   done: boolean;
+  /** code only: saved and replayed, but not counted in the spectrum (see `CodeStepOptions`). */
+  bookkeeping?: boolean;
   /** JSON result, present once `done`. */
   result?: unknown;
   /** ai only: how many attempts it took. */

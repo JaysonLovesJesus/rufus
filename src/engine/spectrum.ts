@@ -14,7 +14,7 @@ export function summarizeSpectrum(steps: Record<string, StepRecord>): Spectrum {
   const out = emptySpectrum();
   for (const s of Object.values(steps)) {
     if (s.kind === 'code') {
-      if (s.done) out.code++;
+      if (s.done && !s.bookkeeping) out.code++;
     } else if (s.kind === 'human') {
       out.human++;
     } else if (s.done && !s.handoff) {

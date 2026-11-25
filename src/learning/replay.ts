@@ -1,5 +1,6 @@
 import { AiVerificationError, buildSystemPrompt, runAiStep } from '../engine/ai';
 import type { Engine } from '../engine/engine';
+import { runStaged } from '../engine/stages';
 import type {
   AiStepOptions,
   EscalateOptions,
@@ -9,6 +10,9 @@ import type {
   HumanAnswer,
   HumanStepSpec,
   RunRecord,
+  StagePlan,
+  StagedResult,
+  StagedSpec,
   StepRecord,
   VerifyResult,
 } from '../types';
@@ -290,6 +294,11 @@ class ReplayContext implements FlowContext<any> {
       this.original.steps[key] = { kind: 'code', name, done: true, result: result === undefined ? null : JSON.parse(JSON.stringify(result)) };
     }
     return this.original.steps[key]!.result as T;
+  }
+
+  /** A staged unit replays live: its stages run in memory, so the ai step under test is reached like in any other flow. */
+  staged<R, P extends StagePlan = StagePlan>(name: string, spec: StagedSpec<any, R, P>): Promise<StagedResult<R, P>> {
+    return runStaged(this, name, spec, (_stepName, fn) => Promise.resolve(fn()));
   }
 
   async human(name: string, _spec: HumanStepSpec): Promise<HumanAnswer> {

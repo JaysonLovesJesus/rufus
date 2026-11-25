@@ -14,6 +14,7 @@ import { formatSpectrum, spectrumOf, spectrumTotal } from './engine/spectrum';
 import { describeTension } from './learning/lessons';
 import { formatCompare } from './learning/compare';
 import { bucketsFromConfig, defaultMineProvider, formatMine, mineHistory } from './history/mine';
+import { backtest, formatBacktest } from './history/backtest';
 import { formatSeed, loadPairs, seedHistory } from './history/seed';
 import { CorpusStore, EmbeddingCache, buildCorpusSummary, collectInto, corpusEmbedItems, corpusItemsFromPairs, createEmbeddingProvider, formatCorpusSummary, formatHits, getAdapter, pairEmbedItems, queryCorpus, type EmbedItem, type EmbeddingProvider } from './corpus';
 import type { EmbeddingConfig } from './types';
@@ -55,6 +56,10 @@ Usage: rufus [--dir <workspace>] <command>
                                replay a scope; global replays a small golden sample of every flow
   compare <flowId> [--limit N] [--provider <name>]
                                plain AI vs. code-assisted AI on your saved cases, same verify
+  backtest [--count N] [--channel <name>] [--mode offline|ai] [--provider fast|smart|<name>] [--latest] [--limit N] [--json]
+                               time-travel check: pick N real past moments, rewind to just before each (ONLY earlier pairs and
+                               corpus items are visible), predict your reply from the closest and newest real examples, and
+                               compare with what you actually did. Offline (default) is free; --provider runs a live AI.
   collect <source> <path...> [--limit N] [--dry-run] [--ignore a,b] [--me addr,addr]
                                add local activity to your life corpus. <source> is files (notes/markdown/CSV/JSON
                                folders), calendar (.ics or JSON), browser (history JSON/JSONL or a Chrome/Arc/Safari
@@ -154,9 +159,10 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const useAi = bool('--ai');
   const asJson = bool('--json');
   const save = bool('--save');
+  const latest = bool('--latest');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
-  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model']) {
+  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
@@ -448,6 +454,34 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         if (!useAi && report.pairsAnalyzed) io.out('Add --ai for workflow blueprints and lessons from a provider.');
       }
       if (save && report.pairsAnalyzed && !asJson) io.out(`Saved ${store.mineReportFile}`);
+      return;
+    }
+
+    case 'backtest': {
+      const mode = flags['--mode'] ?? (flags['--provider'] !== undefined ? 'ai' : 'offline');
+      if (mode !== 'offline' && mode !== 'ai') throw new Error('--mode must be offline or ai.');
+      if (mode === 'offline' && flags['--provider'] !== undefined) throw new Error('--provider needs --mode ai (offline mode never calls a model).');
+      const pairs = await loadPairs(store);
+      if (!pairs.length) return io.out('No history yet. Seed it first: rufus seed <file> --flow <flowId>.');
+      let providerName = flags['--provider'];
+      if (mode === 'ai' && providerName === undefined && config.providers?.smart) providerName = 'smart';
+      const provider = mode === 'ai' ? engine.providerFor(providerName) : undefined;
+      // Hybrid retrieval when vectors are cached; only the moment's own incoming text is embedded, and a provider that is down only costs the semantic part.
+      const embedder = embeddingProvider();
+      const cache = new EmbeddingCache(store.embeddingsFile);
+      const report = await backtest({
+        pairs,
+        corpus: await new CorpusStore(store.corpusFile).load(),
+        count: positive('--count') ?? 20,
+        channel: flags['--channel'],
+        mode,
+        provider,
+        providerName: providerName ?? 'default',
+        pick: latest ? 'latest' : 'spread',
+        embeddings: (text) => cache.lookup(embedder, text),
+      });
+      if (asJson) io.out(JSON.stringify(report, null, 2));
+      else for (const line of formatBacktest(report, { diffs: positive('--limit') })) io.out(line);
       return;
     }
 

@@ -1,5 +1,5 @@
 import { validateTrigger } from '../scheduler/triggers';
-import type { Flow, FlowContext, FlowMeta } from '../types';
+import type { Flow, FlowContext, FlowMeta, StagePlan, StagedResult, StagedSpec } from '../types';
 
 /**
  * Define a flow. The function re-runs from the top on every resume; `ctx.code`, `ctx.ai` and
@@ -14,6 +14,15 @@ export function defineFlow<I = unknown, O = unknown>(
   }
   if (meta.trigger) validateTrigger(meta.trigger);
   return Object.freeze({ meta: Object.freeze({ ...meta }), run });
+}
+
+/**
+ * Define a flow that is one three-stage unit: `plan` (gather context, set the goal, pick the route upfront) -> `execute`
+ * (on that route only) -> `verify` (against the goal), with re-plan escalation when verification fails. Its output is
+ * the `StagedResult`. For a stage inside a bigger flow, call `ctx.staged(name, spec)` instead.
+ */
+export function defineStagedFlow<I = unknown, R = unknown, P extends StagePlan = StagePlan>(meta: FlowMeta, spec: StagedSpec<I, R, P>): Flow<I, StagedResult<R, P>> {
+  return defineFlow<I, StagedResult<R, P>>(meta, (ctx) => ctx.staged(meta.id, spec));
 }
 
 export function isFlow(value: unknown): value is Flow {

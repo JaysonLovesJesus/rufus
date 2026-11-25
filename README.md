@@ -6,7 +6,7 @@ A small, domain-agnostic **AI + Code + Human** chief-of-staff engine, in five pi
 | --- | --- | --- |
 | 1 | **Data** | Real-time and first-party history: chats, email, browser, calendar, files, and **human-only AI prompts** (what *you* asked and decided, never what a model answered). One local corpus, `rufus collect`. |
 | 2 | **Learning** | One unified, living-belief system backed by observations: **invariants** (true nearly every time), **conditional logic** (`if / else` with real exceptions) and **tension flags** (where your stated ideals and your habits disagree). Lessons are proposed, replay-gated and kept honest. |
-| 3 | **Flows** (Spectrum of Intelligence) | Every step runs on the cheapest rung that works: `Code → Fast Model → Smart Model → Human`. Work stays left; the human keeps vision, taste and the final say. |
+| 3 | **Flows** (Spectrum of Intelligence) | Every step runs on the cheapest rung that works: `Code → Fast Model → Smart Model → Human`. Work stays left; the human keeps vision, taste and the final say. Units of real work run as **plan → execute → verify**, with re-plan escalation when a check fails. |
 | 4 | **Providers** | Pluggable AI power: **Google Gemini** (native, zero dependencies), Claude (any CLI, e.g. `claude -p`), any OpenAI-compatible HTTP endpoint, or any local command. |
 | 5 | **Channels** | Pluggable human surfaces: CLI, Telegram, Beeper, or your own `ChannelAdapter`. |
 
@@ -460,6 +460,29 @@ buildSituationalContext(input, pairs, { embeddings });        // exampleDriven i
 
 `queryCorpus` blends `(1 - semanticWeight) x keywords + semanticWeight x similarity` (default 0.5), then weights by observation rank, de-duplicates titles and guarantees each matching source a share of the top results. Similarity below `minSimilarity` counts as unrelated (default 0.25; raise it for neural models, whose unrelated pairs still score 0.3-0.5). Items without a cached vector are still found by keywords. `retrieveSimilarExamples` scores similarity (wording, plus meaning when vectors are given), adds a nudge for the same contact and channel, and a recency nudge, and drops an exchange that was saved twice. Without `embeddings` everything still works, by wording alone. All of it is deterministic.
 
+## Time-travel backtest: would Rufus have done what you did? (v10)
+
+`rufus backtest` answers that with real data, and with zero future leakage. It takes a sample of real past moments, rewinds to just before each one, predicts your reply, and compares it with what you actually sent.
+
+```sh
+rufus backtest --count 20                          # offline, deterministic, $0
+rufus backtest --count 20 --channel sms            # only moments on one channel (all history stays visible)
+rufus backtest --count 20 --provider smart         # a live AI run (implies --mode ai); or --provider fast
+rufus backtest --mode ai                           # AI on `smart` if you defined it, else your default provider
+rufus backtest --latest --limit 5 --json           # newest moments, five side-by-sides, every number as JSON
+```
+
+For each moment at time **T**:
+
+1. **Strictly causal snapshot.** Only pairs whose whole exchange (your reply included) was known **before T**, and corpus items with `timestamp < T`, exist. An item at exactly T, a message you answered after T, an undated item, and a chat exchange copied into the corpus (it carries the reply text) are all excluded. The moment itself is removed.
+2. **Real examples from before T.** The top similar examples (the v9 hybrid retriever, using cached vectors when you have them) plus your newest ones (same contact first), and related corpus hits, all from the snapshot. Recency, contact profiles and length bands are computed from the snapshot too.
+3. **Predict.** *Offline:* the reply to the nearest real earlier example (else your newest reply to that contact, else on that channel). *AI:* a provider is shown the same snapshot, examples and situation, and never the answer.
+4. **Compare** with what you actually did: length band (exact / within one), greeting, tone (lowercase start, `!`, emoji, trailing period, question), word overlap (F1), meaning (local vector cosine), a 0-100 overall, and a word-level diff (`[-only in yours-] {+only in prediction+}`) in a readable side-by-side for quick grading. The scoreboard also shows the always-guess baselines a prediction must beat, and how code's own greeting and length call (no model at all) did on the same moments.
+
+Every pair, example and corpus hit is checked against T as it is used; one item from the future throws `CausalityError`, so a report with scores never contains a leak. The tests prove it directly: a moment's prediction, examples and score are identical whether or not everything after it exists, and a marker planted in the future never shows up in any retrieval or in any prompt sent to a model.
+
+Moments are chosen deterministically (evenly spread across your timeline; `--latest` takes the newest), and only ones with at least 3 earlier pairs count (a cold start proves nothing). With `--provider`, the snapshot text is sent to that provider exactly as in a live run. In offline mode, text leaves your machine only if you configured a remote embedding provider.
+
 ## Fast and smart model tiers
 
 Code does the heavy lifting, so many ai steps only phrase a result. Send those to a cheap, fast model and keep judgment on a strong one. Name the tiers in `config.json`:
@@ -506,6 +529,50 @@ if (r.rung === 'human') { /* r.answer */ } else { /* r.value, r.rung is 'fast' o
 Each run records which rung handled each step as `run.spectrum`, e.g. `code 2 · fast 1 · smart 0 · human 1` (plus `· 1 escalated` when fast had to hand up). An ai step with no `tier` counts as `smart`; a provider literally named `fast` or `smart` counts as that tier. `rufus run` / `answer` print it as `Handled by: ...`, and `rufus chat status` shows the total across your runs, so you can see how much stayed in code and fast versus how much needed smart or you. Replay judges an escalated step on its `smart` rung.
 
 `fast` and `smart` are just names (any key of `providers` works, see below). `--provider <name>` is accepted by `rufus mine --ai`, `rufus compare` and `rufus replay`; with no flag, `mine --ai` uses `mine.provider`, else `smart` if you defined it. The way to choose: run `rufus compare <flow> --provider fast` on your seeded cases. If the fast tier passes the same `verify`, switch that step.
+
+### Three stages: plan, execute, verify (v10)
+
+A step-by-step flow is fine for small things. For a unit of real work, give it the shape a careful person uses: **decide, do, check**. `ctx.staged` runs three explicit stages, and each one may use code, a model, or both, always in the preference order **Code > Fast AI > Smart AI > Human**.
+
+| Stage | Job | Typical rung |
+| --- | --- | --- |
+| **1. `plan(input, ctx)`** | Gather context (exact facts, `retrieveSimilarExamples` over real history), write one concrete **goal** (plus optional objective `criteria`), and choose the **route** upfront: `code`, `fast`, `smart` or `human`. | code |
+| **2. `execute(plan, ctx)`** | Do the work on **that route only**. No fast-then-medium-then-smart cascade on a normal run: a plan that says `smart` never calls the fast model. | the planned route |
+| **3. `verify(result, plan, ctx)`** | Cross-check the result against the Stage 1 goal. Code checks the AI's output; for complex output a cheap `ctx.ai` review can read it against the goal, the criteria and your real examples. | code (AI optional) |
+
+```ts
+import { defineStagedFlow, retrieveSimilarExamples } from './src';
+
+export const reply = defineStagedFlow<{ sender: string; text: string }, string>(
+  { id: 'reply', name: 'Reply', description: 'Plan, write, check.' },
+  {
+    maxReplans: 1, // default 1, hard cap 5
+    plan: async (input, ctx) => {
+      const examples = await ctx.code('examples', () => retrieveSimilarExamples(input.text, history, { sender: input.sender, limit: 3 }));
+      const easy = examples.length >= 2 && examples[0]!.similarity > 0.6;
+      return {
+        goal: 'A reply of at most 12 words that answers the question and keeps their tone.', // explicit and concrete
+        criteria: ['at most 12 words', 'no greeting unless they greeted first'],
+        route: ctx.replan ? ctx.replan.nextRoute : easy ? 'fast' : 'smart', // chosen upfront
+        context: { examples, message: input },
+      };
+    },
+    execute: (plan, ctx) => ctx.ai('draft', { prompt: plan.goal, context: plan.context }), // tier defaults to plan.route
+    verify: (text, plan) => (text.split(/\s+/).length <= 12 ? { ok: true } : { ok: false, reason: `"${text}" is over 12 words` }),
+    human: ({ reason }) => ({ title: 'Write this one', summary: reason }), // optional card; a default is used without it
+  },
+);
+```
+
+**Re-plan escalation.** Only when `verify` fails does the engine do anything extra. It does **not** retry the same step blindly: it feeds the exact failure back into `plan` (`ctx.replan` has the `reason`, the previous plan, route and result, and `nextRoute`, one rung up), so the plan can change its prompt and **upgrade the route**. A re-plan can never route cheaper than the pass that just failed. This repeats at most `maxReplans` times. If verification still fails, or any plan routes to `human`, a person decides (`ctx.human`), with the goal, the last result and the reason on the card. A model that cannot pass its own step check inside `execute` counts as a failed attempt, not a crashed run.
+
+```
+plan ──▶ execute ──▶ verify ──ok──▶ done
+ ▲                      │ fail (reason)
+ └── re-plan: reason in, route up ◀┘      after maxReplans, or route "human" ──▶ human
+```
+
+The result is `{ status: 'passed' | 'human', route, goal, plan, result | answer, replans, trail }`; `trail` lists every pass (route, outcome, reason). Use `defineStagedFlow(meta, spec)` for a flow that is one unit, or `ctx.staged(name, spec)` inside any `defineFlow`. Every stage outcome is saved with the run, so a resume (or a human's answer) never plans, calls a model or verifies twice. In `run.spectrum`, plan and verify count as code, execute counts as its route, and the helpers inside a stage are not counted a second time. Replay and case capture work on the `ctx.ai` steps inside a stage like any other (put a `verify` on the step for the replay gate; the stage `verify` checks the goal). Existing flows are untouched: `ctx.code`, `ctx.ai`, `ctx.escalate` and `ctx.human` behave exactly as before.
 
 ## Learning guardrails: no monkey-patching
 
@@ -608,10 +675,10 @@ defineFlow({ id: 'inbox', name: 'Inbox', description: '...', provider: 'claude' 
 
 ```
 src/providers/  native providers (Google Gemini over fetch)
-src/engine/     defineFlow, Engine, step runner, AI verify loop, providers, spectrum (code / fast / smart / human)
+src/engine/     defineFlow, defineStagedFlow, Engine, step runner, `stages` (plan -> execute -> verify with re-plan escalation), AI verify loop, providers, spectrum (code / fast / smart / human)
 src/store/      atomic JSON file store (no native deps)
 src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay; compare (plain vs. assisted)
-src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`, `retrieveSimilarExamples`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `ideals` (explicit lessons as constraints, drift), `mine` (voice, invariants, intents, recency, optional AI blueprints)
+src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`, `retrieveSimilarExamples`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `backtest` (strictly causal time-travel check), `ideals` (explicit lessons as constraints, drift), `mine` (voice, invariants, intents, recency, optional AI blueprints)
 src/corpus/     `CorpusItem`, `CorpusStore`, `SourceAdapter`s (files, browser, calendar, email, ai-prompts), recurrence, `buildCorpusSummary` / hybrid `queryCorpus`, `embeddings` (providers, `EmbeddingCache`)
 src/recency.ts  exponential and rank-based recency weights, shared by history and the corpus
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop

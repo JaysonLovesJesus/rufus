@@ -3,11 +3,13 @@ import { recallMemory, type CaseStore } from '../learning/cases';
 import type { LessonStore } from '../learning/lessons';
 import { AiVerificationError, buildSystemPrompt, runAiStep } from './ai';
 import { pickProvider } from './providers';
+import { runStaged } from './stages';
 import { tierOfName } from './spectrum';
 import type {
   AiProvider,
   AiStepOptions,
   EscalateOptions,
+  CodeStepOptions,
   EscalateResult,
   Flow,
   FlowContext,
@@ -16,6 +18,9 @@ import type {
   HumanOption,
   HumanStepSpec,
   RunRecord,
+  StagePlan,
+  StagedResult,
+  StagedSpec,
   StepRecord,
   Tier,
 } from '../types';
@@ -84,13 +89,13 @@ export class StepRunner<I = unknown> implements FlowContext<I> {
     return n === 1 ? base : `${base}#${n}`;
   }
 
-  async code<T>(name: string, fn: () => T | Promise<T>): Promise<T> {
+  async code<T>(name: string, fn: () => T | Promise<T>, opts: CodeStepOptions = {}): Promise<T> {
     const key = this.keyFor('code', name);
     const cached = this.run.steps[key];
     if (cached?.done) return cached.result as T;
 
     const result = toJson(await fn());
-    this.run.steps[key] = { kind: 'code', name, done: true, result };
+    this.run.steps[key] = { kind: 'code', name, done: true, result, ...(opts.bookkeeping ? { bookkeeping: true } : {}) };
     await this.deps.store.saveRun(this.run);
     return result;
   }
@@ -184,6 +189,11 @@ export class StepRunner<I = unknown> implements FlowContext<I> {
       this.run.steps[key] = { kind: 'ai', name, done: true, result: null, attempts, escalated: true, handoff: { reason: f.reason, lastOutput: f.lastOutput } };
     }
     await this.deps.store.saveRun(this.run);
+  }
+
+  /** Three stages (`plan` -> `execute` -> `verify`), with re-plan escalation. See `runStaged`. */
+  staged<R, P extends StagePlan = StagePlan>(name: string, spec: StagedSpec<I, R, P>): Promise<StagedResult<R, P>> {
+    return runStaged(this, name, spec);
   }
 
   async human(name: string, spec: HumanStepSpec): Promise<HumanAnswer> {
