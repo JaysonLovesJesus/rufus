@@ -498,6 +498,15 @@ export interface StartConfig {
   webhook?: { port?: number; host?: string; token?: string };
   /** Proactive heads-ups before Anchor blocks and the good-morning brief. Default on; `false` turns it off. */
   heartbeat?: false | { leadMinutes?: number; quietHours?: string | false; morningBrief?: boolean; morningUntil?: string; phrasing?: 'code' | 'ai' };
+  /**
+   * v15: the proactive think-beat. Every so often Rufus looks at the live board (time, Anchor, recent chat and runs) and
+   * says ONE useful thing, or nothing. Default `45m`; `'0'` turns it off. Never in quiet hours or protected time.
+   */
+  thinkEvery?: string;
+  /** v15: read-only tools the think-beat may glance at (default `["calendar.read"]`) and the named provider it uses. */
+  think?: { tools?: string[]; provider?: string; quietHours?: string | false };
+  /** v15: a Verify item that waited this long after reaching you expires (never sends). Default `60m`. */
+  pendingTtl?: string;
 }
 
 /** Guardrails against piling up prompt rules. */

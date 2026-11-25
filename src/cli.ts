@@ -45,6 +45,8 @@ import { initSoul } from './soul/soul';
 import { buildTools } from './tools/tools';
 import { buildSensors, messageTriageHandler } from './sensors';
 import { UnifiedDaemon, type StartTickReport } from './unified/daemon';
+import { DEFAULT_THINK_EVERY } from './unified/think';
+import { REMEMBER_TOOL, rememberTool } from './chief/learning';
 import { startSignalWebhook } from './unified/webhook';
 import { nowSummary } from './unified/now';
 import { assignNumbers, loadStartState, requestCheckin, saveStartState } from './unified/state';
@@ -197,6 +199,7 @@ function describeStartTick(r: StartTickReport): string[] {
   if (r.checkin.length) lines.push(`check-in: sent ${r.checkin.length} item(s)`);
   if (r.batched.length) lines.push(`${r.batched.length} item(s) waiting for the next check-in`);
   for (const p of r.proactive ?? []) lines.push(`said: ${p.split('\n')[0]}`);
+  if (r.expired?.length) lines.push(`${r.expired.length} item(s) expired unanswered (nothing was sent)`);
   if (r.bridge) lines.push(...describeBridgeTick(r.bridge));
   return lines;
 }
@@ -734,6 +737,9 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
       if (cmd === 'start') {
         const intervalMs = parseDuration(flags['--interval'] ?? config.start?.interval ?? '30s');
         const checkinEveryMs = parseDuration(flags['--checkin'] ?? config.start?.checkinEvery ?? '2h');
+        const thinkEvery = String(config.start?.thinkEvery ?? DEFAULT_THINK_EVERY).trim();
+        const thinkEveryMs = /^0+\s*[smhd]?$/.test(thinkEvery) ? 0 : parseDuration(thinkEvery);
+        if (config.embeddings && !loop.tools.has(REMEMBER_TOOL)) loop.tools.register(rememberTool({ embeddings: createEmbeddingProvider(config.embeddings) }));
         const channelName = flags['--channel'] ?? config.start?.channel;
         const channel = options.channel ?? (channelName !== undefined || configuredChannels(config).length ? selectChannel(config, { channel: channelName, workspaceDir: dir }).channel : undefined);
         const daemon = new UnifiedDaemon({
@@ -744,6 +750,8 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
           chief: new ChiefOfStaff({ engine, provider: config.chief?.provider, loop, tools: loop.tools, ...(now ? { now } : {}) }),
           checkinEveryMs,
           ...(config.start?.heartbeat !== undefined ? { heartbeat: config.start.heartbeat } : {}),
+          ...(thinkEveryMs > 0 ? { think: { everyMs: thinkEveryMs, ...(config.start?.think?.tools ? { tools: config.start.think.tools } : {}), ...(config.start?.think?.provider ? { provider: config.start.think.provider } : {}), ...(config.start?.think?.quietHours !== undefined ? { quietHours: config.start.think.quietHours } : {}) } } : {}),
+          pendingTtlMs: parseDuration(config.start?.pendingTtl ?? '60m'),
           ...(now ? { now } : {}),
         });
         const report = (r: StartTickReport): void => {
@@ -797,6 +805,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         const note = words.join(' ').trim();
         const r = await loop.resolveHumanDecision(runId, { verdict: verdict as 'accept' | 'edit' | 'reject', ...(editedOutput !== undefined ? { editedOutput } : {}), ...(note ? { note } : {}) });
         io.out(`Recorded ${verdict} on ${runId}: now ${r.run.status}${r.run.committed ? ' (applied)' : ''}.`);
+        if (r.held) io.out(`Draft updated; nothing was sent. Send it with: rufus decide ${ref} accept`);
         if (r.run.commitError) io.err(`Not applied: ${r.run.commitError}`);
         if (r.trust) io.out(`Trust for ${r.trust.record.actionType}: ${r.trust.record.autonomy}, clean streak ${r.trust.record.consecutiveClean}/${r.trust.record.promotionThreshold}${r.trust.demoted ? ' (demoted back to check)' : ''}.`);
         if (r.promotionHint) io.out(r.promotionHint);

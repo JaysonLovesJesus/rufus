@@ -43,6 +43,12 @@ export interface AnchorBoundary {
   kind: BoundaryKind;
   /** Optional: the action types (`reply.chat`) or sensitivities (`external`, `money`, `login`) this rule covers. */
   appliesTo?: string[];
+  /**
+   * For `protect_time`: when it holds, in local time. One or more windows separated by `;`:
+   * `22:00-07:00` (daily), `sun` (all day), `sat 09:00-12:00`, or a span `fri 18:00 - sat 18:00`. Without it, the same
+   * forms are looked for in the rule's text ("Sabbath, fri 18:00 - sat 18:00").
+   */
+  when?: string;
 }
 
 export interface ScheduleBlock {
@@ -208,7 +214,7 @@ export function normalizeAnchor(raw: unknown, now: Date = new Date()): Anchor {
     const rule = str(o?.rule);
     if (!o || !rule) return [];
     const appliesTo = arr(o.appliesTo).map(str).filter((x): x is string => !!x);
-    return [{ id: str(o.id) ?? slugify(rule), rule, kind: oneOf(o.kind, BOUNDARY_KINDS, 'require_approval'), ...(appliesTo.length ? { appliesTo } : {}) }];
+    return [{ id: str(o.id) ?? slugify(rule), rule, kind: oneOf(o.kind, BOUNDARY_KINDS, 'require_approval'), ...(appliesTo.length ? { appliesTo } : {}), ...(str(o.when) ? { when: str(o.when)! } : {}) }];
   });
   const today = localDate(now);
   const past = arr(r.pastSchedules).map((d) => normalizeDay(d, today)).slice(0, MAX_PAST_SCHEDULES);
@@ -403,6 +409,80 @@ export function checkBoundaries(anchor: Pick<Anchor, 'boundaries'>, actionType: 
   const floor = sensitivity.filter((s) => SENSITIVITIES.includes(s) && !approvalBy.some((b) => b.appliesTo?.includes(s)));
   for (const s of floor) approvalBy.push({ id: `builtin-${s}`, rule: `Always ask before anything ${s === 'external' ? 'external is sent' : s === 'money' ? 'involving money' : 'involving a login'}.`, kind: 'require_approval', appliesTo: [s] });
   return { blockedBy, approvalBy, requiresApproval: approvalBy.length > 0 };
+}
+
+// ---------- protected time ----------
+
+const DAY_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const DAY = '(sun(?:day)?|mon(?:day)?|tue(?:s|sday)?|wed(?:s|nesday)?|thu(?:r|rs|rsday)?|fri(?:day)?|sat(?:urday)?)';
+const TIME = '(\\d{1,2}:\\d{2})';
+const WEEK_MIN = 7 * 24 * 60;
+
+const dayIndex = (d: string): number => DAY_NAMES.indexOf(d.slice(0, 3).toLowerCase());
+const clockMin = (t: string): number => toMinutes(t.length === 4 ? `0${t}` : t);
+
+/** Week-minute ranges `[start, end)` (end may pass the week's end) for one `when` text. Unknown text gives none. */
+export function parseProtectWindows(text: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  const span = new RegExp(`\\b${DAY}\\.?\\s+${TIME}\\s*(?:-|–|—|to|until)\\s*${DAY}\\s+${TIME}`, 'gi');
+  const dayRange = new RegExp(`\\b${DAY}\\s+${TIME}\\s*(?:-|–|—|to)\\s*${TIME}`, 'gi');
+  const daily = new RegExp(`(?:^|[\\s,;(])${TIME}\\s*(?:-|–|—|to)\\s*${TIME}`, 'gi');
+  const wholeDay = new RegExp(`\\b${DAY}s?\\b`, 'gi');
+  let rest = text;
+  const take = (re: RegExp, fn: (m: RegExpExecArray) => void): void => {
+    rest = rest.replace(re, (...args: unknown[]) => {
+      fn(args.slice(0, -2) as unknown as RegExpExecArray);
+      return ' ';
+    });
+  };
+  try {
+    take(span, (m) => {
+      const a = dayIndex(m[1]!) * 1440 + clockMin(m[2]!);
+      let b = dayIndex(m[3]!) * 1440 + clockMin(m[4]!);
+      if (b <= a) b += WEEK_MIN;
+      out.push([a, b]);
+    });
+    take(dayRange, (m) => {
+      const d = dayIndex(m[1]!) * 1440;
+      const a = clockMin(m[2]!);
+      let b = clockMin(m[3]!);
+      if (b <= a) b += 1440;
+      out.push([d + a, d + b]);
+    });
+    take(daily, (m) => {
+      const a = clockMin(m[1]!);
+      let b = clockMin(m[2]!);
+      if (b <= a) b += 1440;
+      for (let d = 0; d < 7; d++) out.push([d * 1440 + a, d * 1440 + b]);
+    });
+    take(wholeDay, (m) => {
+      const d = dayIndex(m[1]!) * 1440;
+      out.push([d, d + 1440]);
+    });
+  } catch {
+    return [];
+  }
+  return out;
+}
+
+/**
+ * The protected time happening right now, if any: a `protect_time` boundary whose window covers `now` (local time), or a
+ * current schedule block of kind `protected`. Proactive messages (the think-beat) stay silent inside it.
+ */
+export function protectedNow(anchor: Pick<Anchor, 'boundaries' | 'schedule'>, now: Date): { rule: string } | undefined {
+  const t = now.getDay() * 1440 + now.getHours() * 60 + now.getMinutes();
+  for (const b of anchor.boundaries) {
+    if (b.kind !== 'protect_time') continue;
+    for (const [a, z] of parseProtectWindows(b.when ?? b.rule)) {
+      if ((t >= a && t < z) || (t + WEEK_MIN >= a && t + WEEK_MIN < z)) return { rule: b.rule };
+    }
+  }
+  if (anchor.schedule.date === localDate(now)) {
+    const m = now.getHours() * 60 + now.getMinutes();
+    const block = anchor.schedule.blocks.find((b) => b.kind === 'protected' && b.status !== 'skipped' && toMinutes(b.start) <= m && m < toMinutes(b.end));
+    if (block) return { rule: block.title };
+  }
+  return undefined;
 }
 
 // ---------- summary ----------

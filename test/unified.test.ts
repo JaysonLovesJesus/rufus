@@ -96,34 +96,45 @@ async function setup(opts: { chief?: string; checkinEveryMs?: number; channel?: 
   return { dir, chat, engine, loop, daemon, log, printed, signal, advance: (ms: number) => void (t = new Date(t.getTime() + ms)) };
 }
 
-describe('parseLoopReply: dead-simple plain-text answers', () => {
+describe('parseLoopReply: only explicit commands (v15)', () => {
   it.each([
     ['1', { kind: 'decision', verdict: 'accept' }],
     ['y', { kind: 'decision', verdict: 'accept' }],
     ['Yes!', { kind: 'decision', verdict: 'accept' }],
-    ['ok', { kind: 'decision', verdict: 'accept' }],
-    ['👍', { kind: 'decision', verdict: 'accept' }],
-    ['1 but keep it short', { kind: 'decision', verdict: 'accept', note: 'but keep it short' }],
+    ['send', { kind: 'decision', verdict: 'accept' }],
+    ['Approve', { kind: 'decision', verdict: 'accept' }],
     ['2', { kind: 'decision', verdict: 'reject' }],
     ['n', { kind: 'decision', verdict: 'reject' }],
     ['no', { kind: 'decision', verdict: 'reject' }],
+    ['skip', { kind: 'decision', verdict: 'reject' }],
     ['2 too formal', { kind: 'decision', verdict: 'reject', note: 'too formal' }],
-    ['no: not this week', { kind: 'decision', verdict: 'reject', note: 'not this week' }],
+    ['skip: not this week', { kind: 'decision', verdict: 'reject', note: 'not this week' }],
+    ['reject wrong person', { kind: 'decision', verdict: 'reject', note: 'wrong person' }],
     ['edit: Thursday works, 12:30?', { kind: 'decision', verdict: 'edit', edit: 'Thursday works, 12:30?' }],
-    ['Edit Sure thing', { kind: 'decision', verdict: 'edit', edit: 'Sure thing' }],
     ['#2 1', { kind: 'decision', verdict: 'accept', ref: 2 }],
+    ['#2 send', { kind: 'decision', verdict: 'accept', ref: 2 }],
     ['#3 2 wrong person', { kind: 'decision', verdict: 'reject', note: 'wrong person', ref: 3 }],
     ['#1 edit: See you at 8', { kind: 'decision', verdict: 'edit', edit: 'See you at 8', ref: 1 }],
-    ['#4 See you at 8', { kind: 'decision', verdict: 'edit', edit: 'See you at 8', ref: 4 }],
     ['checkin', { kind: 'checkin' }],
     ['Check-in', { kind: 'checkin' }],
     ['now', { kind: 'checkin' }],
-  ])('%s', (text, expected) => {
-    expect(parseLoopReply(text)).toEqual(expected);
+  ])('%s (one item open)', (text, expected) => {
+    expect(parseLoopReply(text, 1)).toEqual(expected);
   });
 
-  it.each(['', '   ', 'what is on today?', 'No problem at all', 'editing is hard', 'okay so here is the thing', '#2'])('not a loop reply: %j', (text) => {
-    expect(parseLoopReply(text)).toBeUndefined();
+  it.each(['', '   ', 'what is on today?', 'No problem at all', 'editing is hard', 'okay so here is the thing', '#2', 'ok', '👍', 'sure', '1 but keep it short', 'no: not this week', 'Edit Sure thing', '#4 See you at 8', 'yes please do that and also tell him I am late'])(
+    'not a loop reply: %j',
+    (text) => {
+      expect(parseLoopReply(text, 1)).toBeUndefined();
+    },
+  );
+
+  it('bare verdicts need exactly one open item; "#n" forms always work', () => {
+    for (const n of [0, 2, 3]) {
+      expect(parseLoopReply('1', n)).toBeUndefined();
+      expect(parseLoopReply('edit: hi', n)).toBeUndefined();
+      expect(parseLoopReply('#1 send', n)).toEqual({ kind: 'decision', verdict: 'accept', ref: 1 });
+    }
   });
 });
 
@@ -147,12 +158,12 @@ describe('formatLoopItem: short plain text, no buttons', () => {
   });
 
   it('verify: the incoming message, the draft, and the reply line', () => {
-    expect(formatLoopItem(run({}), 1)).toBe('Sam texted "Can we move to 3?" — want me to reply "Sure, 3 works."? (1 to send, 2 to skip, or type your own version)');
-    expect(formatLoopItem(run({ urgency: 'urgent' }), 2, { multi: true })).toBe('#2 Heads up: Sam texted "Can we move to 3?" — want me to reply "Sure, 3 works."? (#2 1 to send, #2 2 to skip, or #2 + your own version)');
+    expect(formatLoopItem(run({}), 1)).toBe('Sam texted "Can we move to 3?" — want me to reply "Sure, 3 works."? (1 to send, 2 to skip, or edit: your own version)');
+    expect(formatLoopItem(run({ urgency: 'urgent' }), 2, { multi: true })).toBe('#2 Heads up: Sam texted "Can we move to 3?" — want me to reply "Sure, 3 works."? (#2 1 to send, #2 2 to skip, or #2 edit: your own version)');
   });
 
   it('plan and human-step items, and a promotion hint', () => {
-    expect(formatLoopItem(run({ status: 'awaiting_human_plan', goal: 'Book the venue', question: 'Which date?' }), 3)).toBe('Sam texted "Can we move to 3?". Want me to book the venue? Which date? (1 to go ahead, 2 to drop it, or type a better plan)');
+    expect(formatLoopItem(run({ status: 'awaiting_human_plan', goal: 'Book the venue', question: 'Which date?' }), 3)).toBe('Sam texted "Can we move to 3?". Want me to book the venue? Which date? (1 to go ahead, 2 to drop it, or edit: a better plan)');
     expect(formatLoopItem(run({ status: 'awaiting_human_execute', humanStep: 'Record the intro video', signal: { id: 's', surface: 'anchor', kind: 'x' } }), 1)).toBe("Your turn: Record the intro video. (1 when it's done, 2 to skip)");
     expect(formatLoopItem(run({ promotionHint: 'Stop checking?' }), 1)).toMatch(/\nStop checking\?$/);
   });
@@ -185,7 +196,7 @@ describe('rufus start: the unified daemon', () => {
     expect(first.loop!.signals).toBe(3);
     expect(first.sentNow).toHaveLength(1);
     expect(first.batched).toHaveLength(2);
-    expect(s.chat.sent).toEqual(['Heads up: Ops texted "The server is down" — want me to reply "Re: The server is down"? (1 to send, 2 to skip, or type your own version)']);
+    expect(s.chat.sent).toEqual(['Heads up: Ops texted "The server is down" — want me to reply "Re: The server is down"? (1 to send, 2 to skip, or edit: your own version)']);
 
     s.advance(HOUR);
     const quiet = await s.daemon.tick();
@@ -234,15 +245,19 @@ describe('rufus start: the unified daemon', () => {
     expect(s.chat.sent.slice(-2)).toEqual(['#2 rejected.', '#1 saved with your edit. Done.']);
   });
 
-  it('plain typed text right after a lone item is your edit; a question goes to the chief instead', async () => {
+  it('plain typed text right after a lone item is chat, never an edit (v15); only "edit: ..." edits', async () => {
     const s = await setup({ chief: 'You have one reply waiting.' });
     await s.signal('Dinner tonight?', 'urgent');
     await s.daemon.tick();
     s.chat.human('what does it say?');
     await s.daemon.tick();
     expect(s.chat.last()).toBe('You have one reply waiting.');
-    expect(await s.loop.pending()).toHaveLength(1);
     s.chat.human("Can't tonight, tomorrow works");
+    const chat = await s.daemon.tick();
+    expect(chat.decided).toEqual([]);
+    expect(s.log).toEqual([]);
+    expect(await s.loop.pending()).toHaveLength(1);
+    s.chat.human("edit: Can't tonight, tomorrow works");
     const r = await s.daemon.tick();
     expect(r.decided[0]).toMatchObject({ n: 1, verdict: 'edit', status: 'edited' });
     expect(s.log).toEqual(["Can't tonight, tomorrow works"]);
@@ -273,7 +288,7 @@ describe('rufus start: the unified daemon', () => {
     await requestCheckin(s.dir);
     const r = await s.daemon.tick();
     expect(r.checkin).toHaveLength(1);
-    expect(s.chat.last()).toBe('Sam texted "Lunch?" — want me to reply "Re: Lunch?"? (1 to send, 2 to skip, or type your own version)');
+    expect(s.chat.last()).toBe('Sam texted "Lunch?" — want me to reply "Re: Lunch?"? (1 to send, 2 to skip, or edit: your own version)');
     await expect(access(path.join(s.dir, 'checkin.request'))).rejects.toThrow(); // consumed
   });
 
@@ -333,7 +348,7 @@ describe('rufus start: the unified daemon', () => {
     const s = await setup({ channel: false });
     await s.signal('Ping?', 'urgent');
     await s.daemon.tick();
-    expect(s.printed).toEqual(['Heads up: Sam texted "Ping?" — want me to reply "Re: Ping?"? (1 to send, 2 to skip, or type your own version)']);
+    expect(s.printed).toEqual(['Heads up: Sam texted "Ping?" — want me to reply "Re: Ping?"? (1 to send, 2 to skip, or edit: your own version)']);
   });
 });
 

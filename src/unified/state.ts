@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { LoopRun } from '../engine/loop';
 import { FileStore } from '../store';
+import type { ThinkState } from './think';
 
 /** What `rufus start` remembers between passes (`<workspace>/start-state.json`). */
 export interface StartState {
@@ -24,6 +25,12 @@ export interface StartState {
   nudged?: string[];
   /** The local date (`YYYY-MM-DD`) of the last good-morning brief. */
   lastMorningBrief?: string;
+  /** v15: when each delivered run last reached the human. A Verify item expires `pendingTtlMs` after this. */
+  deliveredAt?: Record<string, string>;
+  /** v15: the proactive think-beat. */
+  think?: ThinkState;
+  /** v15: when the human last said or reacted anything. */
+  lastHumanAt?: string;
 }
 
 export const START_STATE_FILE = 'start-state.json';
@@ -71,6 +78,7 @@ export function assignNumbers(state: StartState, pending: readonly (Pick<LoopRun
   }
   state.numbers = numbers;
   state.delivered = state.delivered.filter((id) => open.has(id));
+  if (state.deliveredAt) for (const id of Object.keys(state.deliveredAt)) if (!open.has(id)) delete state.deliveredAt[id];
   if (state.lastItem && !open.has(state.lastItem)) delete state.lastItem;
   return numbers;
 }

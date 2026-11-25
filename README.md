@@ -609,21 +609,26 @@ What one pass does:
 Many chat apps (Beeper included, even when it shows your Telegram chats) do not render Telegram's inline buttons. So every paused item is short plain text, written like an assistant texting you (no form fields), and every answer is something you can type in two keystrokes:
 
 ```
-Sam texted "Can we move lunch to Thursday?" — want me to reply "Thursday works. 12:30?"? (1 to send, 2 to skip, or type your own version)
+Sam texted "Can we move lunch to Thursday?" — want me to reply "Thursday works. 12:30?"? (1 to send, 2 to skip, or edit: your own version)
 ```
 
 Urgent items start with "Heads up:"; when several are open each starts with its number (`#2 ...`).
 
 | You type | Means |
 | --- | --- |
-| `1`, `y`, `yes`, `ok`, `👍` | accept (`1 <note>` adds a note) |
-| `2`, `n`, `no` | reject (`2 too formal` or `no: not now` gives the reason) |
-| `edit: <your version>` | your version replaces the draft and is what gets applied |
-| plain text right after a lone item | the same as `edit:` (a question ending in `?` goes to the Chief of Staff instead) |
-| `#2 1`, `#2 2 <reason>`, `#2 edit: ...`, `#2 <text>` | the same, for item #2 when several are open |
+| `1`, `send`, `approve`, `yes`, `y` | accept (only when it is the whole message and exactly one item is open) |
+| `2`, `skip`, `reject`, `no`, `n` | reject (`2 too formal`, `skip not now`, `reject wrong person` give a short reason) |
+| `edit: <your version>` | your version replaces the draft (see below: an external send still waits for `send`) |
+| `#2 send`, `#2 2 <reason>`, `#2 edit: ...` | the same, for item #2; always works, even with several open |
 | `checkin` / `now` | the one-screen summary plus everything waiting, right away |
 
-When a flow card is open too, a bare `1` answers the card; loop items then need their `#n`. Plan items read `(1 to go ahead, 2 to drop it, or type a better plan)`; real-life steps read `(1 when it's done, 2 to skip)`. In code: `parseLoopReply(text)`, `formatLoopItem(run, n)`, `formatCheckin(items)`. From the terminal: `rufus decide #1 accept`.
+When a flow card is open too, a bare `1` answers the card; loop items then need their `#n`. Plan items read `(1 to go ahead, 2 to drop it, or edit: a better plan)`; real-life steps read `(1 when it's done, 2 to skip)`. In code: `parseLoopReply(text, openCount)`, `formatLoopItem(run, n)`, `formatCheckin(items)`. From the terminal: `rufus decide #1 accept`.
+
+#### Ironclad send safety (v15)
+
+- **Only explicit commands touch an item.** Anything else you type or say in a voice note, however it starts ("Yes, but…", "No worries…", "#1 tell her Friday"), is conversation: it goes to the Chief of Staff and can never approve, edit or send an item. `#1 <free text>` gets a one-line reminder of the exact forms.
+- **An edit never sends.** `edit: <text>` on anything `external`, `money` or `login` (a `beeper.send`, a payment) only replaces the draft and answers `Updated draft for Sam: "<text>" — reply #1 send to send it, or #1 skip to drop it.` Only an explicit `1` / `send` / `#1 send` commits it. (Edits of private, local results still apply at once.)
+- **Stale items expire.** A Verify item that reached you more than `start.pendingTtl` ago (default `60m`) is marked `expired`: never committed, never sent, never revived by a later message.
 
 ### `SOUL.md`: your words in every prompt
 
@@ -714,6 +719,11 @@ It also asks a running `rufus start` for a check-in on its next pass.
 - **A stream, not forced back-and-forth.** The chief picks the shape of each reply: one short message, two short bubbles (split on a `---` line, sent with a brief pause and typing in between), `REACT: 👍` (just a reaction on your "ok thanks"; apps that cannot react get the emoji), or `NO_REPLY` (silence). Replies use casual 12-hour times and no tags like `(focus)`.
 - **Natural heads-ups.** `Chapel is in 10 min (2pm)`. Set `"heartbeat": { "phrasing": "ai" }` to have one fast-tier call word it (the code line is the fallback if the model fails or rambles).
 - **Learning from rejections.** When you reject a reply item with a note (`2 that's just a call alert, ignore those`), it is saved as a feedback example; the next triage of a similar message gets your closest past decisions and the instruction to follow them, so it is classified `ignore` without a new regex.
+
+### Jarvis core (v15)
+
+- **Proactive think-beat.** Every `start.thinkEvery` (default `45m`; `"0"` turns it off) Rufus wakes on its own: code gathers a small live board (local date, weekday and time, today's Anchor blocks, goals and projects, the last few chat lines, recent loop runs, your saved notes, and a quick glance at fast read-only tools like `calendar.read`), and one model call with `SOUL.md` decides whether there is ONE genuinely useful thing to say. Usually it answers `SILENT` and nothing is sent. Never in quiet hours, never mid-conversation, never in an Anchor `protect_time` window (e.g. `{ "kind": "protect_time", "rule": "Keep the Sabbath quiet", "when": "fri 18:00 - sat 18:00" }`, or a `protected` block). If two proactive messages in a row get no reply or reaction, the interval doubles with each further one until you talk again. Tune with `"start": { "think": { "tools": ["calendar.read"], "provider": "fast" } }`.
+- **Conversational self-learning.** Say a correction, preference or fact in normal chat or a voice note ("ignore WhatsApp call alerts", "keep messages less dense", "I'm meeting the pastor Friday") and the chief saves it with its `remember` tool (or type `remember: <text>`, $0) into `corpus/items.jsonl` as a high-signal `feedback` item (`kind` `feedback` / `preference` / `fact`, `verdict` `reject` / `note`), embedded into the cache when embeddings are in use. Triage, drafting, chat and the think-beat all read it on the very next pass.
 
 ### What is primary and what is legacy
 

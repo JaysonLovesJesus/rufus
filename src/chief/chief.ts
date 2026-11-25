@@ -10,6 +10,7 @@ import { buildPersona, loadSoul, relevantHits, timeFacts, withPersona } from '..
 import { ToolGatedError, type ToolRegistry } from '../tools/tools';
 import type { AiMessage } from '../types';
 import { queueChiefAction } from './actions';
+import { REMEMBER_TOOL, rememberNote } from './learning';
 import { DEFAULT_CHAT_TURNS, appendChatTurns, formatChatHistory, loadChatHistory } from './history';
 
 /** What the Chief of Staff says back, plus any cards whose full text is already in that reply. */
@@ -59,7 +60,8 @@ export type ChiefCommand =
   | { kind: 'flows' }
   | { kind: 'lessons' }
   | { kind: 'run'; flowId: string; inputJson?: string }
-  | { kind: 'learn'; scope: string; rule: string };
+  | { kind: 'learn'; scope: string; rule: string }
+  | { kind: 'remember'; text: string };
 
 export interface ChiefOfStaffOptions {
   engine: Engine;
@@ -134,6 +136,11 @@ function systemWithTools(tools: ToolRegistry, maxSteps: number): string {
     'TOOL_CALL: {"tool":"<name>","args":{...}}',
     `You then get the result and can call another tool or write the final reply (at most ${maxSteps} tool calls). Never show TOOL_CALL in a final reply.`,
     'Read-only tools run right away. Private-workspace tools (like anchor.update for their schedule and goals) run right away too, but only when they asked for that change: then confirm briefly what changed.',
+    ...(tools.has(REMEMBER_TOOL)
+      ? [
+          `When they correct you, tell you a preference, or share a fact worth keeping ("ignore WhatsApp call alerts", "keep messages less dense", "I'm meeting the pastor Friday"), FIRST save it with ${REMEMBER_TOOL} (verdict "reject" for things to ignore or stop doing, otherwise "note"), then confirm in a few words. Don't save small talk.`,
+        ]
+      : []),
     'A side-effect tool that reaches the outside (sending a message, running a command) is never run from chat: it is queued for their approval, so in your final reply say exactly what is ready and that they can reply 1 to do it.',
     'Other things still go through commands: "run <flowId> [json]" or "learn <scope>: <rule>". Nothing with side effects happens without their explicit yes.',
     'Tools:',
@@ -289,6 +296,9 @@ export class ChiefOfStaff {
       return undefined;
     }
 
+    const remember = /^(?:remember|feedback|note to self)\s*:\s*(\S[\s\S]*)$/i.exec(trimmed);
+    if (remember) return { kind: 'remember', text: remember[1]!.trim() };
+
     const learn = /^learn\s+(global|flow:[^\s:]+|role:[^\s:]+|[^\s:]+)\s*:\s*([\s\S]+)$/i.exec(trimmed);
     if (learn) {
       let scope = learn[1]!;
@@ -317,6 +327,10 @@ export class ChiefOfStaff {
         return this.start(c.flowId, c.inputJson);
       case 'learn':
         return reply(await this.learn(c.scope, c.rule));
+      case 'remember': {
+        await rememberNote(this.loop?.dir ?? this.dir, { text: c.text }, { now: this.now() });
+        return reply(`Got it, I'll keep that in mind: "${oneLine(c.text, 160)}".`);
+      }
     }
   }
 

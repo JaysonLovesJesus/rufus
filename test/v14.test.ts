@@ -321,7 +321,7 @@ describe('natural nudges and Verify messages', () => {
 
   it('a Verify item reads like an assistant texting, with no [#1] or (urgent) form fields', () => {
     const text = formatLoopItem(run({ urgency: 'normal' }), 1);
-    expect(text).toBe('Robin texted "are we still on for tonight?" — want me to reply "Yes! See you at 7."? (1 to send, 2 to skip, or type your own version)');
+    expect(text).toBe('Robin texted "are we still on for tonight?" — want me to reply "Yes! See you at 7."? (1 to send, 2 to skip, or edit: your own version)');
     const urgent = formatLoopItem(run({}), 1);
     expect(urgent).not.toMatch(/\[#|\(urgent\)|Draft:|Reply:/);
     expect(urgent.startsWith('Heads up: Robin texted')).toBe(true);
@@ -329,13 +329,13 @@ describe('natural nudges and Verify messages', () => {
     expect(formatCheckin([{ run: run({}), n: 1 }, { run: run({ id: 'loop_2' }), n: 2 }])).toMatch(/^2 things waiting on you\./);
   });
 
-  it('parseLoopReply still reads 1, 2, y, n, edit: and natural feedback', () => {
-    expect(parseLoopReply('1')).toEqual({ kind: 'decision', verdict: 'accept' });
-    expect(parseLoopReply('y')).toEqual({ kind: 'decision', verdict: 'accept' });
-    expect(parseLoopReply('2')).toEqual({ kind: 'decision', verdict: 'reject' });
-    expect(parseLoopReply('n')).toEqual({ kind: 'decision', verdict: 'reject' });
-    expect(parseLoopReply('edit: See you at 8!')).toEqual({ kind: 'decision', verdict: 'edit', edit: 'See you at 8!' });
-    expect(parseLoopReply("2 that's just a WhatsApp call alert, ignore those")).toEqual({ kind: 'decision', verdict: 'reject', note: "that's just a WhatsApp call alert, ignore those" });
+  it('parseLoopReply still reads 1, 2, y, n, edit: and short reject reasons (with one item open)', () => {
+    expect(parseLoopReply('1', 1)).toEqual({ kind: 'decision', verdict: 'accept' });
+    expect(parseLoopReply('y', 1)).toEqual({ kind: 'decision', verdict: 'accept' });
+    expect(parseLoopReply('2', 1)).toEqual({ kind: 'decision', verdict: 'reject' });
+    expect(parseLoopReply('n', 1)).toEqual({ kind: 'decision', verdict: 'reject' });
+    expect(parseLoopReply('edit: See you at 8!', 1)).toEqual({ kind: 'decision', verdict: 'edit', edit: 'See you at 8!' });
+    expect(parseLoopReply("2 that's just a WhatsApp call alert, ignore those", 1)).toEqual({ kind: 'decision', verdict: 'reject', note: "that's just a WhatsApp call alert, ignore those" });
   });
 });
 

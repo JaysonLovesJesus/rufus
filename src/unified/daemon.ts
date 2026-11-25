@@ -7,9 +7,12 @@ import { appendChatTurns } from '../chief/history';
 import { inboxSensor } from '../engine/loop-builtins';
 import { ANCHOR_TOOL, anchorUpdateTool } from '../tools/anchor-tool';
 import type { Engine } from '../engine/engine';
-import type { HumanDecision, LoopRun, LoopRunStatus, LoopTickReport, MasterLoop } from '../engine/loop';
+import { DEFAULT_PENDING_TTL_MS, type HumanDecision, type LoopRun, type LoopRunStatus, type LoopTickReport, type MasterLoop } from '../engine/loop';
 import type { Verdict } from '../engine/trust';
-import { formatCheckin, formatLoopItem, parseLoopReply, type LoopReply } from './loop-text';
+import { clip } from '../corpus/types';
+import { REMEMBER_TOOL, rememberTool } from '../chief/learning';
+import { draftOf, formatCheckin, formatLoopItem, isBareVerdict, parseLoopReply, recipientOf, refOf, type LoopReply } from './loop-text';
+import { freshThinkState, think, thinkSkipReason, type ThinkOptions } from './think';
 import { acceptNudge, blocksToNudge, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, formatMorningBrief, formatNudge, inQuietHours, isMorning, markNudged, nudgePrompt, phoneSignalHandler, type HeartbeatOptions } from './heartbeat';
 import type { ScheduleBlock } from '../anchor/anchor';
 import { nowSummary } from './now';
@@ -42,6 +45,13 @@ export interface UnifiedDaemonOptions {
   heartbeat?: HeartbeatOptions | false;
   /** Pause between two bubbles of one chat reply. Default 350ms. */
   bubblePauseMs?: number;
+  /**
+   * v15: how long a Verify item may wait after it reached you. Older ones expire: never sent, never revived by a later
+   * message. Default 60 minutes.
+   */
+  pendingTtlMs?: number;
+  /** v15: the proactive Jarvis think-beat. Off unless set (`rufus start` turns it on every 45 minutes by default). */
+  think?: ThinkOptions | false;
   now?: () => Date;
 }
 
@@ -58,8 +68,12 @@ export interface StartTickReport {
   decided: Array<{ runId: string; n: number; verdict: Verdict; status: LoopRunStatus }>;
   /** Flow cards and chat (the CardBridge). */
   bridge?: TickReport;
-  /** Proactive messages Rufus started this pass (schedule heads-ups, the good-morning brief). */
+  /** Proactive messages Rufus started this pass (schedule heads-ups, the good-morning brief, the think-beat). */
   proactive?: string[];
+  /** v15: Verify items that expired unanswered this pass (nothing was sent). */
+  expired?: string[];
+  /** v15: what the think-beat did this pass: `sent`, `silent`, `started`, or `skipped: <why>`. */
+  thought?: string;
   /** Problems this pass; the next pass retries. */
   errors: string[];
 }
@@ -67,6 +81,8 @@ export interface StartTickReport {
 export const DEFAULT_CHECKIN_MS = 2 * 3_600_000;
 const KEEP_HANDLED = 500;
 const KEEP_SENT = 100;
+/** A think-beat never interrupts a live conversation: it waits until the human has been quiet this long. */
+const CONVERSATION_QUIET_MS = 5 * 60_000;
 
 const hash = (text: string): string => createHash('sha1').update(text.trim()).digest('hex');
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -119,6 +135,9 @@ export class UnifiedDaemon {
   private readonly chief?: ChiefOfStaff;
   private readonly checkinEveryMs: number;
   private readonly heartbeat: HeartbeatOptions | false;
+  private readonly thinkOpts: ThinkOptions | false;
+  private readonly pendingTtlMs: number;
+  private readonly bubblePauseMs: number;
   private readonly now: () => Date;
   private readonly relay?: RelayChannel;
   private readonly bridge?: CardBridge;
@@ -139,8 +158,13 @@ export class UnifiedDaemon {
     this.checkinEveryMs = opts.checkinEveryMs ?? DEFAULT_CHECKIN_MS;
     if (!(this.checkinEveryMs > 0)) throw new Error('checkinEveryMs must be above 0.');
     this.heartbeat = opts.heartbeat === false ? false : (opts.heartbeat ?? {});
+    this.thinkOpts = opts.think && opts.think.everyMs > 0 ? opts.think : false;
+    this.pendingTtlMs = opts.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
+    this.bubblePauseMs = Math.max(0, opts.bubblePauseMs ?? 350);
     // Your schedule and goals are editable from chat ("remove the study block"): private and local, so no Verify item.
     if (!this.loop.tools.has(ANCHOR_TOOL)) this.loop.tools.register(anchorUpdateTool());
+    // Corrections, preferences and facts said in chat are saved as feedback the next triage/chat pass learns from.
+    if (!this.loop.tools.has(REMEMBER_TOOL)) this.loop.tools.register(rememberTool());
     this.chief = opts.chief === false ? undefined : (opts.chief ?? new ChiefOfStaff({ engine: this.engine, loop: this.loop, tools: this.loop.tools, ...(opts.now ? { now: opts.now } : {}) }));
     // Side effects asked for in chat become Verify items; phone context signals are recorded silently.
     if (!this.loop.listHandlers().some((h) => h.id === chiefActionHandler.id)) this.loop.addHandler(chiefActionHandler);
@@ -190,6 +214,12 @@ export class UnifiedDaemon {
     const state = await loadStartState(this.loop.dir);
     this.current = state;
     try {
+      // Stale Verify items expire BEFORE any reply is read, so an old item can never be triggered by a later message.
+      try {
+        await this.expireStale(state, report);
+      } catch (err) {
+        report.errors.push(`expire: ${message(err)}`);
+      }
       if (this.channel?.poll) {
         if (state.since === undefined) {
           state.since = this.now().toISOString(); // first pass: listen from now on, never replay old chat
@@ -234,6 +264,13 @@ export class UnifiedDaemon {
           report.errors.push(`heartbeat: ${message(err)}`);
         }
       }
+      if (this.thinkOpts) {
+        try {
+          await this.thinkPass(state, report, this.thinkOpts);
+        } catch (err) {
+          report.errors.push(`think: ${message(err)}`);
+        }
+      }
     } finally {
       await this.persist();
       this.current = undefined;
@@ -270,6 +307,63 @@ export class UnifiedDaemon {
     if (sent.length) report.proactive = [...(report.proactive ?? []), ...sent];
   }
 
+  /** Expires Verify items that reached you more than `pendingTtlMs` ago. Undelivered items wait for their check-in. */
+  private async expireStale(state: StartState, report: StartTickReport): Promise<void> {
+    const now = this.now().toISOString();
+    const at = (state.deliveredAt ??= {});
+    for (const id of state.delivered) at[id] ??= now; // items delivered before v15: their clock starts now
+    const expired = await this.loop.expireStale({ ttlMs: this.pendingTtlMs, startedAt: (r) => at[r.id], reason: `no decision within ${Math.round(this.pendingTtlMs / 60_000)} min of reaching you` });
+    if (!expired.length) return;
+    report.expired = [...(report.expired ?? []), ...expired.map((r) => r.id)];
+    assignNumbers(state, await this.loop.pending()); // frees their numbers; nothing can answer them any more
+  }
+
+  /**
+   * The proactive think-beat: every `everyMs` (doubling while two or more proactive messages go unanswered), never in
+   * quiet hours, a protected window, or mid-conversation. One model call; `SILENT` sends nothing.
+   */
+  private async thinkPass(state: StartState, report: StartTickReport, opts: ThinkOptions): Promise<void> {
+    const now = this.now();
+    const t = (state.think ??= freshThinkState());
+    if (!t.lastAt) {
+      t.lastAt = now.toISOString(); // the clock starts with the daemon: no thought on the very first pass
+      report.thought = 'started';
+      return;
+    }
+    if (report.proactive?.length) {
+      t.lastAt = now.toISOString(); // the heartbeat already spoke this pass: that was the beat
+      report.thought = 'skipped: heartbeat spoke';
+      return;
+    }
+    const anchor = await loadAnchor(this.loop.dir, now);
+    const quietHours = opts.quietHours !== undefined ? opts.quietHours : this.heartbeat ? (this.heartbeat.quietHours ?? DEFAULT_QUIET_HOURS) : DEFAULT_QUIET_HOURS;
+    const skip = thinkSkipReason({ now, anchor, state: t, everyMs: opts.everyMs, quietHours, ...(opts.backoffAfter !== undefined ? { backoffAfter: opts.backoffAfter } : {}) });
+    if (skip) {
+      report.thought = `skipped: ${skip}`;
+      return;
+    }
+    if (state.lastHumanAt && now.getTime() - Date.parse(state.lastHumanAt) < CONVERSATION_QUIET_MS) {
+      report.thought = 'skipped: in conversation';
+      return;
+    }
+    t.lastAt = now.toISOString();
+    const provider = this.engine.routeProvider(opts.provider ? { provider: opts.provider } : { tier: 'fast' });
+    const r = await think({ provider, dir: this.loop.dir, loop: this.loop, now, tools: this.loop.tools, ...(opts.tools ? { glance: opts.tools } : {}), ...(opts.toolTimeoutMs !== undefined ? { toolTimeoutMs: opts.toolTimeoutMs } : {}) });
+    if (!r.bubbles) {
+      report.thought = 'silent';
+      return;
+    }
+    await this.channel?.typing?.().catch(() => undefined);
+    for (const [i, bubble] of r.bubbles.entries()) {
+      if (i && this.bubblePauseMs) await new Promise((resolve) => setTimeout(resolve, this.bubblePauseMs));
+      await this.say(bubble, false, true);
+    }
+    t.unanswered += 1;
+    t.lastSentAt = now.toISOString();
+    report.thought = 'sent';
+    report.proactive = [...(report.proactive ?? []), ...r.bubbles];
+  }
+
   /** One fast-tier call words the heads-up; the plain code line whenever the model is missing, fails or rambles. */
   private async phraseNudge(block: ScheduleBlock, now: Date): Promise<string> {
     try {
@@ -296,22 +390,32 @@ export class UnifiedDaemon {
       await this.persist();
       const text = msg.text.trim();
       if (!text || state.sent.includes(hash(text))) continue; // an echo of our own text never answers itself
+      // The human said (or reacted) something: proactive back-off resets.
+      state.lastHumanAt = this.now().toISOString();
+      if (state.think) state.think.unanswered = 0;
       await this.handleIncoming(state, msg, text, report);
     }
   }
 
+  /**
+   * v15, Ironclad Send Safety. Only explicit commands touch a loop item (`1`, `send`, `2 <reason>`, `edit: ...`, `#2 send`);
+   * every other message, typed or a voice note, is conversation and goes to the Chief of Staff. Nothing free-form can
+   * ever approve, edit or send an item.
+   */
   private async handleIncoming(state: StartState, msg: IncomingMessage, text: string, report: StartTickReport): Promise<void> {
     // An emoji reaction is seen and remembered by the chat side, never read as an answer or an edit.
     if (msg.reaction) return void this.relay!.inbox.push(msg);
-    const parsed: LoopReply | undefined = parseLoopReply(text);
-    if (parsed?.kind === 'checkin') {
-      this.chatCheckin = true;
-      return;
-    }
     const pending = await this.loop.pending();
     assignNumbers(state, pending);
     const delivered = pending.filter((r) => state.delivered.includes(r.id)).sort((a, b) => (state.numbers[a.id] ?? 0) - (state.numbers[b.id] ?? 0));
     const passOn = (): void => void this.relay!.inbox.push(msg);
+    // With a flow card open, bare answers belong to the card: loop items then need "#n".
+    const cardsOpen = (await this.engine.pending()).length > 0;
+    const parsed: LoopReply | undefined = parseLoopReply(text, cardsOpen ? 0 : delivered.length);
+    if (parsed?.kind === 'checkin') {
+      this.chatCheckin = true;
+      return;
+    }
 
     if (parsed?.kind === 'decision') {
       if (parsed.ref !== undefined) {
@@ -323,19 +427,19 @@ export class UnifiedDaemon {
         }
         return this.decide(state, target, parsed, report);
       }
-      if (!delivered.length) return passOn();
-      if ((await this.engine.pending()).length) return passOn(); // a flow card is open too: plain answers go to it, loop items need "#n"
-      if (delivered.length > 1) {
-        const n = state.numbers[delivered[0]!.id];
-        return this.say(`${delivered.length} items are waiting. Start with the number, like "#${n} 1" or "#${n} 2".`);
-      }
+      // Without a number, parseLoopReply only answers when exactly one item is open on your screen.
       return this.decide(state, delivered[0]!, parsed, report);
     }
 
-    // Plain typed text right after a lone item is your edit of it ("or type your edit"). Questions and commands are chat.
-    const lone = delivered.length === 1 && state.lastItem === delivered[0]!.id ? delivered[0]! : undefined;
-    if (lone && lone.status !== 'awaiting_human_execute' && !/\?\s*$/.test(text) && !this.chief?.isCommand(text) && !(await this.engine.pending()).length) {
-      return this.decide(state, lone, { kind: 'decision', verdict: 'edit', edit: text }, report);
+    // A bare "1" / "send" with several items open: ask which, never guess.
+    if (!cardsOpen && delivered.length > 1 && isBareVerdict(text)) {
+      const n = state.numbers[delivered[0]!.id];
+      return this.say(`${delivered.length} items are waiting. Start with the number, like "#${n} 1" or "#${n} 2".`);
+    }
+    // "#2 see you at 8": aimed at an item, but not a command. Say the exact forms instead of guessing an edit.
+    const ref = refOf(text);
+    if (ref !== undefined && pending.some((r) => state.numbers[r.id] === ref)) {
+      return this.say(`For #${ref}, reply "#${ref} send", "#${ref} skip", or "#${ref} edit: <your version>".`);
     }
     passOn();
   }
@@ -357,6 +461,12 @@ export class UnifiedDaemon {
     }
     const after = result.run;
     report.decided.push({ runId: run.id, n, verdict: reply.verdict, status: after.status });
+    if (result.held) {
+      // An edit of an external send: the new draft is saved, NOTHING was sent. It stays open for an explicit "send".
+      (state.deliveredAt ??= {})[run.id] = this.now().toISOString();
+      const draft = draftOf(after.result) ?? reply.edit ?? '';
+      return this.say(`Updated draft for ${recipientOf(after)}: "${clip(draft, 500)}" — reply #${n} send to send it, or #${n} skip to drop it.`);
+    }
     state.delivered = state.delivered.filter((id) => id !== run.id);
     if (state.lastItem === run.id) delete state.lastItem;
 
@@ -392,6 +502,7 @@ export class UnifiedDaemon {
         const text = this.chatCheckin ? `${(await nowSummary({ loop: this.loop, engine: this.engine, numbers: state.numbers, now })).join('\n')}\n\n${formatCheckin(items.map((run) => ({ run, n: state.numbers[run.id]! })))}` : formatCheckin(items.map((run) => ({ run, n: state.numbers[run.id]! })));
         await this.say(text);
         for (const r of items) if (!state.delivered.includes(r.id)) state.delivered.push(r.id);
+        for (const r of items) (state.deliveredAt ??= {})[r.id] = now.toISOString();
         report.checkin.push(...items.map((r) => r.id));
         if (items.length === 1) state.lastItem = items[0]!.id;
         else delete state.lastItem;
@@ -407,6 +518,7 @@ export class UnifiedDaemon {
       const openAfter = state.delivered.length + 1;
       await this.say(formatLoopItem(r, state.numbers[r.id]!, { multi: openAfter > 1 }));
       state.delivered.push(r.id);
+      (state.deliveredAt ??= {})[r.id] = now.toISOString();
       state.lastItem = r.id;
       this.followUps.delete(r.id);
       report.sentNow.push(r.id);
@@ -420,6 +532,7 @@ export class UnifiedDaemon {
         normal.length > 1 ? formatCheckin(normal.map((run) => ({ run, n: state.numbers[run.id]! }))) : formatLoopItem(normal[0]!, state.numbers[normal[0]!.id]!, { multi });
       await this.say(text);
       state.delivered.push(...normal.map((r) => r.id));
+      for (const r of normal) (state.deliveredAt ??= {})[r.id] = now.toISOString();
       if (normal.length === 1 && !multi) state.lastItem = normal[0]!.id;
       else delete state.lastItem;
       state.lastCheckinAt = now.toISOString();
@@ -433,7 +546,7 @@ export class UnifiedDaemon {
    * Records what we send (so its echo is ignored), then sends it, or prints it when there is no channel. What the daemon
    * itself says (items, heads-ups) also goes into the chat history; relayed chief replies are recorded by the chief.
    */
-  private async say(text: string, relayed = false): Promise<void> {
+  private async say(text: string, relayed = false, record = false): Promise<void> {
     const state = this.current;
     if (state) {
       state.sent = [...state.sent, hash(text)].slice(-KEEP_SENT);
@@ -441,6 +554,6 @@ export class UnifiedDaemon {
     }
     if (this.channel) await this.channel.send(text);
     else this.output(text);
-    if (!relayed && this.chief) await appendChatTurns(this.loop.dir, [{ role: 'assistant', text, at: this.now().toISOString() }]).catch(() => undefined);
+    if (!relayed && (this.chief || record)) await appendChatTurns(this.loop.dir, [{ role: 'assistant', text, at: this.now().toISOString() }]).catch(() => undefined);
   }
 }

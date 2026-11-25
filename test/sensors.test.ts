@@ -208,14 +208,17 @@ describe('messageTriageHandler', () => {
     expect(b.calls).toEqual([{ method: 'POST', path: '/v1/chats/c-sam/messages', body: { text: 'Thursday works. 12:30?' } }]);
   });
 
-  it('your typed edit is what gets sent', async () => {
+  it('your typed edit becomes the draft, and is what gets sent once you say send (v15: an edit never sends by itself)', async () => {
     const dir = await tempDir();
     const b = fakeBeeper([], {});
     const provider = new FakeProvider(['{"label":"urgent","reason":"x"}', '{"reply":"Yes."}']);
     const loop = new MasterLoop({ dir, sensors: [sensorOf([msg('1', 'Are you coming tonight?')])], handlers: [messageTriageHandler()], tools: new ToolRegistry({ tools: beeperTools({ fetch: b.fetch }) }), providers: { fast: provider }, now: () => NOW });
     const run = await loop.getRun((await loop.runOnce()).runs[0]!.runId);
     expect(run.urgency).toBe('urgent');
-    await loop.resolveHumanDecision(run.id, { verdict: 'edit', editedOutput: 'Yes, around 8.' });
+    const held = await loop.resolveHumanDecision(run.id, { verdict: 'edit', editedOutput: 'Yes, around 8.' });
+    expect(held).toMatchObject({ held: true, run: { status: 'awaiting_human_verify', result: { reply: 'Yes, around 8.', chatId: 'c-sam' } } });
+    expect(b.calls).toEqual([]);
+    await loop.resolveHumanDecision(run.id, { verdict: 'accept' });
     expect(b.calls.map((c) => c.body)).toEqual([{ text: 'Yes, around 8.' }]);
   });
 

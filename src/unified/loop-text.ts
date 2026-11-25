@@ -7,7 +7,7 @@ import { CHIEF_ACTION_SURFACE } from '../chief/actions';
  * Beeper-safe plain text for Master Loop items. Many chat apps (Beeper among them) do not render Telegram's inline
  * buttons, so every paused item is short text with a dead-simple reply:
  *
- *   Sam texted "can we move to 3?" — want me to reply "Sure, 3 works."? (1 to send, 2 to skip, or type your own version)
+ *   Sam texted "can we move to 3?" — want me to reply "Sure, 3 works."? (1 to send, 2 to skip, or edit: your own version)
  *
  * No metadata tags like `(urgent)`: an urgent item simply starts with "Heads up:" and arrives right away.
  */
@@ -16,43 +16,86 @@ export type LoopReply =
   | { kind: 'decision'; ref?: number; verdict: Verdict; note?: string; edit?: string }
   | { kind: 'checkin' };
 
-const ACCEPT = /^(1|y|ya|yes|yep|yeah|ok|okay|k|sure|approve|approved|accept|send|go|go ahead|👍|✅)[.!]*$/i;
-const REJECT = /^(2|n|no|nope|nah|reject|skip|drop|cancel|❌|👎)[.!]*$/i;
+/**
+ * v15, Ironclad Send Safety: only explicit, unambiguous commands are loop replies. Normal chat and voice notes NEVER are,
+ * so they always reach the Chief of Staff and can never approve, edit or send anything.
+ *
+ *   accept   `1`, `send`, `approve`, `yes`, `y`
+ *   reject   `2`, `skip`, `reject`, `no`, `n`             (with a short reason: `2 <reason>`, `skip <reason>`, `reject <reason>`)
+ *   edit     `edit: <new text>`                          (only with the `edit:` keyword)
+ *
+ * Bare forms count only when exactly one item is open and the whole message is just the command. `#<n> ...` names the
+ * item and always works: `#2 send`, `#2 skip wrong person`, `#2 edit: See you at 8`.
+ */
+const ACCEPT_WORDS = '1|send|approve|yes|y';
+const REJECT_WORDS = '2|skip|reject|no|n';
+const ACCEPT = new RegExp(`^(?:${ACCEPT_WORDS})[.!]*$`, 'i');
+const REJECT = new RegExp(`^(?:${REJECT_WORDS})[.!]*$`, 'i');
+/** `2 too formal`, `skip: not now`, `reject - wrong person`. Bare form: `no`/`n` never take a reason ("no worries ..." is chat). */
+const REJECT_REASON_BARE = /^(?:2|skip|reject)(?:\s*[:,.\-–—)]\s*|\s+)(\S[\s\S]*)$/i;
+/** With a number, every verdict may carry a reason: `#1 1 looks good`, `#2 no wrong person`. */
+const ACCEPT_REASON_REF = new RegExp(`^(?:${ACCEPT_WORDS})(?:\\s*[:,.\\-–—)]\\s*|\\s+)(\\S[\\s\\S]*)$`, 'i');
+const REJECT_REASON_REF = new RegExp(`^(?:${REJECT_WORDS})(?:\\s*[:,.\\-–—)]\\s*|\\s+)(\\S[\\s\\S]*)$`, 'i');
+const EDIT = /^edit\s*:\s*(\S[\s\S]*)$/i;
 const CHECKIN = /^(checkin|check in|check-in|now|what's waiting|whats waiting|batch)[?.!]*$/i;
+const REF = /^#\s*(\d{1,4})\b[\s:,.\-–—]*/;
+/** A reason is a short note, never a paragraph or a voice note. */
+export const MAX_REASON_CHARS = 120;
+
+const shortReason = (s: string): string | undefined => {
+  const t = s.trim();
+  return t && t.length <= MAX_REASON_CHARS && !/\n/.test(t) ? t : undefined;
+};
 
 /**
- * Reads a reply to a loop item, or `undefined` when the text is not one (it may be chat, or an answer to a flow card).
- *  - `1`, `y`, `yes`, `ok` ...        accept         `1 <note>`    accept with a note
- *  - `2`, `n`, `no` ...               reject         `2 <reason>`  reject with the reason (also `no: <reason>`)
- *  - `edit: <new text>`               edit (your version replaces the draft)
- *  - `#<n> ...`                       any of the above for item #n; `#<n> <text>` alone is an edit of #n
- *  - `checkin` / `now`                deliver everything batched right away
+ * Reads a reply to a loop item, or `undefined` when the text is not one (it is chat, or an answer to a flow card).
+ * `pendingCount`: how many loop items are open on the human's screen. Bare verdicts and a bare `edit:` count only when it
+ * is exactly 1; `#<n>` forms always count. Anything else, including any free-form sentence, is `undefined`.
  */
-export function parseLoopReply(text: string): LoopReply | undefined {
+export function parseLoopReply(text: string, pendingCount = 0): LoopReply | undefined {
   let body = text.trim();
   if (!body) return undefined;
   if (CHECKIN.test(body)) return { kind: 'checkin' };
-  let ref: number | undefined;
-  const r = /^#\s*(\d{1,4})\b[\s:,.\-–—]*/.exec(body);
+  const r = REF.exec(body);
   if (r) {
-    ref = Number(r[1]);
+    const ref = Number(r[1]);
     body = body.slice(r[0].length).trim();
     if (!body) return undefined;
+    const edit = EDIT.exec(body);
+    if (edit) return { kind: 'decision', ref, verdict: 'edit', edit: edit[1]!.trim() };
+    if (ACCEPT.test(body)) return { kind: 'decision', ref, verdict: 'accept' };
+    if (REJECT.test(body)) return { kind: 'decision', ref, verdict: 'reject' };
+    const acc = ACCEPT_REASON_REF.exec(body);
+    const accNote = acc ? shortReason(acc[1]!) : undefined;
+    if (accNote) return { kind: 'decision', ref, verdict: 'accept', note: accNote };
+    const rej = REJECT_REASON_REF.exec(body);
+    const rejNote = rej ? shortReason(rej[1]!) : undefined;
+    if (rejNote) return { kind: 'decision', ref, verdict: 'reject', note: rejNote };
+    return undefined; // "#2 <free text>" is NOT an edit: edits need the `edit:` keyword
   }
-  const withRef = <T extends object>(o: T): T & { ref?: number } => (ref !== undefined ? { ...o, ref } : o);
-  const edit = /^edit\s*[:\-–—]?\s+([\s\S]+)$|^edit\s*:\s*([\s\S]+)$/i.exec(body);
-  if (edit) {
-    const t = (edit[1] ?? edit[2] ?? '').trim();
-    return t ? withRef({ kind: 'decision' as const, verdict: 'edit' as const, edit: t }) : undefined;
-  }
-  if (ACCEPT.test(body)) return withRef({ kind: 'decision' as const, verdict: 'accept' as const });
-  if (REJECT.test(body)) return withRef({ kind: 'decision' as const, verdict: 'reject' as const });
-  const accept = /^1\s*[).:\-–—,]?\s+([\s\S]+)$/.exec(body);
-  if (accept) return withRef({ kind: 'decision' as const, verdict: 'accept' as const, note: accept[1]!.trim() });
-  const reject = /^(?:2\s*[).:\-–—,]?\s+|(?:no|reject|skip)\s*[:\-–—,]\s*)([\s\S]+)$/i.exec(body);
-  if (reject) return withRef({ kind: 'decision' as const, verdict: 'reject' as const, note: reject[1]!.trim() });
-  if (ref !== undefined) return { kind: 'decision', ref, verdict: 'edit', edit: body };
+  if (pendingCount !== 1) return undefined;
+  const edit = EDIT.exec(body);
+  if (edit) return { kind: 'decision', verdict: 'edit', edit: edit[1]!.trim() };
+  if (ACCEPT.test(body)) return { kind: 'decision', verdict: 'accept' };
+  if (REJECT.test(body)) return { kind: 'decision', verdict: 'reject' };
+  const rej = REJECT_REASON_BARE.exec(body);
+  const note = rej ? shortReason(rej[1]!) : undefined;
+  if (note) return { kind: 'decision', verdict: 'reject', note };
   return undefined;
+}
+
+/**
+ * True when the text is a bare verdict that WOULD count with exactly one item open (`1`, `send`, `2 too long`,
+ * `edit: ...`), so the daemon can ask for the item's number when several are open instead of guessing.
+ */
+export function isBareVerdict(text: string): boolean {
+  return parseLoopReply(text, 1)?.kind === 'decision' && !REF.test(text.trim());
+}
+
+/** `#<n> <something>` that is not a valid loop reply (`#1 see you at 8`): the daemon explains the exact forms. */
+export function refOf(text: string): number | undefined {
+  const r = REF.exec(text.trim());
+  return r ? Number(r[1]) : undefined;
 }
 
 const show = (v: unknown): string => (v === undefined || v === null ? '' : typeof v === 'string' ? v : JSON.stringify(v));
@@ -69,10 +112,10 @@ export function draftOf(result: unknown): string | undefined {
 /** What to type, for one stage, as a short parenthetical. `multi`: several items are open, so each answer needs its number. */
 export function replyHint(run: Pick<LoopRun, 'status'> & { result?: unknown }, n: number, multi = false): string {
   const p = multi ? `#${n} ` : '';
-  if (run.status === 'awaiting_human_plan') return `(${p}1 to go ahead, ${p}2 to drop it, or ${multi ? `#${n} + ` : 'type '}a better plan)`;
+  if (run.status === 'awaiting_human_plan') return `(${p}1 to go ahead, ${p}2 to drop it, or ${p}edit: a better plan)`;
   if (run.status === 'awaiting_human_execute') return `(${p}1 when it's done, ${p}2 to skip)`;
   const send = draftOf(run.result) !== undefined;
-  return `(${p}1 to ${send ? 'send' : 'go'}, ${p}2 to skip, or ${multi ? `#${n} + your` : 'type your'} own version)`;
+  return `(${p}1 to ${send ? 'send' : 'go'}, ${p}2 to skip, or ${p}edit: your own version)`;
 }
 
 const VERB: Record<string, string> = { chat: 'texted', email: 'emailed', sms: 'texted', phone: 'sent' };
@@ -83,7 +126,7 @@ const sentence = (s: string): string => (/[.!?…"]$/.test(s) ? s : `${s}.`);
 
 /**
  * One paused run, written like a human assistant texting: who said what, what Rufus would do, and how to answer.
- *   `Sam texted "Can we move to 3?" — want me to reply "Sure, 3 works."? (1 to send, 2 to skip, or type your own version)`
+ *   `Sam texted "Can we move to 3?" — want me to reply "Sure, 3 works."? (1 to send, 2 to skip, or edit: your own version)`
  * With several open, each starts with its number (`#2 ...`) so the answer can too.
  */
 export function formatLoopItem(run: LoopRun, n: number, opts: { multi?: boolean } = {}): string {
@@ -117,6 +160,14 @@ export function formatLoopItem(run: LoopRun, n: number, opts: { multi?: boolean 
   const lines = [`${lead}${body} ${hint}`];
   if (run.promotionHint) lines.push(run.promotionHint);
   return lines.join('\n');
+}
+
+/** Who a run's draft goes to: the result's recipient, the action's `to`, or whoever sent the message. */
+export function recipientOf(run: Pick<LoopRun, 'result' | 'signal'>): string {
+  const r = run.result && typeof run.result === 'object' ? (run.result as Record<string, unknown>) : {};
+  const args = r.args && typeof r.args === 'object' ? (r.args as Record<string, unknown>) : {};
+  const pick = [r.to, args.to, args.chatTitle, args.recipient, r.chatTitle, run.signal.actor, args.chatId, r.chatId].find((v): v is string => typeof v === 'string' && !!v.trim());
+  return pick ?? 'them';
 }
 
 /** The tool and recipient of a chat-requested action's result (`{ tool, args }`). */

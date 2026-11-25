@@ -206,6 +206,8 @@ export {
   ANCHOR_FILE,
   BLOCK_KINDS,
   SENSITIVITIES,
+  protectedNow,
+  parseProtectWindows,
   type Anchor,
   type AnchorGoal,
   type AnchorProject,
@@ -234,6 +236,9 @@ export {
   formatLoopRun,
   loopRunId,
   AWAITING,
+  HOLD_ON_EDIT,
+  DEFAULT_PENDING_TTL_MS,
+  withEditedDraft,
   LOOP_STATE_FILE,
   LOOP_RUNS_DIR,
   type LoopSignal,
@@ -295,7 +300,9 @@ export {
   type TriageLabel,
   type TriageResult,
 } from './sensors';
-export { parseLoopReply, formatLoopItem, formatCheckin, replyHint, draftOf, type LoopReply } from './unified/loop-text';
+export { parseLoopReply, isBareVerdict, refOf, recipientOf, MAX_REASON_CHARS, formatLoopItem, formatCheckin, replyHint, draftOf, type LoopReply } from './unified/loop-text';
+export { think, gatherBoard, parseThought, thinkInterval, thinkSkipReason, freshThinkState, THINK_PROMPT, SILENT, DEFAULT_THINK_EVERY, DEFAULT_BACKOFF_AFTER, MAX_BACKOFF_FACTOR, type ThinkOptions, type ThinkState } from './unified/think';
+export { rememberNote, rememberTool, noteItem, loadHumanNotes, guessKind, guessVerdict, REMEMBER_TOOL, HUMAN_NOTE_TAG, NOTE_KINDS, NOTE_ACTION_TYPES, type HumanNote, type NoteKind, type NoteVerdict, type RememberOptions, type RememberResult } from './chief/learning';
 export { UnifiedDaemon, DEFAULT_CHECKIN_MS, type UnifiedDaemonOptions, type StartTickReport } from './unified/daemon';
 export { acceptNudge, blocksToNudge, clock12, formatNudge, formatMorningBrief, nudgePrompt, speakableTitle, inQuietHours, isMorning, phoneSignalHandler, PHONE_KINDS, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, type HeartbeatOptions } from './unified/heartbeat';
 export { startSignalWebhook, validateWebhookSignal, DEFAULT_WEBHOOK_PORT, MIN_WEBHOOK_TOKEN_LENGTH, type SignalWebhook, type SignalWebhookOptions } from './unified/webhook';

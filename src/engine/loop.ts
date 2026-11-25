@@ -203,7 +203,9 @@ export type LoopRunStatus =
   | 'edited'
   | 'rejected'
   | 'blocked'
-  | 'error';
+  | 'error'
+  /** v15: waited on a human longer than its time-to-live; it can no longer be approved or sent. */
+  | 'expired';
 
 export const AWAITING: readonly LoopRunStatus[] = ['awaiting_human_plan', 'awaiting_human_execute', 'awaiting_human_verify'];
 
@@ -257,6 +259,14 @@ export interface LoopRun {
   decision?: HumanDecision & { stage: 'plan' | 'execute' | 'verify'; at: string };
   committed?: boolean;
   commitError?: string;
+  /**
+   * v15: human edits of an external/money/login draft. Each one replaced the draft but sent NOTHING: the run stays at
+   * Verify until an explicit accept ("send", "1").
+   */
+  edits?: Array<{ text: string; at: string }>;
+  /** v15: when (and why) it expired unanswered. */
+  expiredAt?: string;
+  expiredReason?: string;
   /** Tools this run called, in order. */
   toolCalls?: LoopToolCall[];
   /** Model calls made by this run. */
@@ -296,6 +306,11 @@ export interface DecisionResult {
   /** The example saved to `corpus/items.jsonl`. */
   example: CorpusItem;
   promotionHint?: string;
+  /**
+   * v15: an edit of a sensitive (external, money, login) draft was saved as the new draft and NOTHING was sent or applied.
+   * The run still waits at Verify for an explicit accept.
+   */
+  held?: boolean;
 }
 
 export interface LoopState {
@@ -339,6 +354,46 @@ function verdictOf(v: VerifyResult | undefined): VerifyResult {
 }
 
 const show = (v: unknown): string => (v === undefined ? '' : typeof v === 'string' ? v : JSON.stringify(v));
+
+/** What a sensitive edit can never do on its own: reach outside, spend money, or sign in. */
+export const HOLD_ON_EDIT: readonly Sensitivity[] = ['external', 'money', 'login'];
+
+/** Default time a Verify item may wait after it reached the human: 60 minutes. Older ones expire, never send. */
+export const DEFAULT_PENDING_TTL_MS = 60 * 60_000;
+
+const DRAFT_KEYS = ['reply', 'draft', 'text', 'message'] as const;
+const ARG_TEXT_KEYS = ['text', 'message', 'body'] as const;
+
+/**
+ * A result with the human's edited text as its draft, keeping everything else (recipient, chat id, tool, args), so the
+ * re-shown item still says who it goes to and an accept later sends exactly the edited text.
+ */
+export function withEditedDraft(result: unknown, edited: unknown): unknown {
+  if (typeof edited !== 'string') return edited ?? result;
+  if (typeof result === 'string' || result === undefined || result === null || typeof result !== 'object' || Array.isArray(result)) return edited;
+  const out: Record<string, unknown> = { ...(result as Record<string, unknown>) };
+  let hit = false;
+  for (const k of DRAFT_KEYS) {
+    if (typeof out[k] === 'string') {
+      out[k] = edited;
+      hit = true;
+    }
+  }
+  const args = out.args;
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    const a: Record<string, unknown> = { ...(args as Record<string, unknown>) };
+    const keys = ARG_TEXT_KEYS.filter((k) => typeof a[k] === 'string');
+    for (const k of keys.length ? keys : (['text'] as const)) a[k] = edited;
+    out.args = a;
+    if ('summary' in out && typeof out.tool === 'string') {
+      const to = ['to', 'chatTitle', 'chatId', 'recipient'].map((k) => a[k]).find((v): v is string => typeof v === 'string' && !!v.trim());
+      out.summary = `${out.tool}${to ? ` to ${to}` : ''}: "${clip(edited, 160)}"`;
+    }
+    hit = true;
+  }
+  if (!hit) out.reply = edited;
+  return out;
+}
 
 export const loopRunId = (sensorId: string, signalId: string): string => `loop_${createHash('sha256').update(`${sensorId}\u0000${signalId}`).digest('hex').slice(0, 16)}`;
 
@@ -415,6 +470,43 @@ export class MasterLoop {
     }
     const runs = await Promise.all(files.filter((f) => f.endsWith('.json')).map((f) => this.fs.readJson<LoopRun | null>(path.join(this.runsDir, f), null)));
     return runs.filter((r): r is LoopRun => !!r).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  }
+
+  /** Everything this run's plan touches: the plan's own sensitivities plus those of the tools it uses. */
+  sensitivityOf(run: Pick<LoopRun, 'plan'>): Sensitivity[] {
+    const plan = run.plan;
+    if (!plan) return [];
+    return [...new Set([...(plan.sensitivity ?? []), ...this.tools.sensitivityOf(plan.uses ?? [])])];
+  }
+
+  /**
+   * v15: expires Verify items that have waited longer than `ttlMs` since `startedAt(run)` (default: the run's last
+   * update). An expired item is never committed and never sent; it simply stops waiting. Returns the runs it expired.
+   */
+  async expireStale(opts: { ttlMs?: number; startedAt?: (run: LoopRun) => string | undefined; reason?: string } = {}): Promise<LoopRun[]> {
+    const ttl = opts.ttlMs ?? DEFAULT_PENDING_TTL_MS;
+    if (!(ttl > 0)) return [];
+    const now = this.now();
+    const out: LoopRun[] = [];
+    for (const run of await this.listRuns()) {
+      if (run.status !== 'awaiting_human_verify') continue;
+      const from = opts.startedAt ? opts.startedAt(run) : (run.updatedAt ?? run.createdAt);
+      const ms = from ? Date.parse(from) : NaN;
+      if (!Number.isFinite(ms) || now.getTime() - ms <= ttl) continue;
+      out.push(await this.expireRun(run.id, opts.reason ?? `no decision within ${Math.round(ttl / 60_000)} min`));
+    }
+    return out;
+  }
+
+  /** Marks one waiting run `expired`: nothing is committed, nothing is sent, and no later reply can revive it. */
+  async expireRun(runId: string, reason = 'expired'): Promise<LoopRun> {
+    const run = await this.getRun(runId);
+    if (!AWAITING.includes(run.status)) return run;
+    run.status = 'expired';
+    run.expiredAt = this.now().toISOString();
+    run.expiredReason = reason;
+    await this.save(run);
+    return run;
   }
 
   /** Runs waiting on a human, oldest first. */
@@ -741,8 +833,23 @@ export class MasterLoop {
       return { run, example };
     }
 
+    // v15: an edit of anything external / money / login NEVER commits on the same turn. It becomes the new draft, is
+    // recorded as an example, and the run keeps waiting for an explicit accept ("send", "1", "#n send").
+    if (stage === 'verify' && decision.verdict === 'edit' && this.sensitivityOf(run).some((x) => HOLD_ON_EDIT.includes(x))) {
+      const edited = decision.editedOutput !== undefined ? decision.editedOutput : run.result;
+      run.result = withEditedDraft(run.result, edited);
+      (run.edits ??= []).push({ text: show(edited), at: now.toISOString() });
+      run.status = 'awaiting_human_verify';
+      delete run.decision; // not decided yet: the send still needs its own yes
+      await new CorpusStore(this.fs.corpusFile).add([example]);
+      await this.save(run);
+      return { run, example, held: true };
+    }
+
     if (stage === 'verify') {
-      trust = await this.trust.recordFeedback(run.actionType!, decision.verdict, note);
+      // An accept after a held edit is the human's edited version going out: Earned Trust records it as an edit.
+      const trustVerdict: Verdict = decision.verdict === 'accept' && run.edits?.length ? 'edit' : decision.verdict;
+      trust = await this.trust.recordFeedback(run.actionType!, trustVerdict, note);
       if (decision.verdict !== 'reject') {
         const output = decision.verdict === 'edit' && decision.editedOutput !== undefined ? decision.editedOutput : run.result;
         await this.commit(run, handler, await loadAnchor(this.dir, now), [], output, true);
