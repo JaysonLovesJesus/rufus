@@ -250,7 +250,7 @@ describe('buildContactProfiles', () => {
   it('computes exact per-contact style', () => {
     const sam = p.contacts.find((c) => c.sender === 'Sam Rivera')!;
     expect(sam).toMatchObject({ channels: ['whatsapp'], dmCount: 10, groupCount: 0, liveShare: 1 });
-    expect(sam.style).toEqual({ count: 10, medianWords: 6, p90Words: 6, greetingRate: 0, signOffRate: 0, emojiRate: 0, exclamationRate: 0, lowercaseRate: 1, medianReplyMins: 1, distinctContacts: 1, topContactShare: 1 });
+    expect(sam.style).toEqual({ count: 10, medianWords: 6, p90Words: 6, greetingRate: 0, signOffRate: 0, emojiRate: 0, exclamationRate: 0, lowercaseRate: 1, medianReplyMins: 1, distinctContacts: 1, topContactShare: 1, effectiveCount: expect.any(Number) });
     expect(Object.keys(sam.byRhythm)).toEqual(['live']);
     const alex = p.contacts.find((c) => c.sender === 'Alex Chen')!;
     expect(alex.style).toMatchObject({ count: 8, medianWords: 14, greetingRate: 1, signOffRate: 1, lowercaseRate: 0, medianReplyMins: 90 });

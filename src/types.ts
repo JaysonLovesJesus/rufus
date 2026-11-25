@@ -195,6 +195,10 @@ export interface LearningConfig {
 
 /** `rufus mine` settings. */
 export interface MineConfig {
+  /** Recency weighting: days for a reply's weight to halve (default 180; 0 turns it off). Recent months describe you better than two-year-old habits. */
+  halfLifeDays?: number;
+  /** Rank-based alternative (wins over `halfLifeDays`): the Nth newest reply weighs half the newest, however long those N took. */
+  halfLifeObservations?: number;
   /** Named provider for `rufus mine --ai`. Default: `smart` if configured, else the default provider. */
   provider?: string;
   /** Your own intent buckets (first match wins). Replaces the built-in ones. `pattern` is a case-insensitive regex. */

@@ -277,6 +277,86 @@ At runtime, call `buildSituationalContext({ channel, sender, isGroup, incoming, 
 
 **`mine --ai`** sends a provider the code-assembled statistics plus a small sample (24 pairs by default, picked round-robin across the biggest intents and trimmed; contact names are withheld) and the anonymized situational slices (by closeness tier, DM vs. group, channel and rhythm; never names or prior messages), never the raw history. It returns *workflow blueprints* (name, frequency quoting your counts, trigger, what code handles, what the AI handles, where you approve) and *lessons* tagged `code`, `context` or `principle`, each with a ready-to-paste `rufus propose` line, so the regression gate still decides what is kept. Unparseable output is retried with the exact reason, like any `ctx.ai` step. `--save` writes the report to `history/mine-report.json`.
 
+## Life context: more than chats (v7)
+
+A chief of staff does not only know your chats. It knows your mail, the sites you live in, the notes you are working on and what is on your calendar. v7 adds one local corpus for all of it, and two principles for how Rufus uses your past:
+
+1. **History is a recency-weighted baseline.** What you did last month says more about you than what you did two years ago, so every summary decays old activity (exponential half-life) instead of averaging it in.
+2. **Ideals beat habits.** People change, and do not always live up to what they believe. Rufus helps you live up to the lessons you *stated*; it does not freeze your rushed habits. But ideals do not overpower evolution either: when your latest replies keep contradicting a saved lesson, Rufus asks you about it instead of enforcing a stale rule forever.
+
+### One corpus, four adapters (`rufus collect`)
+
+Everything becomes a `CorpusItem`: `{ id, source, kind, title?, summary, actor?, domain?, path?, timestamp, tags?, metadata? }`, with `source` one of `chat`, `email`, `browser`, `file`, `calendar` (or your own). Items live in `<workspace>/corpus/items.jsonl`, deduplicated by `id` (collecting twice changes nothing; an edited note is updated, not duplicated) and written atomically. Only a short summary is kept, never a full document or message body. Adapters are local and dependency-free:
+
+```sh
+rufus collect files ./notes ./docs [--ignore drafts,tmp]   # markdown / text / CSV / JSON
+rufus collect calendar ./cal.ics                            # or a JSON list of events
+rufus collect browser ./history.json                        # or a Chrome / Arc / Safari history database
+rufus collect email ./mail.mbox --me me@example.org         # .mbox, .eml (or a folder of them), or JSONL
+# any of them: --limit N (keep the newest N)  --dry-run (read and report, write nothing)
+```
+
+| Adapter | Reads | Indexes |
+| --- | --- | --- |
+| `files` | `.md .markdown .txt .csv .tsv .json .jsonl` under one or more roots; skips `node_modules`, `.git`, hidden files, symlinks and binaries | title (front matter, first heading or file name), headings, tags (`tags:` and `#hashtags`), modified time, a 300-character snippet. Reads at most the first 16 KB of a file; tables and JSON contribute column names and keys, never values |
+| `browser` | JSON / JSONL rows `{ url, title, visitCount, lastVisitAt }`, or (with the `sqlite3` CLI installed) a Chromium-family (Chrome, Arc, Edge, Brave) or Safari history database | **domain**, title, visit frequency, last visit. The database is copied to a temp folder and queried read-only, so a running browser is never touched. Query strings and fragments are dropped from stored URLs (the library option `keepQuery` keeps them) because they often carry tokens |
+| `calendar` | `.ics` (folded lines, escapes, attendees, all-day events, `RRULE`, cancellations skipped, alarms ignored), or JSON events `{ summary, start, end, location, attendees, recurring }` | start, end, location, attendees, organizer, whether and how it recurs. There is no time zone database: floating and `TZID` times are read as UTC |
+| `email` | `.mbox`, `.eml` (or a folder), or normalized JSONL `{ id, from, to, subject, snippet, date, isFromMe }` | subject, a 240-character snippet (quoted replies and signatures dropped), counterpart, **sender domain**, sent vs. received. `--me` lists your own addresses so `.mbox` / `.eml` messages can be marked sent; without it nothing is guessed |
+
+Write your own: a `SourceAdapter` is `{ id, source, collect(options) => Promise<CorpusItem[]> }`, and `collectInto(store, adapter, options)` merges what it returns.
+
+### The Life Context Snapshot (`rufus context`)
+
+```sh
+rufus context                       # recency-weighted snapshot of everything
+rufus context passport renewal      # $0 keyword lookup across chats, email, browsing, files, calendar
+rufus context invoice --source email --since 90 --limit 5 [--json] [--half-life 90]
+```
+
+`buildCorpusSummary(items, { now, halfLifeDays = 90 })` is pure and deterministic. Every weight is `0.5^(age / halfLife)`, so last month outweighs two years ago without throwing anything away (`--half-life 0` turns weighting off). It reports:
+
+- **Volume by source**, raw and as a share of recent activity (`chat` comes from your seeded history).
+- **Top active domains and recurring portals** from browsing and email senders (common mail providers are ignored). Browser visit counts add up logarithmically so one page with thousands of visits cannot drown the rest. A portal is a domain you return to on 3+ days or 10+ times; a keyword-only guess labels it `banking`, `travel`, `scheduling` or `docs` when the name says so.
+- **Recently active projects and files**: folders of notes ranked by recent edits, and the latest files.
+- **Calendar commitments**: what is on in the next 7 days (recurring events are expanded from their `RRULE`, UTC) and the recurring commitments with their next occurrence.
+
+`queryCorpus(items, { query, sources?, sinceDays?, limit?, halfLifeDays? })` ranks by relevance times recency: title, tags, actor/domain, source and summary matches (exact or prefix), a phrase bonus, and a recency factor that softens but never erases an old exact match. It takes milliseconds, so call it from any flow's `ctx.code` step and hand the AI the exact context:
+
+```ts
+import { CorpusStore, queryCorpus } from './src';
+
+const hits = await ctx.code('find-context', async () => {
+  const items = await new CorpusStore(`${workspace}/corpus/items.jsonl`).load();
+  return queryCorpus(items, { query: ctx.input.subject, sources: ['email', 'file', 'calendar'], limit: 5 }).map((h) => h.item);
+});
+const draft = await ctx.ai('draft-reply', { prompt: '...', context: { incoming: ctx.input, related: hits } });
+```
+
+### Recency in history analysis (default 180 days)
+
+`analyzeHistory`, `buildContactProfiles` and `buildSituationalContext` weight your replies by age: `halfLifeDays` (default **180**; `0` turns it off) or `halfLifeObservations` for a rank-based decay (the Nth newest reply weighs half the newest, however long those took, so a fast shift shows up at once). Rates, medians and the 90th percentile are weighted; reply counts and the contact-breadth gates stay raw, because evidence thresholds must count real replies. Weighted slices carry an `effectiveCount`. `rufus mine` adds a "Recency-weighted" line plus an "Evolving" note wherever your recent style differs from the all-time average, and an invariant that held for years but not across your latest 60 replies is demoted instead of being reported as a wall. Set it in `config.json` (`"mine": { "halfLifeDays": 120 }` or `halfLifeObservations`) or per run with `--half-life`. Conditional-logic contrast and tier thresholds still use raw counts.
+
+### Ideals over habits, and drift
+
+```ts
+const lessons = (await engine.lessons.all()).filter((l) => !l.hardened);
+const ctx = buildSituationalContext(incoming, pairs, { explicitLessons: lessons });
+ctx.voiceHint;
+// Ideals (override history): Always open with a greeting. | Keep replies to at most 15 words.
+// Historical habits (descriptive baseline, recency-weighted): Regular SMS DM (40 past exchanges), live chat: median 3 words, ...
+// Decision (ideals applied): greeting: ideal "Always open with a greeting." → greet (history alone said skip: ...); length: ...
+```
+
+With `explicitLessons` (saved lessons or plain rule text), `voiceHint` puts **Ideals (override history)** above **Historical habits (descriptive baseline)**. Code applies what it can verify: a greeting rule (`Always greet`, `Skip the greeting`) sets `greetHint`, a word cap (`at most 15 words`) caps `approxWords` and the `lengthBand`, and each change is listed in `idealOverrides` with what history alone would have done. Lessons about taste, conditional lessons ("only in group chats") and contradictory greeting lessons stay as labeled text and change no decision.
+
+**Drift.** `detectLessonDrift(lessons, pairs, { windowSize = 15, minSamples = 5, minRate = 0.4 })` looks at the last N *applicable* replies, however many hours or months they span, and flags a saved lesson (greeting, em dashes, exclamations, emoji, sign-offs, trailing period, lowercase start, word cap) that at least 40% of them break. `rufus mine` prints it under **Tension / drift**:
+
+```
+[drift] Saved lesson "Do not use em dashes." disagrees with 10/15 of your latest replies (67%; 14% of all history). Keep it as an aspiration, refine it into conditional logic, or retire it?
+```
+
+The lesson keeps applying (it is your stated ideal); the question is yours, and nothing is retired for you. `buildSituationalContext` returns the same entries as `drift`, deliberately out of the `voiceHint`, so a drafting model never sees a note meant for a human. Hardened lessons are skipped (code already enforces them). Everything here is deterministic: $0, no AI.
+
 ## Fast and smart model tiers
 
 Code does the heavy lifting, so many ai steps only phrase a result. Send those to a cheap, fast model and keep judgment on a strong one. Name the tiers in `config.json`:
@@ -322,7 +402,7 @@ pnpm rufus answer <cardId> 1    # resume and finish
 pnpm rufus lessons
 ```
 
-Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `propose <scope> <rule...>`, `demo`, `tick`, `watch`, `emit`, `replay`, `compare <flowId>`, `chat <message...>`.
+Add `--reply "1"` to `demo` to see the whole thing in one go. Commands: `init`, `flows`, `run <flowId> [inputJson]`, `pending`, `answer <cardId> <reply>`, `bridge`, `lessons`, `propose <scope> <rule...>`, `demo`, `tick`, `watch`, `emit`, `replay`, `compare <flowId>`, `seed`, `mine`, `collect <source> <path>`, `context [query]`, `chat <message...>`.
 
 ### Your own flows and your own data
 
@@ -335,6 +415,7 @@ Rufus keeps **all state outside the repo**, in a workspace directory: `--dir <pa
   scheduler.json  lastRunAt per flow (created by the first tick)
   cases/          saved human reviews, one file per flow (replay + prompt examples)
   history/        pairs.jsonl from `rufus seed`, mine-report.json from `rufus mine --save`
+  corpus/         items.jsonl from `rufus collect` (email, browser, files, calendar)
   runs/           one readable JSON file per run
   flows/          your *.flow.ts files, loaded by the CLI
 ```
@@ -397,7 +478,9 @@ defineFlow({ id: 'inbox', name: 'Inbox', description: '...', provider: 'claude' 
 src/engine/     defineFlow, Engine, step runner, AI verify loop, providers
 src/store/      atomic JSON file store (no native deps)
 src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay; compare (plain vs. assisted)
-src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `mine` (voice, invariants, intents, optional AI blueprints)
+src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `ideals` (explicit lessons as constraints, drift), `mine` (voice, invariants, intents, recency, optional AI blueprints)
+src/corpus/     `CorpusItem`, `CorpusStore`, `SourceAdapter`s (files, browser, calendar, email), recurrence, `buildCorpusSummary` / `queryCorpus`
+src/recency.ts  exponential and rank-based recency weights, shared by history and the corpus
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop
 src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Telegram and Beeper adapters
 src/chief/      ChiefOfStaff: fast code commands + code-assembled free-form chat

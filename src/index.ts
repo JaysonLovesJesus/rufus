@@ -84,3 +84,42 @@ export {
 } from './history/mine';
 export { evaluateHoldout, splitHoldout, formatHoldout, invariantHolds, type HoldoutEvaluation, type HoldoutResult, type HoldoutOptions, type HoldoutSplit } from './history/eval';
 export { conditionalAnalysis, describeTrigger, DEFAULT_CONTRAST, FEATURE_LABELS, LONG_REPLY_WORDS, type ConditionalRule, type ContrastOptions, type Trigger as ConditionalTrigger, type FeatureId, type BehaviorId } from './history/contrast';
+export { DEFAULT_HALF_LIFE_DAYS, pairWeigher, type WeightOptions, type IdealOverride } from './history/profiles';
+export { detectLessonDrift, checksForRule, idealConstraints, type DriftOptions, type LessonDrift, type LessonInput, type LessonCheck, type IdealConstraints } from './history/ideals';
+export type { RecencyReport } from './history/mine';
+export { recencyWeight, rankWeights, resolveHalfLife, type RecencyOptions } from './recency';
+export {
+  ADAPTERS,
+  CorpusStore,
+  GENERIC_MAIL_DOMAINS,
+  browserAdapter,
+  buildCorpusSummary,
+  calendarAdapter,
+  categoryOfDomain,
+  collectInto,
+  corpusItemsFromPairs,
+  emailAdapter,
+  filesAdapter,
+  formatCorpusSummary,
+  formatHits,
+  getAdapter,
+  normalizeItem,
+  queryCorpus,
+  type AddReport,
+  type BrowserOptions,
+  type CalendarOptions,
+  type CollectOptions,
+  type CollectResult,
+  type CorpusHit,
+  type CorpusItem,
+  type CorpusSummary,
+  type DomainActivity,
+  type EmailOptions,
+  type FilesOptions,
+  type QueryOptions,
+  type RecurringCommitment,
+  type SourceAdapter,
+  type SourceVolume,
+  type SummaryOptions,
+  type UpcomingCommitment,
+} from './corpus';

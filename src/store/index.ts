@@ -8,7 +8,7 @@ export const newId = (prefix: string): string => `${prefix}_${randomBytes(4).toS
 /**
  * Plain, readable JSON files inside a workspace directory:
  *   runs/<runId>.json   lessons.json   config.json   scheduler.json   cases/<flowId>.json
- *   history/pairs.jsonl (after `rufus seed`)
+ *   history/pairs.jsonl (after `rufus seed`)   corpus/items.jsonl (after `rufus collect`)
  * Writes are atomic (temp file + rename).
  */
 export class FileStore {
@@ -44,6 +44,14 @@ export class FileStore {
   }
   get mineReportFile(): string {
     return path.join(this.historyDir, 'mine-report.json');
+  }
+
+  /** The local activity corpus from `rufus collect` (`corpus/items.jsonl`): email, browser, files and calendar items. Created on first collect. */
+  get corpusDir(): string {
+    return path.join(this.dir, 'corpus');
+  }
+  get corpusFile(): string {
+    return path.join(this.corpusDir, 'items.jsonl');
   }
 
   /** Idempotent: creates the workspace layout if missing. */

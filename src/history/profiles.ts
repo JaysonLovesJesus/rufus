@@ -2,9 +2,13 @@
 // no AI, no I/O. `buildContactProfiles` summarises the history; `buildSituationalContext` looks one message up in it.
 import type { ReplyHabit } from './extract';
 import type { PriorMessage, HistoryPair } from './types';
+import { idealConstraints, detectLessonDrift, ruleOf, type DriftOptions, type LessonDrift, type LessonInput } from './ideals';
+import { rankWeights, recencyWeight, resolveHalfLife, toMs, type TimeLike } from '../recency';
 import { DEFAULT_BUCKETS, EMOJI, GREETING, OTHER_BUCKET, SIGN_OFF, classify, median, percentile, snippet, words, type IntentBucket } from './stats';
 
 // ---------- Vocabulary ----------
+
+export { detectLessonDrift, checksForRule, type DriftOptions, type LessonDrift, type LessonInput } from './ideals';
 
 export type ClosenessTier = 'inner-circle' | 'regular' | 'occasional' | 'new';
 export const TIERS: ClosenessTier[] = ['inner-circle', 'regular', 'occasional', 'new'];
@@ -120,6 +124,8 @@ export interface StyleSlice {
   distinctContacts: number;
   /** Share (0-1) of this slice's replies that went to its single most frequent sender. */
   topContactShare: number;
+  /** Only when recency-weighted: how many replies' worth of evidence the weights leave (Kish effective sample size). `count` stays the raw number of replies. */
+  effectiveCount?: number;
 }
 
 /**
@@ -161,31 +167,106 @@ const delayMins = (p: HistoryPair): number | undefined => {
   return undefined;
 };
 
-export function styleOf(pairs: HistoryPair[]): StyleSlice {
+// ---------- Recency weighting ----------
+
+/** Recent months matter more as your style evolves: a reply this many days old counts half as much as one from today. */
+export const DEFAULT_HALF_LIFE_DAYS = 180;
+
+export interface WeightOptions {
+  /** Reference "today" (default: now). Weights are only relative, so this rarely changes a result. */
+  now?: TimeLike;
+  /** Time-based decay: days for a reply's weight to halve. Default 180; `0` or `Infinity` turns weighting off. */
+  halfLifeDays?: number;
+  /** Rank-based decay instead (wins over `halfLifeDays`): the Nth newest reply weighs half the newest, whether those N spanned two days or two months. Makes fast shifts show up immediately. */
+  halfLifeObservations?: number;
+}
+
+const timeOf = (p: HistoryPair): string | undefined => p.incomingAt ?? p.replyAt;
+
+/** Per-pair weight function for `pairs`, or `undefined` when weighting is off. Slices of the same pair objects share it. */
+export function pairWeigher(pairs: HistoryPair[], o: WeightOptions = {}): ((p: HistoryPair) => number) | undefined {
+  const times = pairs.map(timeOf);
+  let weights: number[];
+  if (o.halfLifeObservations !== undefined && Number.isFinite(o.halfLifeObservations) && o.halfLifeObservations > 0) weights = rankWeights(times, o.halfLifeObservations);
+  else {
+    const half = resolveHalfLife(o.halfLifeDays, DEFAULT_HALF_LIFE_DAYS);
+    if (half === undefined) return undefined;
+    const now = toMs(o.now) ?? Date.now();
+    weights = times.map((t) => recencyWeight(t, now, half));
+  }
+  const byPair = new Map(pairs.map((p, i) => [p, weights[i]!] as const));
+  return (p) => byPair.get(p) ?? 1;
+}
+
+/** Weighted quantile (0-1) of `values`; on an exact boundary the two neighbours are averaged, like an ordinary median. */
+function weightedQuantile(values: number[], weights: number[], q: number): number {
+  if (!values.length) return 0;
+  const order = values.map((v, i) => ({ v, w: weights[i]! })).sort((a, b) => a.v - b.v);
+  const total = order.reduce((s, e) => s + e.w, 0);
+  const target = total * q;
+  let acc = 0;
+  for (let i = 0; i < order.length; i++) {
+    acc += order[i]!.w;
+    if (acc > target + total * 1e-12) return order[i]!.v;
+    if (Math.abs(acc - target) <= total * 1e-12 && i + 1 < order.length) return (order[i]!.v + order[i + 1]!.v) / 2;
+  }
+  return order.at(-1)!.v;
+}
+
+/** Effectively equal weights (within 2%) add nothing but rounding noise: keep the plain, exact arithmetic. */
+const nearlyUniform = (w: number[]): boolean => !w.length || Math.min(...w) / Math.max(...w) > 0.98;
+
+/**
+ * Exact style statistics over a group of replies. With a `weight` function, rates, medians and the 90th percentile
+ * are recency-weighted (`count` and the contact breadth numbers stay raw, because evidence gates count real replies).
+ */
+export function styleOf(pairs: HistoryPair[], weight?: (p: HistoryPair) => number): StyleSlice {
   const replies = pairs.map((p) => p.reply.trim());
   const n = replies.length;
-  const rate = (k: number, of = n): number => (of ? round3(k / of) : 0);
-  const counts = replies.map(words).sort((a, b) => a - b);
-  const withLetter = replies.filter((r) => /\p{L}/u.test(r));
-  const lower = withLetter.filter((r) => {
-    const first = /\p{L}/u.exec(r)![0];
-    return first === first.toLowerCase() && first !== first.toUpperCase();
-  }).length;
-  const delays = pairs.map(delayMins).filter((m): m is number => m !== undefined);
+  const ws = weight ? pairs.map(weight) : undefined;
+  const w = ws && !nearlyUniform(ws) ? ws : undefined;
+  const wAt = (i: number): number => (w ? w[i]! : 1);
+  const share = (pred: (i: number) => boolean, base: (i: number) => boolean = () => true): number => {
+    let num = 0;
+    let den = 0;
+    for (let i = 0; i < n; i++) {
+      if (!base(i)) continue;
+      den += wAt(i);
+      if (pred(i)) num += wAt(i);
+    }
+    return den ? round3(num / den) : 0;
+  };
+  const counts = replies.map(words);
+  const sortedCounts = [...counts].sort((a, b) => a - b);
+  const hasLetter = replies.map((r) => /\p{L}/u.test(r));
+  const isLower = replies.map((r) => {
+    const first = /\p{L}/u.exec(r)?.[0];
+    return first !== undefined && first === first.toLowerCase() && first !== first.toUpperCase();
+  });
+  const delayed = pairs.map(delayMins);
+  const delayIdx = delayed.flatMap((m, i) => (m === undefined ? [] : [i]));
   const perSender = new Map<string, number>();
   for (const p of pairs) perSender.set(p.sender, (perSender.get(p.sender) ?? 0) + 1);
+  const q = (x: number): number => (w ? weightedQuantile(counts, w, x) : x === 0.5 ? median(sortedCounts) : percentile(sortedCounts, x));
+  const medianDelay = delayIdx.length
+    ? w
+      ? weightedQuantile(delayIdx.map((i) => delayed[i]!), delayIdx.map((i) => w[i]!), 0.5)
+      : median(delayIdx.map((i) => delayed[i]!))
+    : undefined;
+  const sumW = w ? w.reduce((a, b) => a + b, 0) : 0;
   return {
     count: n,
     distinctContacts: perSender.size,
     topContactShare: n ? round3(Math.max(...perSender.values()) / n) : 0,
-    medianWords: median(counts),
-    p90Words: percentile(counts, 0.9),
-    greetingRate: rate(replies.filter((r) => GREETING.test(r)).length),
-    signOffRate: rate(replies.filter((r) => SIGN_OFF.test(r)).length),
-    emojiRate: rate(replies.filter((r) => EMOJI.test(r)).length),
-    exclamationRate: rate(replies.filter((r) => r.includes('!')).length),
-    lowercaseRate: rate(lower, withLetter.length),
-    ...(delays.length ? { medianReplyMins: round1(median(delays)) } : {}),
+    medianWords: q(0.5),
+    p90Words: q(0.9),
+    greetingRate: share((i) => GREETING.test(replies[i]!)),
+    signOffRate: share((i) => SIGN_OFF.test(replies[i]!)),
+    emojiRate: share((i) => EMOJI.test(replies[i]!)),
+    exclamationRate: share((i) => replies[i]!.includes('!')),
+    lowercaseRate: share((i) => isLower[i]!, (i) => hasLetter[i]!),
+    ...(medianDelay !== undefined ? { medianReplyMins: round1(medianDelay) } : {}),
+    ...(w ? { effectiveCount: round1((sumW * sumW) / w.reduce((a, b) => a + b * b, 0)) } : {}),
   };
 }
 
@@ -241,7 +322,7 @@ export interface ContactProfiles {
   known: { chatKind: number; rhythm: number };
 }
 
-export interface ProfileOptions {
+export interface ProfileOptions extends WeightOptions {
   buckets?: IntentBucket[];
   tiers?: Partial<TierThresholds>;
   /** From `extractHistoryFromMessages(...).ignored`: adds reply rates (how often you stay quiet). */
@@ -290,6 +371,7 @@ function liveShareOf(group: HistoryPair[]): number | undefined {
 export function buildContactProfiles(pairs: HistoryPair[], opts: ProfileOptions = {}): ContactProfiles {
   const buckets = opts.buckets ?? DEFAULT_BUCKETS;
   const thresholds = { ...DEFAULT_TIER_THRESHOLDS, ...opts.tiers };
+  const weight = pairWeigher(pairs, opts);
   const habitsBySender = new Map<string, { answered: number; unanswered: number }>();
   const habitsByChannel = new Map<string, { answered: number; unanswered: number }>();
   for (const h of opts.replyHabits ?? []) {
@@ -311,7 +393,7 @@ export function buildContactProfiles(pairs: HistoryPair[], opts: ProfileOptions 
     tierOfSender.set(sender, tier);
     const rhythms = groupBy(group, (p) => rhythmOf(p));
     const byRhythm: Partial<Record<Rhythm, StyleSlice>> = {};
-    for (const r of RHYTHMS) if (rhythms.has(r)) byRhythm[r] = styleOf(rhythms.get(r)!);
+    for (const r of RHYTHMS) if (rhythms.has(r)) byRhythm[r] = styleOf(rhythms.get(r)!, weight);
     return {
       sender,
       channels: [...new Set(group.map((p) => p.channel))].sort(),
@@ -320,7 +402,7 @@ export function buildContactProfiles(pairs: HistoryPair[], opts: ProfileOptions 
       groupCount: group.filter((p) => chatKindOf(p) === 'group').length,
       ...(live !== undefined ? { liveShare: live } : {}),
       ...replyRate(habitsBySender.get(sender)),
-      style: styleOf(group),
+      style: styleOf(group, weight),
       byRhythm,
     };
   });
@@ -328,22 +410,22 @@ export function buildContactProfiles(pairs: HistoryPair[], opts: ProfileOptions 
 
   const byTier: TierProfile[] = TIERS.map((tier) => {
     const members = pairs.filter((p) => tierOfSender.get(p.sender) === tier);
-    return { tier, contacts: contacts.filter((c) => c.tier === tier).length, ...styleOf(members) };
+    return { tier, contacts: contacts.filter((c) => c.tier === tier).length, ...styleOf(members, weight) };
   });
   const byChatKind: ChatKindProfile[] = (['dm', 'group'] as const)
     .map((kind) => ({ kind, group: pairs.filter((p) => chatKindOf(p) === kind) }))
     .filter((e) => e.group.length)
-    .map(({ kind, group }) => ({ kind, ...styleOf(group) }));
+    .map(({ kind, group }) => ({ kind, ...styleOf(group, weight) }));
   const byChannel: ChannelProfile[] = [...groupBy(pairs, (p) => p.channel).entries()]
-    .map(([channel, group]) => ({ channel, ...styleOf(group), ...replyRate(habitsByChannel.get(channel)) }))
+    .map(([channel, group]) => ({ channel, ...styleOf(group, weight), ...replyRate(habitsByChannel.get(channel)) }))
     .sort((a, b) => byCountThenName(a, b, a.channel, b.channel));
   const byRhythm: RhythmProfile[] = RHYTHMS.map((rhythm) => ({ rhythm, group: pairs.filter((p) => rhythmOf(p) === rhythm) }))
     .filter((e) => e.group.length)
-    .map(({ rhythm, group }) => ({ rhythm, ...styleOf(group) }));
+    .map(({ rhythm, group }) => ({ rhythm, ...styleOf(group, weight) }));
   const byChannelIntent: ChannelIntentProfile[] = [...groupBy(pairs, (p) => `${p.channel}\u0000${classify(p, buckets)}`).entries()]
     .map(([k, group]) => {
       const [channel, intent] = k.split('\u0000') as [string, string];
-      return { channel, intent, ...styleOf(group) };
+      return { channel, intent, ...styleOf(group, weight) };
     })
     .sort((a, b) => byCountThenName(a, b, `${a.channel}/${a.intent}`, `${b.channel}/${b.intent}`));
 
@@ -407,8 +489,26 @@ export interface SituationalContext {
   lengthReason: string;
   /** Rough target for `brief`; the 90th percentile for `detailed`. Only when there is history to base it on. */
   approxWords?: number;
-  /** One compact line for a prompt: who, the style to imitate, and the greeting / length cues. */
+  /**
+   * A short block for a prompt: who, the style to imitate, and the greeting / length cues. With `explicitLessons` it
+   * becomes two or three labeled lines, **Ideals (override history)** above **Historical habits (descriptive baseline)**.
+   */
   voiceHint: string;
+  /** The explicit lessons (your stated ideals) that were applied, empty without `explicitLessons`. */
+  ideals: string[];
+  /** Where an ideal overrode what your history would have done (greeting, length). */
+  idealOverrides: IdealOverride[];
+  /** Ideals that your latest replies keep contradicting: a question for you (shown by `rufus mine`), not a silent wall. Kept out of `voiceHint` so a drafting model never sees it. */
+  drift: LessonDrift[];
+}
+
+export interface IdealOverride {
+  aspect: 'greeting' | 'length';
+  /** What history alone would have said. */
+  habit: string;
+  /** What the ideal says instead. */
+  ideal: string;
+  rule: string;
 }
 
 export type GreetHint = 'greet' | 'optional' | 'skip';
@@ -446,6 +546,14 @@ export interface SituationOptions extends ProfileOptions {
   minSlice?: number;
   /** Pre-built profiles for `pairs` (build once, look up many times). */
   profiles?: ContactProfiles;
+  /**
+   * Your stated ideals (saved lessons from `LessonStore`, or plain rule text). They are labeled **Ideals (override
+   * history)** and outrank the **Historical habits (descriptive baseline)**: history describes what you did, ideals say what
+   * you are working toward, so a rushed past habit never overrides a rule you wrote down.
+   */
+  explicitLessons?: LessonInput[];
+  /** How `detectLessonDrift` judges those ideals against your latest replies. */
+  drift?: DriftOptions;
 }
 
 const CHANNEL_NAMES: Record<string, string> = { whatsapp: 'WhatsApp', imessage: 'iMessage', sms: 'SMS', email: 'Email', telegram: 'Telegram', slack: 'Slack', signal: 'Signal', messenger: 'Messenger' };
@@ -482,6 +590,7 @@ export function buildSituationalContext(input: SituationInput, pairs: HistoryPai
   const minSlice = opts.minSlice ?? 3;
   const wantExamples = Math.min(4, Math.max(2, Math.floor(opts.examples ?? 3)));
   const profiles = opts.profiles ?? buildContactProfiles(pairs, opts);
+  const weight = pairWeigher(pairs, opts);
 
   const contact = profiles.contacts.find((c) => c.sender === input.sender);
   const intent = classify({ incoming: input.incoming }, buckets);
@@ -496,10 +605,10 @@ export function buildSituationalContext(input: SituationInput, pairs: HistoryPai
   const slices: Array<[StyleBasis, () => StyleSlice | undefined]> = [
     ['contact+rhythm', () => (contact && rhythm ? contact.byRhythm[rhythm] : undefined)],
     ['contact', () => contact?.style],
-    ['channel+chat+intent', () => (intent === OTHER_BUCKET.id ? undefined : styleOf(pairs.filter((p) => sameChat(p) && classify(p, buckets) === intent)))],
-    ['channel+chat', () => styleOf(pairs.filter(sameChat))],
-    ['channel', () => styleOf(pairs.filter((p) => p.channel === input.channel))],
-    ['overall', () => styleOf(pairs)],
+    ['channel+chat+intent', () => (intent === OTHER_BUCKET.id ? undefined : styleOf(pairs.filter((p) => sameChat(p) && classify(p, buckets) === intent), weight))],
+    ['channel+chat', () => styleOf(pairs.filter(sameChat), weight)],
+    ['channel', () => styleOf(pairs.filter((p) => p.channel === input.channel), weight)],
+    ['overall', () => styleOf(pairs, weight)],
   ];
   for (const [basis, get] of slices) {
     const s = get();
@@ -510,7 +619,7 @@ export function buildSituationalContext(input: SituationInput, pairs: HistoryPai
     }
   }
   if (!style && pairs.length) {
-    style = styleOf(pairs);
+    style = styleOf(pairs, weight);
     styleBasis = 'overall';
   }
 
@@ -555,16 +664,50 @@ export function buildSituationalContext(input: SituationInput, pairs: HistoryPai
     }
   };
   const features = incomingFeatures(input, tier);
-  const greet = greetDecision(features, style);
-  const length = lengthDecision(input, features, style);
+  const habitGreet = greetDecision(features, style);
+  const habitLength = lengthDecision(input, features, style);
+  let greet = habitGreet;
+  let length = habitLength;
+
+  // Ideals (explicit lessons) outrank habits: apply what code can enforce, and say where it changed the decision.
+  const lessons = opts.explicitLessons ?? [];
+  const ideals = [...new Set(lessons.map(ruleOf).filter(Boolean))];
+  const idealOverrides: IdealOverride[] = [];
+  const constraints = idealConstraints(lessons);
+  if (constraints.greet && constraints.greet !== habitGreet.hint) {
+    const rule = constraints.from.greet!;
+    greet = { hint: constraints.greet, reason: `ideal "${rule}" → ${constraints.greet} (history alone said ${habitGreet.hint}: ${habitGreet.reason})` };
+    idealOverrides.push({ aspect: 'greeting', habit: habitGreet.hint, ideal: constraints.greet, rule });
+  }
+  if (constraints.maxWords !== undefined) {
+    const cap = constraints.maxWords;
+    const rule = constraints.from.maxWords!;
+    const capped = habitLength.approxWords === undefined || habitLength.approxWords > cap ? cap : habitLength.approxWords;
+    const band: LengthBand = cap <= 20 ? 'brief' : habitLength.band === 'detailed' && cap <= 40 ? 'medium' : habitLength.band;
+    if (capped !== habitLength.approxWords || band !== habitLength.band) {
+      length = { band, approxWords: capped, reason: `${habitLength.reason}; ideal "${rule}" caps it at ${cap} words → ${band}` };
+      idealOverrides.push({ aspect: 'length', habit: `${habitLength.band}${habitLength.approxWords !== undefined ? ` (~${habitLength.approxWords} words)` : ''}`, ideal: `${band} (≤ ${cap} words)`, rule });
+    }
+  }
+  const drift = lessons.length ? detectLessonDrift(lessons, pairs, opts.drift) : [];
+
+  const decisions = `greeting: ${greet.reason}; length: ${length.reason}`;
   let voiceHint: string;
-  if (!style) voiceHint = `${who}${rhythmText ? `, ${rhythmText}` : ''}: no history to learn from yet.`;
+  let habits: string;
+  if (!style) habits = `${who}${rhythmText ? `, ${rhythmText}` : ''}: no history to learn from yet.`;
   else {
     const from = basisText(styleBasis, style.count) ? ` (from ${basisText(styleBasis, style.count)})` : '';
     const thin = style.count < minSlice ? ' (thin evidence)' : '';
-    voiceHint = `${who}${rhythmText ? `, ${rhythmText}` : ''}: ${describeStyle(style)}${from}${thin}`;
+    habits = `${who}${rhythmText ? `, ${rhythmText}` : ''}: ${describeStyle(style)}${from}${thin}`;
   }
-  voiceHint += `; greeting: ${greet.reason}; length: ${length.reason}`;
+  if (!ideals.length) voiceHint = `${habits}; ${decisions}`;
+  else {
+    voiceHint = [
+      `Ideals (override history): ${ideals.join(' | ')}`,
+      `Historical habits (descriptive baseline${weight ? ', recency-weighted' : ''}): ${habits}`,
+      `Decision (ideals applied): ${decisions}`,
+    ].join('\n');
+  }
 
   return {
     tier,
@@ -583,5 +726,8 @@ export function buildSituationalContext(input: SituationInput, pairs: HistoryPai
     lengthReason: length.reason,
     ...(length.approxWords !== undefined ? { approxWords: length.approxWords } : {}),
     voiceHint,
+    ideals,
+    idealOverrides,
+    drift,
   };
 }

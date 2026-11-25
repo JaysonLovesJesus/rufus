@@ -12,7 +12,8 @@ import { isFlow } from './engine/flow';
 import { createProviders } from './engine/providers';
 import { formatCompare } from './learning/compare';
 import { bucketsFromConfig, defaultMineProvider, formatMine, mineHistory } from './history/mine';
-import { formatSeed, seedHistory } from './history/seed';
+import { formatSeed, loadPairs, seedHistory } from './history/seed';
+import { CorpusStore, buildCorpusSummary, collectInto, corpusItemsFromPairs, formatCorpusSummary, formatHits, getAdapter, queryCorpus } from './corpus';
 import { suggestLayer } from './learning/layers';
 import type { ScopedReplayReport } from './learning/replay';
 import { Scheduler, type TickResult } from './scheduler/scheduler';
@@ -42,8 +43,8 @@ Usage: rufus [--dir <workspace>] <command>
   emit <event> [payloadJson]   fire flows with an onEvent(<event>) trigger
   seed <file> --flow <flowId> [--step <aiStep>] [--limit N] [--dry-run] [--include-noise]
                                Day 1: load real past (incoming -> reply) pairs from a JSON/JSONL file as replay cases
-  mine [--ai] [--provider <name>] [--limit N] [--scope <scope>] [--json] [--save]
-                               what your history says: voice, rules, recurring intents (free, offline);
+  mine [--ai] [--provider <name>] [--limit N] [--scope <scope>] [--half-life <days>] [--json] [--save]
+                               what your history says: voice, rules, recurring intents, drift from saved lessons (free, offline);
                                --ai adds workflow blueprints and lessons from a provider
   replay <flowId> [--limit N] [--provider <name>]
                                re-run saved human-reviewed cases against today's flow and verify checks
@@ -51,6 +52,13 @@ Usage: rufus [--dir <workspace>] <command>
                                replay a scope; global replays a small golden sample of every flow
   compare <flowId> [--limit N] [--provider <name>]
                                plain AI vs. code-assisted AI on your saved cases, same verify
+  collect <source> <path...> [--limit N] [--dry-run] [--ignore a,b] [--me addr,addr]
+                               add local activity to your life corpus. <source> is files (notes/markdown/CSV/JSON
+                               folders), calendar (.ics or JSON), browser (history JSON/JSONL or a Chrome/Arc/Safari
+                               history database) or email (.mbox, .eml, or JSONL). Deduplicated; --dry-run writes nothing
+  context [query] [--source a,b] [--since <days>] [--limit N] [--half-life <days>] [--json]
+                               your Life Context Snapshot (recency-weighted), or a $0 keyword lookup across chats, email,
+                               browsing, files and calendar
   chat <message...>            talk to your chief of staff: status, flows, lessons, run <flow> [json],
                                learn <scope>: <rule>, or ask anything in your own words
 `;
@@ -138,7 +146,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const save = bool('--save');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
-  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider']) {
+  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
@@ -169,6 +177,15 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     if (!(Number(v) > 0)) throw new Error(`${flag} needs a positive number.`);
     return Number(v);
   };
+
+  /** `--half-life <days>`: 0 turns recency weighting off. */
+  const halfLife = ((): number | undefined => {
+    const v = flags['--half-life'];
+    if (v === undefined) return undefined;
+    if (!(Number(v) >= 0)) throw new Error('--half-life needs a number of days (0 turns weighting off).');
+    return Number(v);
+  })();
+  const list = (v: string | undefined): string[] | undefined => (v ? v.split(',').map((x) => x.trim()).filter(Boolean) : undefined);
 
   /** `--provider <name>`: fail on an unknown name now, instead of reporting it as a model failure per case. */
   const providerFlag = (): string | undefined => {
@@ -394,6 +411,8 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         minSlicePairs: config.mine?.minSlicePairs,
         minDistinctContacts: config.mine?.minDistinctContacts,
         maxTopContactShare: config.mine?.maxTopContactShare,
+        halfLifeDays: halfLife ?? config.mine?.halfLifeDays,
+        halfLifeObservations: config.mine?.halfLifeObservations,
       });
       if (save && report.pairsAnalyzed) await store.writeJson(store.mineReportFile, report);
       if (asJson) io.out(JSON.stringify(report, null, 2));
@@ -402,6 +421,49 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         if (!useAi && report.pairsAnalyzed) io.out('Add --ai for workflow blueprints and lessons from a provider.');
       }
       if (save && report.pairsAnalyzed && !asJson) io.out(`Saved ${store.mineReportFile}`);
+      return;
+    }
+
+    case 'collect': {
+      const [source, ...paths] = rest;
+      if (!source || !paths.length) throw new Error('Usage: rufus collect <files|browser|calendar|email> <path> [--limit N] [--dry-run]');
+      const adapter = getAdapter(source);
+      if (adapter.id !== 'files' && paths.length > 1) throw new Error(`rufus collect ${adapter.id} takes one path (a file or a folder of exports).`);
+      const options = {
+        path: paths[0]!,
+        limit: positive('--limit'),
+        ...(adapter.id === 'files' ? { roots: paths.slice(1), ignore: list(flags['--ignore']) } : {}),
+        ...(adapter.id === 'email' ? { me: list(flags['--me']) } : {}),
+      };
+      const { items, report } = await collectInto(new CorpusStore(store.corpusFile), adapter, options, { dryRun });
+      io.out(`Read ${items.length} item(s) from ${adapter.id} ${paths.join(', ')}.`);
+      if (dryRun) {
+        io.out(`Dry run (nothing written): would add ${report.added}, update ${report.updated}, leave ${report.unchanged} unchanged; the corpus would hold ${report.total}.`);
+        for (const i of items.slice(0, 5)) io.out(`  [${i.source}/${i.kind}] ${i.timestamp.slice(0, 10)}  ${i.title ?? i.summary}`);
+        if (items.length > 5) io.out(`  ... and ${items.length - 5} more`);
+      } else io.out(`Added ${report.added}, updated ${report.updated}, unchanged ${report.unchanged}. The corpus now holds ${report.total} item(s) (${store.corpusFile}).`);
+      if (report.rejected.length) io.err(`${report.rejected.length} item(s) were not valid and were skipped (first: ${report.rejected[0]!.reason}).`);
+      return;
+    }
+
+    case 'context': {
+      const sources = list(flags['--source']);
+      const since = positive('--since');
+      const limit = positive('--limit');
+      const query = rest.join(' ').trim();
+      let items = [...(await new CorpusStore(store.corpusFile).load()), ...corpusItemsFromPairs(await loadPairs(store))];
+      if (!query) {
+        // A snapshot over the chosen sources and period.
+        if (sources) items = items.filter((i) => sources.includes(i.source === 'file' ? 'files' : i.source) || sources.includes(i.source));
+        if (since !== undefined) items = items.filter((i) => Date.parse(i.timestamp) >= Date.now() - since * 86400000);
+        const summary = buildCorpusSummary(items, { halfLifeDays: halfLife, topN: limit });
+        if (asJson) io.out(JSON.stringify(summary, null, 2));
+        else for (const line of formatCorpusSummary(summary)) io.out(line);
+        return;
+      }
+      const hits = queryCorpus(items, { query, sources, sinceDays: since, limit, halfLifeDays: halfLife });
+      if (asJson) io.out(JSON.stringify(hits, null, 2));
+      else for (const line of formatHits(hits, query)) io.out(line);
       return;
     }
 

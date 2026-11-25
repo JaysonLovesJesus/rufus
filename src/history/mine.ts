@@ -6,7 +6,8 @@ import { loadPairs } from './seed';
 import type { HistoryPair } from './types';
 import { evaluateHoldout, formatHoldout, type HoldoutOptions, type HoldoutResult } from './eval';
 import { conditionalAnalysis, contrastOptionsFrom, isInvariantShare, type ConditionalRule, type ContrastOptions } from './contrast';
-import { DEFAULT_SLICE_GATE, RHYTHM_LABELS, TIERS, buildContactProfiles, sliceGateIssue, styleOf as styleOfPairs, tierBySender, channelName, chatKindOf, rhythmOf, type ClosenessTier, type ContactProfiles, type SliceGate, type StyleSlice } from './profiles';
+import { chronological, detectLessonDrift, type DriftOptions, type LessonDrift, type LessonInput } from './ideals';
+import { DEFAULT_SLICE_GATE, RHYTHM_LABELS, TIERS, DEFAULT_HALF_LIFE_DAYS, buildContactProfiles, pairWeigher, sliceGateIssue, styleOf as styleOfPairs, type WeightOptions, tierBySender, channelName, chatKindOf, rhythmOf, type ClosenessTier, type ContactProfiles, type SliceGate, type StyleSlice } from './profiles';
 import { DEFAULT_BUCKETS, EMOJI, GREETING, OTHER_BUCKET, SHORT_WORDS, SIGN_OFF, classify, median, percentile, round1, snippet, tally, top, words, type IntentBucket } from './stats';
 
 export { DEFAULT_BUCKETS, OTHER_BUCKET, SHORT_WORDS, classify, type IntentBucket };
@@ -99,13 +100,37 @@ export interface HistoryAnalysis {
   context: ContextBreakdown;
   intents: Array<{ bucket: string; label: string; count: number; pct: number }>;
   clusters: IntentCluster[];
+  /** Recency-weighted view of your voice, and how it differs from the all-time one. Absent when every reply weighs the same. */
+  recency?: RecencyReport;
+  /** Saved lessons (your stated ideals) that your latest replies keep contradicting: surfaced as a question, never silently enforced forever. Empty without `lessons`. */
+  drift: LessonDrift[];
   notes: string[];
+}
+
+/** History is a recency-weighted descriptive baseline: recent replies count more than old ones. */
+export interface RecencyReport {
+  /** How the weights were set, e.g. `half-life 180 days`. */
+  basis: string;
+  /** How many replies' worth of evidence the weights leave. */
+  effectivePairs: number;
+  weighted: StyleSlice;
+  allTime: StyleSlice;
+  /** Where recent behavior differs from the all-time average (your style evolving). */
+  evolution: string[];
+  /** Invariants that held across all history but not in your latest replies, so they are not reported as walls. */
+  demotedInvariants: string[];
 }
 
 /** Situation-by-situation statistics (contact names left out; see `buildContactProfiles` for those). */
 export type ContextBreakdown = Omit<ContactProfiles, 'contacts'> & { contacts: number; gate: SliceGate };
 
-export interface AnalyzeOptions {
+export interface AnalyzeOptions extends WeightOptions {
+  /** Your stated ideals (saved lessons, or plain rule text) to check for drift against your latest replies. */
+  lessons?: LessonInput[];
+  /** How drift is judged (window of latest replies, minimum samples, tension rate). */
+  drift?: DriftOptions;
+  /** An invariant must also hold across your latest N replies (default 60); one that stopped holding is demoted, not a wall. */
+  recentWindow?: number;
   buckets?: IntentBucket[];
   /** Below this many pairs no rule is proposed (too little evidence). Default 10. */
   minPairs?: number;
@@ -220,6 +245,8 @@ export function situationalRules(pairs: HistoryPair[], profiles: ContactProfiles
 }
 
 export interface SituationalRuleOptions extends Partial<SliceGate> {
+  /** Recency weight per pair (see `pairWeigher`). Support counts stay raw; the style numbers compared are weighted. */
+  weight?: (p: HistoryPair) => number;
   minSegment?: number;
   max?: number;
 }
@@ -245,7 +272,7 @@ export function situationalAnalysis(pairs: HistoryPair[], profiles: ContactProfi
   const gate = sliceGateFrom(opts);
   const total = pairs.length;
   if (!total) return { rules: [], suppressed: [] };
-  const overall = styleOfPairs(pairs);
+  const overall = styleOfPairs(pairs, opts.weight);
   const tierOf = new Map(profiles.contacts.map((c) => [c.sender, c.tier] as const));
   const multiChannel = profiles.byChannel.length > 1;
   const segments: Segment[] = [];
@@ -271,7 +298,7 @@ export function situationalAnalysis(pairs: HistoryPair[], profiles: ContactProfi
     const signature = seg.pairs.map((p) => p.id).sort().join('|');
     if (seen.has(signature)) continue; // same replies as a broader situation already covered
     seen.add(signature);
-    const st = styleOfPairs(seg.pairs);
+    const st = styleOfPairs(seg.pairs, opts.weight);
     const wordGap = st.medianWords - overall.medianWords;
     const wordsDiffer = Math.abs(wordGap) >= Math.max(3, overall.medianWords * 0.4);
     const greetGap = st.greetingRate - overall.greetingRate;
@@ -339,6 +366,23 @@ export function situationalAnalysis(pairs: HistoryPair[], profiles: ContactProfi
   return { rules: found.sort((a, b) => b.weight - a.weight || a.rule.id.localeCompare(b.rule.id)).slice(0, opts.max ?? 6).map((f) => f.rule), suppressed };
 }
 
+const pc0 = (r: number): string => `${Math.round(r * 100)}%`;
+
+/** Where the recency-weighted voice differs from the all-time one: your style moving, in plain words. */
+function evolutionNotes(w: StyleSlice, all: StyleSlice): string[] {
+  const out: string[] = [];
+  const rate = (label: string, a: number, b: number): void => {
+    if (Math.abs(a - b) >= 0.1) out.push(`${label}: ${pc0(a)} lately vs ${pc0(b)} over all history (${a > b ? 'up' : 'down'}).`);
+  };
+  rate('Greeting rate', w.greetingRate, all.greetingRate);
+  rate('Sign-off rate', w.signOffRate, all.signOffRate);
+  rate('Exclamation rate', w.exclamationRate, all.exclamationRate);
+  rate('Emoji rate', w.emojiRate, all.emojiRate);
+  rate('Lowercase starts', w.lowercaseRate, all.lowercaseRate);
+  if (Math.abs(w.medianWords - all.medianWords) >= Math.max(3, all.medianWords * 0.25)) out.push(`Median reply length: ${w.medianWords} words lately vs ${all.medianWords} over all history (${w.medianWords > all.medianWords ? 'longer' : 'shorter'}).`);
+  return out;
+}
+
 /**
  * Exact, verifiable statistics about your real history: volume, voice, candidate rules and recurring intents.
  * Pure and offline. Every number can be recomputed by hand from `pairs`.
@@ -381,11 +425,40 @@ export function analyzeHistory(pairs: HistoryPair[], opts: AnalyzeOptions = {}):
     conditionalRules = conditionalAnalysis(pairs, tierBySender(pairs), contrast);
   }
 
-  const profiles = buildContactProfiles(pairs, { buckets });
+  // Recency: history is a weighted baseline. An "always" that stopped being true lately is not a wall.
+  const weight = pairWeigher(pairs, opts);
+  const weighted = weight ? styleOfPairs(pairs, weight) : undefined;
+  let recency: RecencyReport | undefined;
+  if (weight && weighted?.effectiveCount !== undefined) {
+    const demoted: string[] = [];
+    const recentN = Math.max(minPairs, Math.floor(opts.recentWindow ?? 60));
+    if (invariants.length && total > recentN) {
+      const recentPairs = chronological(pairs).slice(-recentN);
+      const stillHolds = new Set(invariantsFrom(recentPairs, voiceOf(recentPairs), contrast.invariantMinShare).map((r) => r.id));
+      invariants = invariants.filter((r) => {
+        if (stillHolds.has(r.id)) return true;
+        demoted.push(r.rule);
+        return false;
+      });
+      for (const rule of demoted) notes.push(`"${rule}" held across all history but not in your latest ${recentN} replies, so it is not reported as an invariant (your habits moved).`);
+    }
+    const allTime = styleOfPairs(pairs);
+    recency = {
+      basis: opts.halfLifeObservations !== undefined && opts.halfLifeObservations > 0 ? `rank half-life ${opts.halfLifeObservations} replies` : `half-life ${Math.round(opts.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS)} days`,
+      effectivePairs: weighted.effectiveCount,
+      weighted,
+      allTime,
+      evolution: evolutionNotes(weighted, allTime),
+      demotedInvariants: demoted,
+    };
+  }
+  const drift = opts.lessons?.length ? detectLessonDrift(opts.lessons, pairs, opts.drift) : [];
+
+  const profiles = buildContactProfiles(pairs, { ...opts, buckets });
   const { contacts, ...rest } = profiles;
   const gate = sliceGateFrom(opts);
   const context: ContextBreakdown = { ...rest, contacts: contacts.length, gate };
-  const situational = total < minPairs ? { rules: [], suppressed: [] } : situationalAnalysis(pairs, profiles, { minSegment: opts.minSegment ?? 5, ...gate });
+  const situational = total < minPairs ? { rules: [], suppressed: [] } : situationalAnalysis(pairs, profiles, { minSegment: opts.minSegment ?? 5, ...gate, ...(weight ? { weight } : {}) });
   const contextRules = situational.rules;
   const suppressedSlices = situational.suppressed;
 
@@ -428,6 +501,8 @@ export function analyzeHistory(pairs: HistoryPair[], opts: AnalyzeOptions = {}):
     context,
     intents,
     clusters,
+    ...(recency ? { recency } : {}),
+    drift,
     notes,
   };
 }
@@ -483,6 +558,11 @@ export function formatAnalysis(a: HistoryAnalysis): string[] {
     `  Greeting in ${v.greetings.rate.count} (${v.greetings.rate.pct}%)${v.greetings.top.length ? `, most often "${v.greetings.top[0]!.text}"` : ''}. Sign-off in ${v.signOffs.rate.count} (${v.signOffs.rate.pct}%)${v.signOffs.top.length ? `, most often "${v.signOffs.top[0]!.text}"` : ''}.`,
   ];
   if (v.replyDelayMinutes) lines.push(`  Typical reply time: ${v.replyDelayMinutes.median} minutes (${v.replyDelayMinutes.pairs} timed pairs).`);
+  if (a.recency) {
+    const r = a.recency;
+    lines.push(`  Recency-weighted (${r.basis}, ~${r.effectivePairs} replies' worth of evidence): median ${r.weighted.medianWords} words, greeting ${pc(r.weighted.greetingRate)}, sign-off ${pc(r.weighted.signOffRate)}. History is a descriptive baseline: recent replies count more.`);
+    for (const e of r.evolution) lines.push(`  Evolving: ${e}`);
+  }
   lines.push('', 'What people write to you about:');
   for (const i of a.intents) lines.push(`  ${i.label}: ${i.count} (${i.pct}%)`);
   const shown = a.clusters.filter((c) => c.bucket !== OTHER_BUCKET.id).slice(0, 6);
@@ -499,6 +579,10 @@ export function formatAnalysis(a: HistoryAnalysis): string[] {
   lines.push('', 'Conditional logic (real exceptions — use branching logic, not walls):');
   if (a.conditionalRules.length) for (const r of a.conditionalRules) lines.push(`  [logic] ${r.rule}`);
   else lines.push('  none: no behavior has enough real exceptions to contrast.');
+  if (a.drift?.length) {
+    lines.push('', 'Tension / drift (your saved lessons are ideals and still apply, but your latest replies disagree):');
+    for (const d of a.drift) lines.push(`  [drift] ${d.message}`);
+  }
   if (a.contextRules.length) {
     lines.push('', 'Situational context rules (diverse multi-contact slices):');
     for (const r of a.contextRules) lines.push(`  [${r.layer}] ${r.rule}  (${r.support.count}/${r.support.of})`);
@@ -705,7 +789,8 @@ export async function mineHistory(engine: Engine, opts: MineOptions = {}): Promi
   if (opts.limit !== undefined && !(opts.limit > 0)) throw new Error('limit must be a positive number.');
   let pairs = await loadPairs(engine.store);
   if (opts.limit !== undefined) pairs = pairs.slice(-Math.floor(opts.limit));
-  const analysis = analyzeHistory(pairs, opts);
+  const lessons = opts.lessons ?? (await engine.lessons.all()).filter((l) => !l.hardened);
+  const analysis = analyzeHistory(pairs, { ...opts, lessons });
   const report: MineReport = { generatedAt: new Date().toISOString(), pairsAnalyzed: pairs.length, analysis };
   if (pairs.length) report.holdout = evaluateHoldout(pairs, opts);
   if (opts.ai && pairs.length) {
