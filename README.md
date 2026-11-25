@@ -801,6 +801,27 @@ Some asks take more than one look: "research standing desks under $500 and get b
 - **$0 chat commands.** `missions` / `what are you working on?` lists what is running and what finished lately; `cancel mission <id>` (or `stop the mission` when only one is open) stops it before its next step.
 - **Terminal.** `rufus missions [list | start <goal...> [--context <text>] | show <id> | cancel <id>]`. Library: `createMission`, `listMissions`, `loadMission`, `cancelMission`, `runMission`, `missionTools`.
 
+### Voice-native speed, Hub controls, calendar and Gmail writes (v23)
+
+- **Spoken turns sound like a call.** A Hub call (`/api/voice`) and a Telegram voice note that will be answered by voice reach the Chief of Staff as `chief.reply(text, { spoken: true })`. The system prompt then gets `VOICE_CALL_HINT`: 1 to 3 natural spoken sentences, no lists, URLs or markdown, lead with the answer. Typed chat is unchanged.
+- **Spoken turns are fast.** A short spoken turn goes to the `fast` provider when one is configured, or to `"voice": { "provider": "<name>" }`. Tools still work, and if that provider fails the turn moves up to the chat provider. A long turn, or one asking for detail, stays on the chat provider.
+- **Hub controls.** The Hub page now has tabs: **Call**, **Chat**, **Now & Verify**, **Missions** and **Trust & Audit**. `GET /api/state` also returns `trust` (`paused`, `pauseReason`, and each action's `mode`, `cleanStreak` and `promotionSuggested`), `missions` (active and recent: `id`, `goal`, `status`, `stepsCount`, `resultText`) and the last 15 `audit` entries. The standard external write tools you have configured always show up, at `check` until you change them. New endpoints use the same auth and the same `x-rufus-hub` CSRF header:
+  - `POST /api/trust/pause` (`{ "reason"?: "..." }`) and `POST /api/trust/resume`: the kill switch, as a big Pause/Resume button. Resuming needs a second tap.
+  - `POST /api/trust/mode` (`{ "action", "mode": "blocked" | "check" | "auto_notify" | "autonomous", "confirm": true }`): one-tap Promote / Demote with a confirming second tap. Without `"confirm": true` you get a 400.
+  - `POST /api/missions/cancel` (`{ "id" }`): 404 for an unknown mission, 409 for one that already finished.
+- **Android launcher.** If `<workspace>/rufus.apk` exists, `GET /download/rufus.apk` serves it as `application/vnd.android.package-archive`, behind the same Hub auth. The Call tab shows a download link only when the file is there.
+- **Calendar and Gmail writes are Verify-first.** `calendar.write`, `gmail.draft` and `gmail.send` in `config.tools.commands` are always registered as write tools (`readOnly: false`) and `external`. Config can't turn either of those off. From chat or voice they are only queued as `chief.<tool>` Verify items at `check`. They run after your yes, or once you promote them (`rufus trust promote chief.calendar.write --mode auto_notify`, or from the Hub). Every run goes into `audit.jsonl` with a plain summary such as `put "Dentist" on the calendar for …` or `drafted "Deck" to dana@…`. The kill switch makes them ask again.
+
+```json
+{
+  "voice": { "provider": "fast" },
+  "tools": { "commands": {
+    "calendar.write": { "command": "gcal-write", "args": ["--json"] },
+    "gmail.draft":    { "command": "gmail-draft" }
+  } }
+}
+```
+
 ### What is primary and what is legacy
 
 `rufus --help` is the Jarvis core: ten **primary commands**, `start`, `now`, `anchor`, `trust`, `decide`, `chat`, `missions`, `say`, `collect`, `embed`, with their options. Everything else (`init`, `bridge`, `loop`, `signal`, `run`/`pending`/`answer`, `tick`/`watch`/`emit`, `lessons`/`propose`, `seed`, `mine`, `replay`/`compare`, `backtest`, `context`, `demo`) still works exactly as before, listed one line each under **Advanced / Legacy**; `rufus --help --all` spells out their options. `rufus bridge` and `rufus loop` are each half of what `rufus start` does.

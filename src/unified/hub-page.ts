@@ -1,5 +1,6 @@
 /**
- * v20: the Ambient Jarvis Hub page. One self-contained HTML/CSS/JS bundle (no CDN, no build step), dark, phone and
+ * v20: the Ambient Jarvis Hub page. v23: tabs for Call, Chat, Now & Verify, Missions, and Trust & Audit (the
+ * Pause/Resume Autonomy kill switch, one-tap Promote/Demote with a confirming second tap, and the audit ledger). One self-contained HTML/CSS/JS bundle (no CDN, no build step), dark, phone and
  * desktop. Talks to the hub API with the session cookie plus an `x-rufus-hub` header (so another site cannot post).
  * Kept free of `${` and backticks so it can live in a plain string.
  */
@@ -26,8 +27,30 @@ header h1{font-size:17px;margin:0;font-weight:650;letter-spacing:.2px}
 #dot{width:9px;height:9px;border-radius:50%;background:var(--dim)}
 #dot.on{background:var(--good);box-shadow:0 0 8px var(--good)}
 #clock{margin-left:auto;color:var(--dim);font-variant-numeric:tabular-nums}
-main{display:grid;gap:14px;padding:14px 16px calc(16px + env(safe-area-inset-bottom));max-width:1200px;margin:0 auto}
-@media(min-width:900px){main{grid-template-columns:380px 1fr;align-items:start;height:calc(100vh - 56px)}#side{position:sticky;top:70px}#chatbox{height:calc(100vh - 86px)}}
+main{display:block;padding:14px 16px calc(16px + env(safe-area-inset-bottom));max-width:820px;margin:0 auto}
+nav#tabs{position:sticky;top:calc(48px + env(safe-area-inset-top));z-index:4;display:flex;gap:6px;overflow-x:auto;padding:8px 16px;background:rgba(11,13,18,.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);scrollbar-width:none}
+nav#tabs button{flex:0 0 auto;border:1px solid var(--line);background:var(--panel);border-radius:999px;padding:7px 14px;cursor:pointer;color:var(--dim);font-weight:600;font-size:14px}
+nav#tabs button.on{background:var(--accent);border-color:var(--accent);color:#06142e}
+nav#tabs .badge{display:inline-block;min-width:18px;margin-left:6px;padding:0 5px;border-radius:9px;background:var(--warn);color:#1b1200;font-size:12px}
+.tab{display:none}.tab.on{display:grid;gap:14px}
+.row2{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pill{display:inline-block;border-radius:999px;padding:1px 9px;font-size:12px;font-weight:600;border:1px solid var(--line);color:var(--dim)}
+.pill.check{color:var(--accent);border-color:var(--accent)}.pill.auto_notify{color:var(--warn);border-color:var(--warn)}.pill.autonomous{color:var(--good);border-color:var(--good)}.pill.blocked{color:var(--bad);border-color:var(--bad)}
+.pill.running,.pill.queued{color:var(--accent);border-color:var(--accent)}.pill.completed{color:var(--good);border-color:var(--good)}.pill.failed{color:var(--bad);border-color:var(--bad)}
+#kill{width:100%;border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:700;cursor:pointer}
+#kill.pause{background:var(--bad);color:#2a0606}#kill.resume{background:var(--good);color:#07150e}#kill.arm{background:var(--warn);color:#1b1200}
+.act{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.act:last-child{border-bottom:0}
+.act .name{flex:1;min-width:160px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all}
+.act button,.mis button{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:6px 11px;cursor:pointer;font-weight:600;font-size:13px}
+.act button.arm,.mis button.arm{background:var(--warn);color:#1b1200;border-color:var(--warn)}
+.aud{padding:7px 0;border-bottom:1px solid var(--line);font-size:14px}
+.aud:last-child{border-bottom:0}
+.aud .t{color:var(--dim);font-variant-numeric:tabular-nums;margin-right:6px}
+.aud.bad{color:var(--bad)}
+.mis{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:10px}
+.mis .res{white-space:pre-wrap;word-break:break-word;margin-top:8px;font-size:14px}
+#apk{display:none;color:var(--accent);font-size:14px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
 .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:0 0 10px;font-weight:600}
 #side{display:grid;gap:14px}
@@ -54,7 +77,8 @@ main{display:grid;gap:14px;padding:14px 16px calc(16px + env(safe-area-inset-bot
 .no{background:transparent;border:1px solid var(--line)!important;color:var(--text)}
 .urgent{border-color:var(--warn)}
 .muted{color:var(--dim);font-size:14px}
-#chatbox{display:flex;flex-direction:column;min-height:60vh;padding:0;overflow:hidden}
+#chatbox{display:flex;flex-direction:column;height:calc(100vh - 150px);min-height:360px;padding:0;overflow:hidden}
+.tab.on#chatTab{display:block}
 #chatbox h2{padding:14px 14px 0}
 #log{flex:1;overflow-y:auto;padding:8px 14px;display:flex;flex-direction:column;gap:8px}
 .msg{max-width:82%;padding:8px 12px;border-radius:16px;white-space:pre-wrap;word-break:break-word}
@@ -71,8 +95,15 @@ form button{border:0;border-radius:12px;background:var(--accent);color:#06142e;f
 <body>
 <header><span id="dot"></span><h1>Rufus</h1><span id="clock"></span></header>
 <div id="locked" class="card">This Hub needs its key. Open it once with <b>?token=&lt;your hub token&gt;</b> at the end of the address.</div>
+<nav id="tabs" role="tablist">
+  <button type="button" data-tab="callTab" class="on">Call</button>
+  <button type="button" data-tab="chatTab">Chat</button>
+  <button type="button" data-tab="nowTab">Now &amp; Verify<span id="vBadge" class="badge" hidden></span></button>
+  <button type="button" data-tab="missionsTab">Missions</button>
+  <button type="button" data-tab="trustTab">Trust &amp; Audit</button>
+</nav>
 <main id="app">
-  <div id="side">
+  <div id="callTab" class="tab on">
     <section id="call" class="card">
       <h2>Live call</h2>
       <button id="callBtn" type="button" aria-label="Call Rufus">Call Rufus</button>
@@ -80,15 +111,34 @@ form button{border:0;border-radius:12px;background:var(--accent);color:#06142e;f
       <div id="phase">Tap to start a hands-free call.</div>
       <button id="sendNow" type="button">Done talking</button>
       <div id="warn">Voice needs HTTPS (for example <b>tailscale serve</b>). Chat works here.</div>
+      <div class="muted">Talking never approves anything: sends wait under Now &amp; Verify.</div>
+      <a id="apk" href="/download/rufus.apk">Get the Android app</a>
     </section>
-    <section class="card"><h2>Now</h2><div id="now" class="muted">Loading…</div></section>
-    <section class="card"><h2>Verify</h2><div id="verify" class="muted">Loading…</div></section>
+    <section class="card"><h2>Now</h2><div id="nowMini" class="muted">Loading…</div></section>
   </div>
-  <section id="chatbox" class="card">
-    <h2>Chat</h2>
-    <div id="log"></div>
-    <form id="form"><textarea id="input" placeholder="Message Rufus…" rows="1"></textarea><button>Send</button></form>
-  </section>
+  <div id="chatTab" class="tab">
+    <section id="chatbox" class="card">
+      <h2>Chat</h2>
+      <div id="log"></div>
+      <form id="form"><textarea id="input" placeholder="Message Rufus…" rows="1"></textarea><button>Send</button></form>
+    </section>
+  </div>
+  <div id="nowTab" class="tab">
+    <section class="card"><h2>Verify</h2><div id="verify" class="muted">Loading…</div></section>
+    <section class="card"><h2>Now</h2><div id="now" class="muted">Loading…</div></section>
+  </div>
+  <div id="missionsTab" class="tab">
+    <section class="card"><h2>Background missions</h2><div id="missions" class="muted">Loading…</div></section>
+  </div>
+  <div id="trustTab" class="tab">
+    <section class="card">
+      <h2>Autonomy</h2>
+      <button id="kill" type="button" class="pause">Pause autonomy</button>
+      <div id="killNote" class="muted" style="margin-top:8px"></div>
+    </section>
+    <section class="card"><h2>Earned trust</h2><div id="trust" class="muted">Loading…</div></section>
+    <section class="card"><h2>Audit log</h2><div id="audit" class="muted">Loading…</div></section>
+  </div>
 </main>
 <script>
 (function(){
@@ -112,12 +162,47 @@ function renderChat(turns){
   log.innerHTML=turns.map(function(t){var d=new Date(t.at);return '<div class="msg '+(t.role==='user'?'user':'assistant')+(t.proactive?' pro':'')+'">'+esc(t.text)+'<time>'+(isNaN(d)?'':d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}))+'</time></div>'}).join('')||'<div class="muted">Say hi.</div>';
   if(stick)log.scrollTop=log.scrollHeight}
 function addLocal(role,text){var log=$('log');var div=document.createElement('div');div.className='msg '+role;div.textContent=text;log.appendChild(div);log.scrollTop=log.scrollHeight;lastChat=''}
+// Tabs (the last one is remembered on this device).
+function showTab(id){var bs=document.querySelectorAll('nav#tabs button');for(var i=0;i<bs.length;i++)bs[i].classList.toggle('on',bs[i].getAttribute('data-tab')===id);
+  var ts=document.querySelectorAll('.tab');for(var k=0;k<ts.length;k++)ts[k].classList.toggle('on',ts[k].id===id);
+  try{localStorage.setItem('rufus.tab',id)}catch(e){}if(id==='chatTab'){var l=$('log');l.scrollTop=l.scrollHeight}}
+$('tabs').addEventListener('click',function(e){var b=e.target.closest('button');if(b)showTab(b.getAttribute('data-tab'))});
+try{var saved=localStorage.getItem('rufus.tab');if(saved&&$(saved))showTab(saved)}catch(e){}
+// A deliberate second tap: the first one arms the button for 4 seconds.
+function armed(b,label){if(b.classList.contains('arm'))return true;b.classList.add('arm');b.dataset.label=b.textContent;b.textContent=label||'Tap again to confirm';
+  setTimeout(function(){if(b.classList.contains('arm')){b.classList.remove('arm');b.textContent=b.dataset.label}},4000);return false}
+function hm(iso){var d=new Date(iso);return isNaN(d)?'':d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}
+var RUNGS=['blocked','check','auto_notify','autonomous'];
+var RUNG_LABEL={blocked:'blocked',check:'asks first',auto_notify:'acts + tells you',autonomous:'acts quietly'};
+function renderTrust(t){
+  if(!t){$('trust').innerHTML='<span class="muted">Not available.</span>';return}
+  var k=$('kill');if(k.classList.contains('arm')||$('trust').querySelector('.arm'))return; // a tap is waiting for its confirm
+  if(t.paused){k.className='resume';k.textContent='Resume autonomy';$('killNote').textContent='Paused'+(t.pauseReason?' ('+t.pauseReason+')':'')+': every action asks you first.'}
+  else{k.className='pause';k.textContent='Pause autonomy';$('killNote').textContent='Kill switch: one tap and nothing runs on its own.'}
+  var acts=t.actions||[];
+  $('trust').innerHTML=acts.length?acts.map(function(a){var i=RUNGS.indexOf(a.mode);var up=RUNGS[i+1];var down=a.mode==='check'?'blocked':(i>1?'check':null);
+    return '<div class="act" data-action="'+esc(a.action)+'"><span class="name">'+esc(a.action)+'</span><span class="pill '+esc(a.mode)+'">'+esc(RUNG_LABEL[a.mode]||a.mode)+'</span>'+
+      '<span class="muted">'+(a.cleanStreak||0)+' clean'+(a.promotionSuggested?' · ready to promote':'')+'</span>'+
+      (down?'<button data-mode="'+down+'">'+(down==='blocked'?'Block':'Demote')+'</button>':'')+(up?'<button data-mode="'+up+'">'+(a.mode==='blocked'?'Unblock':'Promote')+'</button>':'')+'</div>'}).join(''):'<span class="muted">No actions yet. Everything starts at "asks first".</span>'}
+function renderAudit(list){
+  list=list||[];
+  $('audit').innerHTML=list.length?list.map(function(e){var who=e.approval==='human'?'you OK’d':e.approval==='auto_notify'?'on its own, told you':'on its own';
+    return '<div class="aud'+(e.ok?'':' bad')+'"><span class="t">'+hm(e.at)+'</span>'+esc(e.summary)+' <span class="muted">('+who+')</span>'+(e.ok?'':' — failed: '+esc(e.error||'unknown'))+'</div>'}).join(''):'<span class="muted">Nothing done yet.</span>'}
+function renderMissions(list){
+  list=list||[];if($('missions').querySelector('.arm'))return;
+  $('missions').innerHTML=list.length?list.map(function(m){var active=m.status==='queued'||m.status==='running';
+    return '<div class="mis" data-id="'+esc(m.id)+'"><div class="row2"><b style="flex:1">'+esc(m.goal)+'</b><span class="pill '+esc(m.status)+'">'+esc(m.status)+'</span></div>'+
+      '<div class="muted">'+esc(m.id)+' · '+(m.stepsCount||0)+' step'+(m.stepsCount===1?'':'s')+'</div>'+
+      (m.resultText?'<div class="res">'+esc(m.resultText)+'</div>':'')+(active?'<div class="row2" style="margin-top:8px"><button data-cancel="1">Cancel</button></div>':'')+'</div>'}).join(''):'<span class="muted">Nothing in the works. Ask in chat: "research X and get back to me".</span>'}
 function renderNow(s){
   var html='';
   if(s.current)html+='<div style="margin-bottom:8px">Now: <b>'+esc(s.current.title)+'</b> until '+t12(s.current.end)+'</div>';
   else if(s.next)html+='<div style="margin-bottom:8px">Free now. Next: <b>'+esc(s.next.title)+'</b> at '+t12(s.next.start)+'</div>';
   html+=(s.schedule||[]).map(function(b){var cur=s.current&&s.current.start===b.start&&s.current.title===b.title;return '<div class="blk'+(cur?' cur':'')+(b.status==='done'||b.status==='skipped'?' done':'')+'"><span class="t">'+t12(b.start)+'–'+t12(b.end)+'</span><span>'+esc(b.title)+'</span></div>'}).join('');
   $('now').innerHTML=html||'Nothing scheduled today.';
+  $('nowMini').innerHTML=(s.current?'Now: <b>'+esc(s.current.title)+'</b> until '+t12(s.current.end):s.next?'Free now. Next: <b>'+esc(s.next.title)+'</b> at '+t12(s.next.start):'Nothing scheduled right now.')+((s.pending||[]).length?'<div style="margin-top:6px">'+s.pending.length+' waiting under Now &amp; Verify.</div>':'');
+  var vb=$('vBadge');vb.hidden=!(s.pending||[]).length;vb.textContent=(s.pending||[]).length;
+  renderTrust(s.trust);renderAudit(s.audit);renderMissions(s.missions);
   var v=s.pending||[];
   $('verify').innerHTML=v.length?v.map(function(it){var todo=it.stage==='execute';return '<div class="item'+(it.urgent?' urgent':'')+'" data-id="'+esc(it.id)+'">'+esc(it.text)+'<div class="row"><button class="ok" data-act="approve">'+(todo?'Done':'Approve')+'</button><button class="no" data-act="reject">'+(todo?'Drop':'Reject')+'</button></div></div>'}).join(''):'<span class="muted">Nothing waiting on you.</span>';
   renderChat(s.chat||[])}
@@ -129,9 +214,21 @@ refresh();
 // Verify: two deliberate taps to approve. Nothing is ever approved by chat or by voice.
 $('verify').addEventListener('click',function(e){
   var b=e.target.closest('button');if(!b)return;var item=b.closest('.item');var id=item.getAttribute('data-id');var act=b.getAttribute('data-act');
-  if(act==='approve'&&!b.classList.contains('arm')){b.classList.add('arm');b.dataset.label=b.textContent;b.textContent='Tap again to confirm';setTimeout(function(){b.classList.remove('arm');b.textContent=b.dataset.label},4000);return}
+  if(act==='approve'&&!armed(b))return;
   b.disabled=true;
   api('/api/verify/'+encodeURIComponent(id)+'/'+act,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirm:true})}).then(function(j){if(j.message)addLocal('assistant',j.message);refresh()}).catch(function(){b.disabled=false})});
+
+// Trust & Audit: the kill switch (pausing is one tap; resuming needs a second) and one rung up or down per action.
+function post(path,body){return api(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})}).then(function(j){if(j.message||j.error)addLocal('assistant',j.message||'('+j.error+')');return refresh()})}
+$('kill').addEventListener('click',function(){var k=$('kill');
+  if(k.classList.contains('resume')){if(!armed(k,'Tap again to resume'))return;return post('/api/trust/resume')}
+  post('/api/trust/pause',{reason:'paused from the Hub'})});
+$('trust').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;var row=b.closest('.act');var mode=b.getAttribute('data-mode');
+  if(!armed(b,'Confirm '+(RUNG_LABEL[mode]||mode)+'?'))return;b.disabled=true;
+  post('/api/trust/mode',{action:row.getAttribute('data-action'),mode:mode,confirm:true}).catch(function(){b.disabled=false})});
+$('missions').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;if(!armed(b,'Tap again to cancel'))return;b.disabled=true;
+  post('/api/missions/cancel',{id:b.closest('.mis').getAttribute('data-id')}).catch(function(){b.disabled=false})});
+fetch('/download/rufus.apk',{method:'HEAD',credentials:'same-origin'}).then(function(r){if(r.ok)$('apk').style.display='inline-block'}).catch(function(){});
 
 // Chat
 var input=$('input');
@@ -204,9 +301,9 @@ export const HUB_MANIFEST = JSON.stringify({
 export const HUB_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0b0d12"/><circle cx="256" cy="256" r="150" fill="none" stroke="#6ea8ff" stroke-width="28"/><circle cx="256" cy="256" r="62" fill="#6ea8ff"/></svg>`;
 
 /** Offline shell: the page itself is cached (network first); the API is never cached. */
-export const HUB_SW = String.raw`var CACHE='rufus-hub-v20';
+export const HUB_SW = String.raw`var CACHE='rufus-hub-v23';
 self.addEventListener('install',function(e){self.skipWaiting();e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(['/','/manifest.webmanifest','/icon.svg'])}).catch(function(){}))});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==CACHE}).map(function(k){return caches.delete(k)}))}).then(function(){return self.clients.claim()}))});
-self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(e.request.method!=='GET'||u.origin!==location.origin||u.pathname.indexOf('/api/')===0||u.pathname==='/signal')return;
+self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(e.request.method!=='GET'||u.origin!==location.origin||u.pathname.indexOf('/api/')===0||u.pathname.indexOf('/download/')===0||u.pathname==='/signal')return;
   e.respondWith(fetch(e.request).then(function(r){if(r.ok){var copy=r.clone();caches.open(CACHE).then(function(c){c.put(u.pathname==='/'?'/':e.request,copy)})}return r}).catch(function(){return caches.match(u.pathname==='/'?'/':e.request)}))});
 `;

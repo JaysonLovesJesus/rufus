@@ -428,6 +428,11 @@ export interface VoiceConfig {
   replyMode?: VoiceReplyMode;
   /** Speech-to-text for the Hub's live call. Default: `telegram.transcribe`. */
   stt?: TranscribeCommand;
+  /**
+   * v23: named provider (a key of `providers`, e.g. `"fast"`) for spoken turns: Hub calls and voice notes answered by
+   * voice. Default: `fast` when configured, else the chat provider. A failure escalates to the chat provider.
+   */
+  provider?: string;
 }
 
 /** v20: the Ambient Jarvis Hub (a phone/desktop web app). `true`: on, sharing the webhook's port, host and token. */

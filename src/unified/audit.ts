@@ -114,6 +114,17 @@ export function describeDone(tool: string | undefined, args: Record<string, unkn
     const text = str(args.text) ?? str(args.message);
     return `sent ${text ? `"${clip(text, 80)}"` : 'a message'}${toPart}`;
   }
+  // v23: the standard calendar and email write tools.
+  if (tool === 'calendar.write') {
+    const title = str(args.title) ?? str(args.summary) ?? str(args.name);
+    const when = str(args.start) ?? str(args.when) ?? str(args.date);
+    return `put ${title ? `"${clip(title, 80)}"` : 'an event'} on the calendar${when ? ` for ${clip(when, 40)}` : ''}`;
+  }
+  if (tool === 'gmail.draft' || tool === 'gmail.send') {
+    const subject = str(args.subject);
+    const what = subject ? `"${clip(subject, 80)}"` : 'an email';
+    return tool === 'gmail.draft' ? `drafted ${what}${toPart}` : `emailed ${what}${toPart}`;
+  }
   return fallback;
 }
 

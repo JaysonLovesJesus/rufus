@@ -96,6 +96,11 @@ export interface ChiefOfStaffOptions {
   maxToolSteps?: number;
   /** Recent turns from `chat-history.jsonl` shown to the model. Default 12; 0 turns memory off (nothing is written either). */
   historyTurns?: number;
+  /**
+   * v23: named provider for spoken turns (`config.voice.provider`, e.g. `"fast"`). Default: the `fast` provider when one
+   * is configured, else the chat provider. If it fails, the turn escalates to the chat provider.
+   */
+  voiceProvider?: string;
   now?: () => Date;
 }
 
@@ -134,6 +139,26 @@ const SYSTEM_TAIL = [
   'If a message looks like an answer to an open card, tell them to start it with that card\'s ref.',
 ];
 const SYSTEM = [...SYSTEM_HEAD, ...SYSTEM_NO_TOOLS, ...SYSTEM_TAIL].join('\n');
+
+/**
+ * v23 Voice-Native Speed: appended to the system prompt when the turn is spoken (a Hub call, a voice note answered by
+ * voice), so the reply sounds like a quick answer on a call instead of a paragraph read aloud.
+ */
+export const VOICE_CALL_HINT = [
+  'VOICE CALL: this reply will be spoken aloud on a live call.',
+  'Answer in 1 to 3 short, natural spoken sentences, like Jarvis on the phone: fast, direct and conversational.',
+  'No lists, bullets, headings, markdown, emoji, URLs or code; say numbers and times the way a person says them.',
+  'Lead with the answer. If more detail would help, offer it in a few words instead of reading it out.',
+].join('\n');
+
+/** A spoken turn longer than this (or one asking for detail) is not "simple": it stays on the main chat provider. */
+const VOICE_SIMPLE_CHARS = 400;
+
+/** v23: how one chat turn arrived. */
+export interface ChiefTurnOptions {
+  /** True when the reply will be spoken (Hub call, a voice note answered by voice): short spoken style, fast provider. */
+  spoken?: boolean;
+}
 
 const TOOL_CALL = /TOOL_CALL\s*:?\s*/;
 const MAX_TOOL_RESULT = 3000;
@@ -233,6 +258,7 @@ export function concise(reply: string, asked: string): string {
 export class ChiefOfStaff {
   private readonly engine: Engine;
   private readonly providerName?: string;
+  private readonly voiceProviderName?: string;
   private readonly dir: string;
   private readonly loop?: MasterLoop;
   private readonly tools?: ToolRegistry;
@@ -244,6 +270,7 @@ export class ChiefOfStaff {
   constructor(opts: ChiefOfStaffOptions) {
     this.engine = opts.engine;
     this.providerName = opts.provider;
+    this.voiceProviderName = opts.voiceProvider?.trim() || undefined;
     this.dir = opts.dir ?? opts.engine.store.dir;
     this.loop = opts.loop;
     this.tools = opts.tools ?? opts.loop?.tools;
@@ -274,17 +301,22 @@ export class ChiefOfStaff {
     return r.silent ? '(no reply needed)' : r.text;
   }
 
-  async handle(text: string): Promise<ChiefReply> {
+  /** v23: one turn, typed or spoken (`{ spoken: true }`: a short, spoken-style reply from the fast provider). */
+  reply(text: string, opts: ChiefTurnOptions = {}): Promise<ChiefReply> {
+    return this.handle(text, opts);
+  }
+
+  async handle(text: string, opts: ChiefTurnOptions = {}): Promise<ChiefReply> {
     const trimmed = text.trim();
     if (!trimmed) return { text: 'Say "status", "flows", "lessons", or just ask me something.', cards: [], via: 'command' };
     const at = this.now().toISOString();
-    const reply = await this.answer(trimmed);
+    const reply = await this.answer(trimmed, opts.spoken === true);
     const said = reply.silent ? undefined : reply.react ? `[reacted ${reply.react}]` : reply.text;
     await this.remember([{ role: 'user', text: trimmed, at }, ...(said !== undefined ? [{ role: 'assistant' as const, text: said, at: this.now().toISOString() }] : [])]);
     return reply;
   }
 
-  private async answer(trimmed: string): Promise<ChiefReply> {
+  private async answer(trimmed: string, spoken = false): Promise<ChiefReply> {
     // v17: a day plan waiting for a yes. Only a short yes/no answers it; anything else is ordinary chat.
     if (PLAN_APPROVE.test(trimmed) || PLAN_DECLINE.test(trimmed)) {
       const dir = this.loop?.dir ?? this.dir;
@@ -303,7 +335,7 @@ export class ChiefOfStaff {
       }
     }
     const command = this.classify(trimmed);
-    if (!command) return this.chat(trimmed);
+    if (!command) return this.chat(trimmed, spoken);
     try {
       return await this.runCommand(command);
     } catch (err) {
@@ -564,7 +596,24 @@ export class ChiefOfStaff {
     }
   }
 
-  private async chat(text: string): Promise<ChiefReply> {
+  /**
+   * v23: the provider for a spoken turn, or undefined to use the chat provider. Only simple conversational turns take
+   * the fast path; a long message or one asking for detail stays on the chat provider.
+   */
+  private voiceProviderFor(text: string, main: AiProvider): AiProvider | undefined {
+    if (text.length > VOICE_SIMPLE_CHARS || WANTS_DETAIL.test(text)) return undefined;
+    for (const name of this.voiceProviderName ? [this.voiceProviderName] : ['fast']) {
+      try {
+        const p = this.engine.providerFor(name);
+        if (p !== main) return p;
+      } catch {
+        /* not configured: the chat provider answers */
+      }
+    }
+    return undefined;
+  }
+
+  private async chat(text: string, spoken = false): Promise<ChiefReply> {
     const reply = (t: string, extra: Partial<ChiefReply> = {}): ChiefReply => ({ text: t, cards: [], via: 'chat', ...extra });
     try {
       const [snapshot, persona, history] = await Promise.all([
@@ -577,12 +626,27 @@ export class ChiefOfStaff {
       const messages: AiMessage[] = [
         { role: 'user', content: `Live snapshot (exact data gathered by code):\n\`\`\`json\n${JSON.stringify(snapshot, null, 2)}\n\`\`\`\n\n${recent}Their message:\n${text}` },
       ];
-      const system = withPersona(tools ? systemWithTools(tools, this.maxToolSteps) : SYSTEM, persona);
-      const provider = this.engine.providerFor(this.providerName);
+      const base = withPersona(tools ? systemWithTools(tools, this.maxToolSteps) : SYSTEM, persona);
+      const system = spoken ? `${base}\n\n${VOICE_CALL_HINT}` : base;
+      const main = this.engine.providerFor(this.providerName);
+      // v23: a spoken turn goes to the fast provider; if it fails, the turn escalates to the chat provider.
+      let fast = spoken ? this.voiceProviderFor(text, main) : undefined;
+      const provider: Pick<AiProvider, 'complete'> = {
+        complete: async (req) => {
+          if (fast) {
+            try {
+              return await fast.complete(req);
+            } catch {
+              fast = undefined;
+            }
+          }
+          return main.complete(req);
+        },
+      };
       const toolsUsed: string[] = [];
       const queued: string[] = [];
       for (let step = 0; ; step++) {
-        const out = (await provider.complete({ system, messages, meta: { runId: 'chief', flowId: 'chief', step: step ? `chat.tool${step}` : 'chat', attempt: 1 } })).trim();
+        const out = (await provider.complete({ system, messages, meta: { runId: 'chief', flowId: 'chief', step: `${spoken ? 'voice' : 'chat'}${step ? `.tool${step}` : ''}`, attempt: 1 } })).trim();
         const call = tools ? parseToolCall(out) : undefined;
         if (!call) {
           const extra = { ...(toolsUsed.length ? { toolsUsed } : {}), ...(queued.length ? { queued } : {}) };

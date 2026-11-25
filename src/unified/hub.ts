@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type RequestListener, type ServerResponse } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,6 +7,7 @@ import { commandTranscriber, type Transcriber } from '../channels/transcribe';
 import { commandSynthesizer, type Synthesizer } from '../channels/voice';
 import type { ChatTurn } from '../chief/history';
 import type { LoopSignal } from '../engine/loop';
+import { isTrustMode, TRUST_MODES, type TrustMode } from '../engine/trust';
 import type { TranscribeCommand, TtsCommandConfig } from '../types';
 import { HUB_HTML, HUB_ICON, HUB_MANIFEST, HUB_SW } from './hub-page';
 import { authorized, DEFAULT_WEBHOOK_PORT, handleSignalRequest, listen, requireWebhookToken, type SignalWebhook } from './webhook';
@@ -20,6 +21,10 @@ import { authorized, DEFAULT_WEBHOOK_PORT, handleSignalRequest, listen, requireW
  *     `{"confirm": true}`. Chat and voice go to the Chief of Staff, which can only queue side effects, never run them;
  *   - `POST /signal`: the phone webhook, byte-for-byte the same as `startSignalWebhook`.
  *
+ * v23 adds the controls: `POST /api/trust/pause|resume` (the kill switch), `POST /api/trust/mode` (one action's rung,
+ * with `{"confirm": true}`), `POST /api/missions/cancel`, and `GET /download/rufus.apk` (an optional native launcher
+ * placed at `<workspace>/rufus.apk`). `GET /api/state` also returns `trust`, `missions` and the last `audit` entries.
+ *
  * Auth: `Authorization: Bearer <token>`, or open `/?token=<token>` once, which sets an HttpOnly, SameSite=Strict session
  * cookie. Cookie-authenticated POSTs must also carry `x-rufus-hub: 1`, so another web page cannot post on your behalf.
  */
@@ -32,6 +37,13 @@ export interface HubBackend {
   state(): Promise<HubState>;
   /** Resolves one Verify item by run id or short number. Only these two verdicts exist here. */
   decide(ref: string, verdict: 'accept' | 'reject', note?: string): Promise<HubDecision>;
+  /** v23: the kill switch. Unset: the endpoint answers 501. */
+  pauseTrust?(reason?: string): Promise<HubDecision>;
+  resumeTrust?(): Promise<HubDecision>;
+  /** v23: puts one action on one rung (the Hub already checked `confirm: true`). */
+  setTrustMode?(action: string, mode: TrustMode): Promise<HubDecision>;
+  /** v23: cancels a queued or running background mission. */
+  cancelMission?(id: string): Promise<HubDecision>;
 }
 
 export interface HubChatReply {
@@ -60,6 +72,42 @@ export interface HubItem {
   text: string;
 }
 
+/** v23: one action on the Earned Trust ladder, as the Hub shows it. */
+export interface HubTrustAction {
+  action: string;
+  /** Its own rung (`blocked`, `check`, `auto_notify`, `autonomous`); while paused everything but `blocked` acts as `check`. */
+  mode: TrustMode;
+  cleanStreak: number;
+  promotionSuggested?: boolean;
+}
+
+export interface HubTrust {
+  /** The kill switch is on: nothing runs on its own. */
+  paused: boolean;
+  pauseReason?: string;
+  actions: HubTrustAction[];
+}
+
+export interface HubMission {
+  id: string;
+  goal: string;
+  status: string;
+  stepsCount: number;
+  resultText?: string;
+}
+
+export interface HubAuditEntry {
+  id: string;
+  at: string;
+  action: string;
+  tool?: string;
+  summary: string;
+  approval: string;
+  trustMode: string;
+  ok: boolean;
+  error?: string;
+}
+
 export interface HubState {
   now: string;
   current?: HubBlock;
@@ -67,6 +115,12 @@ export interface HubState {
   schedule: HubBlock[];
   pending: HubItem[];
   chat: ChatTurn[];
+  /** v23: the kill switch and every action's rung. */
+  trust?: HubTrust;
+  /** v23: active and recent background missions, newest first. */
+  missions?: HubMission[];
+  /** v23: the last audit entries (newest first). */
+  audit?: HubAuditEntry[];
 }
 
 export interface HubDecision {
@@ -103,6 +157,10 @@ export interface JarvisHubOptions {
 export type JarvisHub = SignalWebhook;
 
 export const HUB_COOKIE = 'rufus_hub';
+/** v23: the optional Android launcher, served from `<workspace>/rufus.apk` at `/download/rufus.apk`. */
+export const HUB_APK_FILE = 'rufus.apk';
+export const APK_MIME = 'application/vnd.android.package-archive';
+const MAX_APK_BYTES = 200 * 1024 * 1024;
 const MAX_JSON = 32 * 1024;
 const DEFAULT_MAX_AUDIO = 15 * 1024 * 1024;
 const MAX_CHAT_CHARS = 4000;
@@ -267,6 +325,18 @@ export function createHubHandler(opts: JarvisHubOptions): RequestListener {
         return sendText(res, 200, 'text/html; charset=utf-8', HUB_HTML, { 'cache-control': 'no-cache', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
       }
 
+      // v23: the optional native launcher, behind the same auth (a GET: no CSRF header needed).
+      if (p === '/download/rufus.apk') {
+        if (!authOf(req)) return sendJson(res, 401, { ok: false, error: 'unauthorized' });
+        if (method !== 'GET' && method !== 'HEAD') return sendJson(res, 405, { ok: false, error: 'use GET' });
+        const file = path.join(opts.dir, HUB_APK_FILE);
+        const info = await stat(file).catch(() => undefined);
+        if (!info?.isFile() || info.size > MAX_APK_BYTES) return sendJson(res, 404, { ok: false, error: `No Android app here: put it at ${HUB_APK_FILE} in the workspace.` });
+        const bytes = await readFile(file);
+        res.writeHead(200, { 'content-type': APK_MIME, 'content-length': String(bytes.length), 'content-disposition': 'attachment; filename="rufus.apk"', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+        return void res.end(method === 'HEAD' ? undefined : bytes);
+      }
+
       if (!p.startsWith('/api/')) return sendJson(res, 404, { ok: false, error: 'not found' });
       const auth = authOf(req);
       if (!auth) return sendJson(res, 401, { ok: false, error: 'unauthorized' });
@@ -293,6 +363,35 @@ export function createHubHandler(opts: JarvisHubOptions): RequestListener {
       if (p === '/api/voice') {
         if (method !== 'POST') return sendJson(res, 405, { ok: false, error: 'use POST' });
         return await voice(req, res);
+      }
+      if (p === '/api/trust/pause' || p === '/api/trust/resume' || p === '/api/trust/mode' || p === '/api/missions/cancel') {
+        if (method !== 'POST') return sendJson(res, 405, { ok: false, error: 'use POST' });
+        const body = await readJson(req);
+        const b = opts.backend;
+        const answer = (d: HubDecision): void => sendJson(res, d.ok ? 200 : (d.code ?? 400), { ...d, ok: d.ok });
+        const unsupported = (): void => sendJson(res, 501, { ok: false, error: 'not available on this Rufus' });
+        if (p === '/api/trust/pause') {
+          if (!b.pauseTrust) return unsupported();
+          const reason = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim().slice(0, 200) : undefined;
+          return answer(await b.pauseTrust(reason));
+        }
+        if (p === '/api/trust/resume') {
+          if (!b.resumeTrust) return unsupported();
+          return answer(await b.resumeTrust());
+        }
+        if (p === '/api/trust/mode') {
+          if (!b.setTrustMode) return unsupported();
+          const action = typeof body.action === 'string' ? body.action.trim() : '';
+          if (!/^[a-z0-9][a-z0-9_.:-]*$/i.test(action)) return sendJson(res, 400, { ok: false, error: 'action is required (e.g. chief.calendar.write)' });
+          if (!isTrustMode(body.mode)) return sendJson(res, 400, { ok: false, error: `mode must be one of ${TRUST_MODES.join(', ')}` });
+          // Changing how much Rufus may do on its own must be said in so many words, like approving a Verify item.
+          if (body.confirm !== true) return sendJson(res, 400, { ok: false, error: 'To change a trust level, send {"confirm": true}.' });
+          return answer(await b.setTrustMode(action, body.mode));
+        }
+        if (!b.cancelMission) return unsupported();
+        const id = typeof body.id === 'string' ? body.id.trim() : '';
+        if (!id) return sendJson(res, 400, { ok: false, error: 'id is required' });
+        return answer(await b.cancelMission(id.slice(0, 40)));
       }
       const verify = /^\/api\/verify\/([^/]+)\/(approve|reject)$/.exec(p);
       if (verify) {

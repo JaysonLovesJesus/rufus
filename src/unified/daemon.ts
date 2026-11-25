@@ -8,7 +8,9 @@ import { inboxSensor } from '../engine/loop-builtins';
 import { ANCHOR_TOOL, anchorUpdateTool } from '../tools/anchor-tool';
 import type { Engine } from '../engine/engine';
 import { DEFAULT_PENDING_TTL_MS, type HumanDecision, type LoopRun, type LoopRunStatus, type LoopTickReport, type MasterLoop } from '../engine/loop';
-import type { Verdict } from '../engine/trust';
+import { assertActionType, type TrustMode, type Verdict } from '../engine/trust';
+import { isExternalWriteTool } from '../tools/tools';
+import { loadAudit } from './audit';
 import { clip } from '../corpus/types';
 import { REMEMBER_TOOL, rememberTool } from '../chief/learning';
 import { draftOf, formatCheckin, formatLoopItem, isBareVerdict, parseLoopReply, recipientOf, refOf, type LoopReply } from './loop-text';
@@ -23,13 +25,13 @@ import { buildBreakDigest } from './digest';
 import { speakableTitle } from './heartbeat';
 import { nowSummary } from './now';
 import { assignNumbers, loadStartState, saveStartState, takeCheckinRequest, type StartState } from './state';
-import { formatMissionDelivery, listMissions, loadMission, runMission, saveMission, type MissionRecord } from './missions';
+import { cancelMission, formatMissionDelivery, isActiveMission, listMissions, loadMission, runMission, saveMission, type MissionRecord } from './missions';
 import { MISSION_START_TOOL, missionTools } from '../tools/mission-tools';
 import { parseAutonomyCommand, runAutonomyCommand } from './autonomy';
 import { commandSynthesizer, resolveVoiceReplyMode, shouldSpeakReply, type Synthesizer } from '../channels/voice';
 import type { TtsCommandConfig, VoiceReplyMode } from '../types';
 import { loadChatHistory } from '../chief/history';
-import type { HubBackend, HubBlock, HubDecision, HubItem, HubState } from './hub';
+import type { HubAuditEntry, HubBackend, HubBlock, HubDecision, HubItem, HubMission, HubState, HubTrust } from './hub';
 
 /**
  * `rufus start`: ONE daemon for everything.
@@ -291,6 +293,8 @@ export class UnifiedDaemon {
         workspaceDir: this.loop.dir,
         now: this.now,
         ...(opts.bubblePauseMs !== undefined ? { bubblePauseMs: opts.bubblePauseMs } : {}),
+        // v23: a reply that will be spoken (a voice note answered by voice) is written for the ear, on the fast provider.
+        spokenReply: (cameAsVoice) => shouldSpeakReply(this.voiceMode, cameAsVoice),
       });
     }
   }
@@ -795,8 +799,9 @@ export class UnifiedDaemon {
     assignNumbers(state, pending);
     const delivered = pending.filter((r) => state.delivered.includes(r.id)).sort((a, b) => (state.numbers[a.id] ?? 0) - (state.numbers[b.id] ?? 0));
     const passOn = (): void => {
-      if (msg.voice || this.channel?.isVoiceNote?.(msg.id)) this.voiceTurn = true;
-      this.relay!.inbox.push(msg);
+      const voice = msg.voice === true || this.channel?.isVoiceNote?.(msg.id) === true;
+      if (voice) this.voiceTurn = true;
+      this.relay!.inbox.push(voice && !msg.voice ? { ...msg, voice: true } : msg);
     };
     // With a flow card open, bare answers belong to the card: loop items then need "#n".
     const cardsOpen = (await this.engine.pending()).length > 0;
@@ -986,24 +991,118 @@ export class UnifiedDaemon {
   /** What the Jarvis Hub (`startJarvisHub`) talks to. Chat and voice reach the Chief of Staff; only `decide` resolves items. */
   hubBackend(): HubBackend {
     return {
-      chat: (text) => this.hubChat(text),
+      chat: (text, o) => this.hubChat(text, o?.voice === true),
       state: () => this.hubState(),
       decide: (ref, verdict, note) => this.hubDecide(ref, verdict, note),
+      pauseTrust: (reason) => this.hubTrust(async () => {
+        await this.loop.trust.pause(reason ?? 'paused from the Hub');
+        return "Paused. I won't do anything on my own — every action asks you first until you resume.";
+      }),
+      resumeTrust: () => this.hubTrust(async () => {
+        const was = await this.loop.trust.isPaused();
+        await this.loop.trust.resume();
+        return was ? 'Resumed. Actions that earned it run on their own again (and I tell you when they do).' : "Autonomy wasn't paused — nothing changed.";
+      }),
+      setTrustMode: (action, mode) => this.hubSetTrustMode(action, mode),
+      cancelMission: (id) => this.hubCancelMission(id),
     };
+  }
+
+  /** v23: a Hub trust change, said back in the chat history too. */
+  private hubTrust(fn: () => Promise<string>): Promise<HubDecision> {
+    return this.exclusive(async () => {
+      let text: string;
+      try {
+        text = await fn();
+      } catch (err) {
+        return { ok: false, code: 400, message: oneLine(message(err)) };
+      }
+      await appendChatTurns(this.loop.dir, [{ role: 'assistant', text, at: this.now().toISOString() }]).catch(() => undefined);
+      return { ok: true, message: text };
+    });
+  }
+
+  /** v23: the Hub's one-tap Promote / Demote (the Hub already required `confirm: true`). */
+  private hubSetTrustMode(action: string, mode: TrustMode): Promise<HubDecision> {
+    return this.hubTrust(async () => {
+      const t = assertActionType(action);
+      const before = await this.loop.trust.get(t);
+      const r = await this.loop.trust.setMode(t, mode);
+      const paused = await this.loop.trust.isPaused();
+      if (before.autonomy === r.autonomy) return `${t} is already at ${mode}.`;
+      const what =
+        mode === 'blocked'
+          ? `${t} is blocked: it never runs.`
+          : mode === 'check'
+            ? `${t} is back to check: I'll ask you first every time.`
+            : mode === 'auto_notify'
+              ? `${t} now runs on its own and tells you each time.`
+              : `${t} now runs on its own, quietly (it's still in the audit log).`;
+      return paused && (mode === 'auto_notify' || mode === 'autonomous') ? `${what} Autonomy is paused, so it still asks until you resume.` : what;
+    });
+  }
+
+  /** v23: the Hub's Cancel button on a mission. */
+  private hubCancelMission(id: string): Promise<HubDecision> {
+    return this.exclusive(async () => {
+      try {
+        const { record, cancelled } = await cancelMission(this.loop.dir, id, this.now());
+        return cancelled
+          ? { ok: true, message: `Cancelled mission ${record.id}.`, status: record.status }
+          : { ok: false, code: 409, message: `Mission ${record.id} already ${record.status}.`, status: record.status };
+      } catch (err) {
+        return { ok: false, code: 404, message: oneLine(message(err)) };
+      }
+    });
+  }
+
+  /** v23: the kill switch and every action's rung, plus the standard external write tools (at `check` until changed). */
+  private async hubTrustState(): Promise<HubTrust> {
+    const file = await this.loop.trust.load();
+    const actions = new Map(Object.values(file.actions).map((r) => [r.actionType, { action: r.actionType, mode: r.autonomy, cleanStreak: r.consecutiveClean, ...(r.promotionSuggested ? { promotionSuggested: true } : {}) }]));
+    for (const t of this.loop.tools.list()) {
+      if (t.readOnly || !(isExternalWriteTool(t.name) || (t.sensitivity ?? []).includes('external'))) continue;
+      const action = `chief.${t.name}`;
+      if (!actions.has(action)) actions.set(action, { action, mode: 'check' as TrustMode, cleanStreak: 0 });
+    }
+    return { paused: file.paused === true, ...(file.paused && file.pauseReason ? { pauseReason: file.pauseReason } : {}), actions: [...actions.values()].sort((a, b) => a.action.localeCompare(b.action)) };
+  }
+
+  /** v23: active missions, then the most recent finished ones. */
+  private async hubMissions(): Promise<HubMission[]> {
+    const all = await listMissions(this.loop.dir);
+    const shown = [...all.filter(isActiveMission), ...all.filter((m) => !isActiveMission(m)).slice(0, 5)];
+    return shown.map((m) => ({ id: m.id, goal: m.goal, status: m.status, stepsCount: m.steps.length, ...(m.resultText ? { resultText: m.resultText } : {}) }));
+  }
+
+  /** v23: the last 15 audit entries, newest first. */
+  private async hubAudit(): Promise<HubAuditEntry[]> {
+    return (await loadAudit(this.loop.dir, { limit: 15 })).reverse().map((e) => ({
+      id: e.id,
+      at: e.at,
+      action: e.action,
+      ...(e.tool ? { tool: e.tool } : {}),
+      summary: e.summary,
+      approval: e.approval,
+      trustMode: e.trustMode,
+      ok: e.ok,
+      ...(e.error ? { error: e.error } : {}),
+    }));
   }
 
   /**
    * A Hub chat turn (typed or spoken): always conversation. Like Telegram chat, it can only QUEUE a side effect as a
    * Verify item; nothing it says is ever read as an approval. The queued item is planned right away so it shows up.
    */
-  private hubChat(text: string): Promise<{ text: string; bubbles?: string[]; queued?: string[] }> {
+  private hubChat(text: string, spoken = false): Promise<{ text: string; bubbles?: string[]; queued?: string[] }> {
     return this.exclusive(async () => {
       if (!this.chief) return { text: 'Chat is off on this Rufus.' };
       const state = await loadStartState(this.loop.dir);
       state.lastHumanAt = this.now().toISOString();
       if (state.think) state.think.unanswered = 0;
       await saveStartState(this.loop.dir, state);
-      const reply = await this.chief.handle(text);
+      // v23: a live call answers in short spoken sentences, on the fast provider.
+      const reply = await this.chief.handle(text, spoken ? { spoken: true } : {});
       if (this.chief.drainQueued()) {
         const again = await this.loop.runOnce().catch(() => undefined);
         for (const r of again?.runs ?? []) if (r.actionType?.startsWith('chief.')) this.followUps.add(r.runId);
@@ -1015,7 +1114,15 @@ export class UnifiedDaemon {
 
   private async hubState(): Promise<HubState> {
     const now = this.now();
-    const [anchor, pending, state, chat] = await Promise.all([loadAnchor(this.loop.dir, now), this.loop.pending(), loadStartState(this.loop.dir), loadChatHistory(this.loop.dir, 60).catch(() => [])]);
+    const [anchor, pending, state, chat, trust, missions, audit] = await Promise.all([
+      loadAnchor(this.loop.dir, now),
+      this.loop.pending(),
+      loadStartState(this.loop.dir),
+      loadChatHistory(this.loop.dir, 60).catch(() => []),
+      this.hubTrustState(),
+      this.hubMissions().catch(() => []),
+      this.hubAudit().catch(() => []),
+    ]);
     const numbers = assignNumbers(state, pending); // a read: the numbers a pass would give, not saved
     const block = (b: ScheduleBlock): HubBlock => ({ start: b.start, end: b.end, title: b.title, kind: b.kind, status: b.status });
     const { current, next } = scheduleNow(anchor, now);
@@ -1029,7 +1136,7 @@ export class UnifiedDaemon {
         text: formatLoopItem(r, numbers[r.id] ?? 0, { multi: true, hint: false }),
       }));
     const today = anchor.schedule.date === localDate(now) ? [...anchor.schedule.blocks].sort((a, b) => hhmmToMin(a.start) - hhmmToMin(b.start)) : [];
-    return { now: now.toISOString(), ...(current ? { current: block(current) } : {}), ...(next ? { next: block(next) } : {}), schedule: today.map(block), pending: items, chat };
+    return { now: now.toISOString(), ...(current ? { current: block(current) } : {}), ...(next ? { next: block(next) } : {}), schedule: today.map(block), pending: items, chat, trust, missions, audit };
   }
 
   /** The Hub's Approve / Reject buttons. `ref` is a run id, or `n` / `#n` as shown in chat. */

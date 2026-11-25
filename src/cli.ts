@@ -818,7 +818,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
           engine,
           ...(channel ? { channel } : {}),
           output: (t) => io.out(t),
-          chief: new ChiefOfStaff({ engine, provider: config.chief?.provider, loop, tools: loop.tools, ...(now ? { now } : {}) }),
+          chief: new ChiefOfStaff({ engine, provider: config.chief?.provider, ...(config.voice?.provider ? { voiceProvider: config.voice.provider } : {}), loop, tools: loop.tools, ...(now ? { now } : {}) }),
           checkinEveryMs,
           ...(config.start?.heartbeat !== undefined ? { heartbeat: config.start.heartbeat } : {}),
           ...(thinkEveryMs > 0 ? { think: { everyMs: thinkEveryMs, ...(config.start?.think?.tools ? { tools: config.start.think.tools } : {}), ...(config.start?.think?.provider ? { provider: config.start.think.provider } : {}), ...(config.start?.think?.quietHours !== undefined ? { quietHours: config.start.think.quietHours } : {}) } } : {}),

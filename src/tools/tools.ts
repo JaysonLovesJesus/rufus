@@ -182,14 +182,25 @@ export function parseOutput(stdout: string): unknown {
   return t;
 }
 
-/** Defaults for the well-known command tool names. All of it can be overridden in config. */
-export const KNOWN_COMMAND_TOOLS: Record<string, { description: string; readOnly: boolean; sensitivity?: Sensitivity[] }> = {
+/** Defaults for the well-known command tool names. All of it can be overridden in config, except the v23 write floor below. */
+export const KNOWN_COMMAND_TOOLS: Record<string, { description: string; readOnly: boolean; sensitivity?: Sensitivity[]; reversible?: boolean }> = {
   'calendar.read': { description: 'Read calendar events (JSON).', readOnly: true },
-  'calendar.write': { description: 'Create or change a calendar event.', readOnly: false },
+  'calendar.write': { description: 'Create or change a calendar event. External: needs your yes until it earned trust.', readOnly: false, sensitivity: ['external'], reversible: true },
   'gmail.read': { description: 'Read email threads (JSON).', readOnly: true },
-  'gmail.draft': { description: 'Save an email draft (never sends).', readOnly: false },
+  'gmail.draft': { description: 'Save an email draft (never sends). External: needs your yes until it earned trust.', readOnly: false, sensitivity: ['external'], reversible: true },
+  'gmail.send': { description: 'Send an email. External: needs your yes until it earned trust.', readOnly: false, sensitivity: ['external'], reversible: false },
   'shell.run': { description: 'Run a configured local command.', readOnly: false, sensitivity: ['external'] },
 };
+
+/**
+ * v23: the standard write tools that reach other people or your real accounts. Whatever `config.tools.commands` says,
+ * they are never read-only and always `external`: they start at `check` (every run waits for your yes), are written to
+ * `audit.jsonl` when they run, and only run on their own once the action earned `auto_notify` / `autonomous`.
+ */
+export const EXTERNAL_WRITE_TOOLS: readonly string[] = ['calendar.write', 'gmail.draft', 'gmail.send', 'beeper.send', 'beeper.react'];
+
+/** True for a v23 standard external write tool (see `EXTERNAL_WRITE_TOOLS`). */
+export const isExternalWriteTool = (name: string): boolean => EXTERNAL_WRITE_TOOLS.includes(name);
 
 /**
  * Wraps a local CLI as a tool. The tool's args go to stdin as JSON and fill `{{key}}` placeholders in `args`.
@@ -198,13 +209,16 @@ export const KNOWN_COMMAND_TOOLS: Record<string, { description: string; readOnly
 export function commandTool(name: string, cfg: CommandToolConfig, run: CommandRunner = runCommand): ToolDefinition<Record<string, unknown>, unknown> {
   if (!cfg?.command?.trim()) throw new Error(`Tool "${name}" needs a "command" in config.tools.commands.`);
   const known = KNOWN_COMMAND_TOOLS[name];
-  const readOnly = cfg.readOnly ?? known?.readOnly ?? /\.(read|list|get|search)$/.test(name);
-  const sensitivity = cfg.sensitivity ?? known?.sensitivity;
+  const floor = isExternalWriteTool(name);
+  // A standard write tool can't be configured out of its safety: never read-only, always external.
+  const readOnly = floor ? false : (cfg.readOnly ?? known?.readOnly ?? /\.(read|list|get|search)$/.test(name));
+  const sensitivity = floor ? [...new Set<Sensitivity>([...(cfg.sensitivity ?? []), 'external'])] : (cfg.sensitivity ?? known?.sensitivity);
   return {
     name,
     description: cfg.description ?? known?.description ?? `Runs ${cfg.command}.`,
     readOnly,
     ...(sensitivity?.length ? { sensitivity } : {}),
+    ...(known?.reversible !== undefined ? { reversible: known.reversible } : {}),
     async execute(args, ctx) {
       try {
         const stdout = await run(cfg.command, fillArgs(cfg.args ?? [], args), {

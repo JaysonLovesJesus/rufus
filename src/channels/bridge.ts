@@ -77,6 +77,11 @@ export interface CardBridgeOptions {
   chief?: ChiefOfStaff | false;
   /** Pause between two chat bubbles of one reply (with a typing indicator in between). Default 350ms. */
   bubblePauseMs?: number;
+  /**
+   * v23: will the chief's reply to this turn be spoken aloud? (`true` when it came in as a voice note.) When it returns
+   * true the chief answers in short, spoken style on its fast provider. Default: never (the bridge only sends text).
+   */
+  spokenReply?: (cameAsVoice: boolean) => boolean;
 }
 
 const STATE_FILE = 'bridge-state.json';
@@ -105,6 +110,7 @@ export class CardBridge {
   private readonly now: () => Date;
   private readonly chief?: ChiefOfStaff;
   private readonly bubblePauseMs: number;
+  private readonly spokenReply?: (cameAsVoice: boolean) => boolean;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(opts: CardBridgeOptions) {
@@ -114,6 +120,7 @@ export class CardBridge {
     this.now = opts.now ?? (() => new Date());
     this.chief = opts.chief === false ? undefined : (opts.chief ?? new ChiefOfStaff({ engine: this.engine }));
     this.bubblePauseMs = Math.max(0, opts.bubblePauseMs ?? BUBBLE_PAUSE_MS);
+    if (opts.spokenReply) this.spokenReply = opts.spokenReply;
   }
 
   /** One pass: read replies, then send any cards the human hasn't seen. Never throws on channel errors. */
@@ -162,7 +169,7 @@ export class CardBridge {
 
   private async receive(state: BridgeState, report: TickReport): Promise<void> {
     if (!this.channel.poll) return;
-    const fresh: Array<{ text: string; messageId?: string }> = [];
+    const fresh: Array<{ text: string; messageId?: string; voice?: boolean }> = [];
     for (const msg of await this.channel.poll(state.since)) {
       if (state.handled.includes(msg.id)) {
         report.ignored++;
@@ -184,7 +191,7 @@ export class CardBridge {
         report.ignored++;
         continue;
       }
-      fresh.push({ text, ...(msg.messageId ? { messageId: msg.messageId } : {}) });
+      fresh.push({ text, ...(msg.messageId ? { messageId: msg.messageId } : {}), ...(msg.voice ? { voice: true } : {}) });
     }
     // Several chat texts in a row ("can you move my 3pm" / "actually make it 4") are one thought: ONE turn, ONE reply.
     for (let i = 0; i < fresh.length; i++) {
@@ -193,7 +200,8 @@ export class CardBridge {
         while (i + 1 < fresh.length && (await this.isPlainChat(state, fresh[i + 1]!.text))) parts.push(fresh[++i]!);
       }
       if (parts.length > 1) report.merged = (report.merged ?? 0) + parts.length - 1;
-      await this.handleReply(state, parts.map((p) => p.text).join('\n'), report, parts.at(-1)!.messageId);
+      const spoken = this.spokenReply?.(parts.some((p) => p.voice === true)) === true;
+      await this.handleReply(state, parts.map((p) => p.text).join('\n'), report, parts.at(-1)!.messageId, spoken);
     }
   }
 
@@ -208,10 +216,10 @@ export class CardBridge {
    * A message that is not an answer to a card goes to the Chief of Staff, who can always reply.
    * `hint` is what to say instead when the chief can't think (no AI configured) and a card is waiting.
    */
-  private async chat(state: BridgeState, text: string, hint?: string, messageId?: string): Promise<void> {
+  private async chat(state: BridgeState, text: string, hint?: string, messageId?: string, spoken = false): Promise<void> {
     // Free-form chat means a model (and maybe tools) is about to work: show "typing..." meanwhile.
     if (this.chief && !this.chief.isCommand(text)) await this.typing();
-    const reply = await this.chief?.handle(text);
+    const reply = await this.chief?.handle(text, spoken ? { spoken: true } : {});
     if (!reply || (reply.unavailable && hint)) return void (await this.say(state, hint ?? 'Nothing is waiting on you right now.'));
     // The card is already in the reply, so mark it delivered or the next deliver pass would text it again.
     for (const card of reply.cards) if (!state.delivered.includes(card.id)) state.delivered.push(card.id);
@@ -236,7 +244,7 @@ export class CardBridge {
     await this.channel.typing?.().catch(() => undefined);
   }
 
-  private async handleReply(state: BridgeState, raw: string, report: TickReport, messageId?: string): Promise<void> {
+  private async handleReply(state: BridgeState, raw: string, report: TickReport, messageId?: string, spoken = false): Promise<void> {
     const pendingIds = new Set(state.delivered);
     const open = (await this.engine.pending()).filter((c) => pendingIds.has(c.id));
 
@@ -251,20 +259,20 @@ export class CardBridge {
       card = hits[0];
       body = raw.slice(ref[0].length);
     } else if (!open.length || this.chief?.isCommand(raw)) {
-      return this.chat(state, raw, undefined, messageId);
+      return this.chat(state, raw, undefined, messageId, spoken);
     } else if (open.length === 1) {
       card = open[0];
     } else if (/^\d/.test(raw)) {
       return void (await this.say(state, `${open.length} cards are open. Start your reply with a ref, like "${open[0]!.id.slice(0, 6)} 1".`));
     } else {
-      return this.chat(state, raw, `${open.length} cards are open. Start your reply with a ref, like "${open[0]!.id.slice(0, 6)} 1".`, messageId);
+      return this.chat(state, raw, `${open.length} cards are open. Start your reply with a ref, like "${open[0]!.id.slice(0, 6)} 1".`, messageId, spoken);
     }
 
     const parsed = parseTextReply(body, card!);
     if (!parsed) {
       const options = card!.options.map((o, i) => `${i + 1} (${o.label})`).join(', ');
       // A choice-only card can't take this text. It may be a question for the chief instead.
-      return this.chat(state, raw, `Couldn't read that as an answer.${options ? ` Reply ${options}.` : ''}`, messageId);
+      return this.chat(state, raw, `Couldn't read that as an answer.${options ? ` Reply ${options}.` : ''}`, messageId, spoken);
     }
 
     let result: RunResult;

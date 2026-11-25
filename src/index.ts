@@ -8,7 +8,7 @@ export { FakeProvider, OpenAiCompatibleProvider, CommandProvider, createProvider
 export { FileStore } from './store';
 export { CaseStore, captureCase, formatExamples, type ReplayCase } from './learning/cases';
 export { compareFlow, formatCompare, type CompareOptions, type CompareReport, type CompareArm, type CompareCaseResult } from './learning/compare';
-export { ChiefOfStaff, parseToolCall, parseChatShape, NO_REPLY, concise, type ChiefCommand, type ChiefOfStaffOptions, type ChiefReply } from './chief/chief';
+export { ChiefOfStaff, parseToolCall, parseChatShape, NO_REPLY, concise, VOICE_CALL_HINT, type ChiefCommand, type ChiefOfStaffOptions, type ChiefReply, type ChiefTurnOptions } from './chief/chief';
 export { loadChatHistory, appendChatTurns, formatChatHistory, chatHistoryFile, CHAT_HISTORY_FILE, DEFAULT_CHAT_TURNS, type ChatTurn } from './chief/history';
 export { chiefActionHandler, queueChiefAction, describeAction, CHIEF_ACTION_SURFACE, CHIEF_ACTION_KIND, type ChiefAction } from './chief/actions';
 export { anchorUpdateTool, applyAnchorUpdate, ANCHOR_TOOL, type AnchorUpdateArgs, type AnchorUpdateResult } from './tools/anchor-tool';
@@ -304,6 +304,8 @@ export {
   fillArgs,
   parseOutput,
   KNOWN_COMMAND_TOOLS,
+  EXTERNAL_WRITE_TOOLS,
+  isExternalWriteTool,
   DEFAULT_COMMAND_TIMEOUT_MS,
   type ToolDefinition,
   type ToolContext,
@@ -409,7 +411,7 @@ export {
 export { missionTools, MISSION_START_TOOL, MISSION_LIST_TOOL, MISSION_CANCEL_TOOL } from './tools/mission-tools';
 export { acceptNudge, blocksToNudge, clock12, formatNudge, formatMorningBrief, nudgePrompt, speakableTitle, inQuietHours, isMorning, phoneSignalHandler, PHONE_KINDS, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, type HeartbeatOptions } from './unified/heartbeat';
 export { startSignalWebhook, validateWebhookSignal, handleSignalRequest, requireWebhookToken, DEFAULT_WEBHOOK_PORT, MIN_WEBHOOK_TOKEN_LENGTH, type SignalWebhook, type SignalWebhookOptions } from './unified/webhook';
-export { startJarvisHub, createHubHandler, hubSessionValue, audioExt, HUB_COOKIE, type HubBackend, type HubChatReply, type HubState, type HubItem, type HubBlock, type HubDecision, type JarvisHub, type JarvisHubOptions } from './unified/hub';
+export { startJarvisHub, createHubHandler, hubSessionValue, audioExt, HUB_COOKIE, HUB_APK_FILE, APK_MIME, type HubTrust, type HubTrustAction, type HubMission, type HubAuditEntry, type HubBackend, type HubChatReply, type HubState, type HubItem, type HubBlock, type HubDecision, type JarvisHub, type JarvisHubOptions } from './unified/hub';
 export { HUB_HTML, HUB_MANIFEST, HUB_SW, HUB_ICON } from './unified/hub-page';
 export { nowSummary, type NowOptions } from './unified/now';
 export { syncCalendarToAnchor, parseCalendarEvents, mergeCalendarEvents, calendarBlockId, conflictKey, CALENDAR_TOOL, CALENDAR_SOURCE, type CalendarEvent, type CalendarConflict, type CalendarSyncResult } from './unified/calendar-sync';
