@@ -6,6 +6,8 @@ export interface CompareOptions {
   limit?: number;
   /** Golden sample: edited cases first, then most recent. Applied after `limit`. */
   sample?: number;
+  /** Run both arms on this named provider (e.g. `fast`) instead of the one the flow or step picks. */
+  provider?: string;
 }
 
 /** How one condition (plain or assisted) did across the compared cases. */
@@ -65,8 +67,8 @@ export async function compareFlow(engine: Engine, flowId: string, opts: CompareO
   const plainAttempts: number[] = [];
   const assistedAttempts: number[] = [];
   for (const c of cases) {
-    const plain = await replayCase(engine, flow, c, [], 'plain');
-    const assisted = await replayCase(engine, flow, c, [], 'assisted');
+    const plain = await replayCase(engine, flow, c, [], 'plain', opts.provider);
+    const assisted = await replayCase(engine, flow, c, [], 'assisted', opts.provider);
     const broken = [plain, assisted].find((r) => r.providerError);
     if (broken) {
       errored++;

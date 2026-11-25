@@ -27,6 +27,12 @@ export interface ReplayCase {
   humanText: string | null;
   /** True when the human wrote their own words. */
   edited: boolean;
+  /**
+   * Set on cases made by `rufus seed` from real history instead of a live run. There is no original run:
+   * `input` is the incoming message, `humanText` is what the human actually answered, and replay re-runs the
+   * flow's `ctx.code` steps on that input (nothing was saved to reuse).
+   */
+  seeded?: true;
 }
 
 interface CasesFile {
@@ -73,6 +79,24 @@ export class CaseStore {
       cases.push(c);
       await this.store.writeJson(this.store.casesFile(c.flowId), { version: 1, cases } satisfies CasesFile);
       return c;
+    });
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * Add many cases at once (one atomic write), skipping ids that already exist, and keep the file oldest first.
+   * Returns how many were new.
+   */
+  addMany(flowId: string, incoming: ReplayCase[]): Promise<number> {
+    const next = this.queue.then(async () => {
+      const cases = await this.forFlow(flowId);
+      const have = new Set(cases.map((c) => c.id));
+      const fresh = incoming.filter((c) => !have.has(c.id) && have.add(c.id));
+      if (!fresh.length) return 0;
+      const merged = [...cases, ...fresh].map((c, i) => ({ c, i })).sort((a, b) => a.c.at.localeCompare(b.c.at) || a.i - b.i).map(({ c }) => c);
+      await this.store.writeJson(this.store.casesFile(flowId), { version: 1, cases: merged } satisfies CasesFile);
+      return fresh.length;
     });
     this.queue = next.catch(() => undefined);
     return next;
@@ -127,6 +151,11 @@ export function formatExamples(cases: ReplayCase[]): string {
     ]
       .filter(Boolean)
       .join(' and ');
+    if (c.seeded) {
+      // Real history has no AI draft: show the message and what the human actually answered.
+      lines.push(`Example ${i + 1}:`, `  Input: ${compact(c.input, 200)}`, `  Human replied: "${compact(c.humanText ?? '', 300)}"`);
+      return;
+    }
     lines.push(
       `Example ${i + 1}:`,
       `  Input: ${compact(c.input, 200)}`,

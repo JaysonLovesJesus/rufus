@@ -18,3 +18,30 @@ export { CardBridge, type CardBridgeOptions, type IncomingMessage, type LiveChan
 export { BeeperChannel, BeeperOfflineError, BeeperApiError, createBeeperChannel, resolveBeeperOptions, type BeeperOptions } from './channels/beeper';
 export { TelegramChannel, TelegramOfflineError, TelegramApiError, createTelegramChannel, resolveTelegramOptions, type TelegramOptions } from './channels/telegram';
 export { selectChannel, configuredChannels, type ChannelName } from './channels/select';
+export { extractPairsFromMessages, cleanText, type HistoryMessage, type ExtractOptions } from './history/extract';
+export { pairHash, normalizePair, type HistoryPair } from './history/types';
+export { seedHistory, formatSeed, loadPairs, caseFromPair, parseHistoryText, type SeedOptions, type SeedReport, type HistoryInput } from './history/seed';
+export {
+  analyzeHistory,
+  formatAnalysis,
+  mineHistory,
+  formatMine,
+  synthesizeHistory,
+  representativeSample,
+  proposeCommand,
+  defaultMineProvider,
+  bucketsFromConfig,
+  classify,
+  DEFAULT_BUCKETS,
+  type AnalyzeOptions,
+  type HistoryAnalysis,
+  type VoiceFingerprint,
+  type CandidateRule,
+  type IntentBucket,
+  type IntentCluster,
+  type MineOptions,
+  type MineReport,
+  type Synthesis,
+  type WorkflowBlueprint,
+  type CandidateLesson,
+} from './history/mine';

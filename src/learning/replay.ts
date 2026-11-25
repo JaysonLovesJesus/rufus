@@ -23,6 +23,8 @@ export interface ReplayOptions {
   sample?: number;
   /** Lessons to treat as active for this replay only. They are never written to `lessons.json`. */
   withLessons?: Lesson[];
+  /** Run the ai step on this named provider (e.g. `fast`) instead of the one the flow or step picks. */
+  provider?: string;
 }
 
 export interface ReplayCaseResult {
@@ -67,7 +69,7 @@ export async function replayFlow(engine: Engine, flowId: string, opts: ReplayOpt
   if (opts.sample !== undefined) cases = goldenSample(cases, opts.sample);
 
   const results: ReplayCaseResult[] = [];
-  for (const c of cases) results.push(await replayCase(engine, flow, c, opts.withLessons ?? []));
+  for (const c of cases) results.push(await replayCase(engine, flow, c, opts.withLessons ?? [], 'assisted', opts.provider));
 
   const count = (f: (r: ReplayCaseResult) => boolean) => results.filter(f).length;
   return {
@@ -99,15 +101,27 @@ export function goldenSample(cases: ReplayCase[], n: number): ReplayCase[] {
  */
 export type ReplayMode = 'assisted' | 'plain';
 
-export async function replayCase(engine: Engine, flow: Flow, c: ReplayCase, extra: Lesson[], mode: ReplayMode = 'assisted'): Promise<ReplayCaseResult> {
+export async function replayCase(
+  engine: Engine,
+  flow: Flow,
+  c: ReplayCase,
+  extra: Lesson[],
+  mode: ReplayMode = 'assisted',
+  providerName?: string,
+): Promise<ReplayCaseResult> {
   const base = { caseId: c.id, stepName: c.stepName };
   const skip = (reason: string): ReplayCaseResult => ({ ...base, status: 'skipped', reason });
 
   let original: RunRecord;
-  try {
-    original = await engine.store.getRun(c.runId);
-  } catch {
-    return skip(`The original run ${c.runId} is no longer in the workspace.`);
+  if (c.seeded) {
+    // Seeded from real history: there is no original run to read saved results from.
+    original = { id: c.runId, flowId: c.flowId, status: 'completed', input: c.input, steps: {}, createdAt: c.at, updatedAt: c.at };
+  } else {
+    try {
+      original = await engine.store.getRun(c.runId);
+    } catch {
+      return skip(`The original run ${c.runId} is no longer in the workspace.`);
+    }
   }
 
   // Candidate lessons are layered over the saved ones in memory only; nothing is written.
@@ -127,7 +141,7 @@ export async function replayCase(engine: Engine, flow: Flow, c: ReplayCase, extr
       ? { lessons: [], examples: [] }
       : await recallMemory(deps, { flowId: flow.meta.id, role: flow.meta.role, stepName: c.stepName, excludeCaseId: c.id });
   const system = buildSystemPrompt(mode === 'plain' ? undefined : flow.meta.role, memory.lessons, memory.examples);
-  const ctx = new ReplayContext(engine, flow, c, original, system, mode);
+  const ctx = new ReplayContext(engine, flow, c, original, system, mode, providerName);
 
   let flowError: string | undefined;
   try {
@@ -137,7 +151,7 @@ export async function replayCase(engine: Engine, flow: Flow, c: ReplayCase, extr
   }
 
   const o = ctx.outcome;
-  if (!o) return skip(flowError ?? `The flow no longer reaches step "${c.stepKey}".`);
+  if (!o) return skip(flowError ?? `The flow no longer reaches step "${c.stepKey}".${c.seeded ? ' Seed with --step <name of the ai step that writes the reply>.' : ''}`);
   if (o.kind === 'error') return { ...base, status: 'failed', reason: `AI provider error: ${o.message}`, providerError: true, before: o.before };
 
   const passed = o.kind === 'passed';
@@ -244,6 +258,7 @@ class ReplayContext implements FlowContext<any> {
     private readonly original: RunRecord,
     private readonly system: string,
     private readonly mode: ReplayMode = 'assisted',
+    private readonly providerName?: string,
   ) {
     this.runId = `replay_${c.id}`;
     this.input = c.input;
@@ -263,24 +278,40 @@ class ReplayContext implements FlowContext<any> {
     return step.result;
   }
 
-  async code<T>(name: string, _fn: () => T | Promise<T>): Promise<T> {
-    return this.saved(this.keyFor('code', name)) as T; // never re-executed: it may have side effects
+  async code<T>(name: string, fn: () => T | Promise<T>): Promise<T> {
+    const key = this.keyFor('code', name);
+    // Never re-executed for a real run (it may have side effects). A seeded case has no run, so the flow's
+    // deterministic steps run once, in memory, on the historical input.
+    if (!this.c.seeded) return this.saved(key) as T;
+    if (!this.original.steps[key]) {
+      const result = await fn();
+      this.original.steps[key] = { kind: 'code', name, done: true, result: result === undefined ? null : JSON.parse(JSON.stringify(result)) };
+    }
+    return this.original.steps[key]!.result as T;
   }
 
   async human(name: string, _spec: HumanStepSpec): Promise<HumanAnswer> {
-    return this.saved(this.keyFor('human', name)) as HumanAnswer;
+    const key = this.keyFor('human', name);
+    if (this.c.seeded && !this.original.steps[key]) return { text: this.c.humanText ?? undefined, answeredAt: this.c.at };
+    return this.saved(key) as HumanAnswer;
   }
 
   ai(name: string, opts: AiStepOptions<string> & { parse?: undefined }): Promise<string>;
   ai<T>(name: string, opts: AiStepOptions<T> & { parse: (raw: string) => T }): Promise<T>;
   async ai(name: string, opts: AiStepOptions<any>): Promise<any> {
     const key = this.keyFor('ai', name);
-    if (key !== this.c.stepKey) return this.saved(key);
+    if (key !== this.c.stepKey) {
+      if (this.c.seeded && !this.original.steps[key]) {
+        // A seeded case has no run to read an earlier ai step from, so the step it names must be the first one reached.
+        throw new MissingStep(`The flow reaches ai step "${name}" before "${this.c.stepName}". Seed with --step <name of the ai step that writes the reply>.`);
+      }
+      return this.saved(key);
+    }
 
-    const before = (await check(opts, this.c.aiDraft)).ok ? 'passed' : 'failed';
+    const before = (await (this.c.seeded ? this.humanBefore(opts) : check(opts, this.c.aiDraft))).ok ? 'passed' : 'failed';
     try {
       const { value, attempts } = await runAiStep({
-        provider: this.engine.providerFor(opts.provider ?? this.flow.meta.provider),
+        provider: this.engine.providerFor(this.providerName ?? opts.provider ?? this.flow.meta.provider),
         system: this.system,
         step: name,
         opts: this.mode === 'plain' ? plainOpts(opts, this.input) : opts,
@@ -294,6 +325,16 @@ class ReplayContext implements FlowContext<any> {
           : { kind: 'error', message: err instanceof Error ? err.message : String(err), before };
     }
     throw new StopReplay();
+  }
+
+  /** For a seeded case, "the draft before" is what the human really wrote, run through the step's own `parse` and `verify`. */
+  private async humanBefore(opts: AiStepOptions<any>): Promise<VerifyResult> {
+    const text = this.c.humanText ?? '';
+    try {
+      return await check(opts, opts.parse ? opts.parse(text) : text);
+    } catch (err) {
+      return { ok: false, reason: `Could not parse the output: ${(err as Error).message}` };
+    }
   }
 }
 

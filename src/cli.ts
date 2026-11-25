@@ -11,6 +11,8 @@ import { Engine } from './engine/engine';
 import { isFlow } from './engine/flow';
 import { createProviders } from './engine/providers';
 import { formatCompare } from './learning/compare';
+import { bucketsFromConfig, defaultMineProvider, formatMine, mineHistory } from './history/mine';
+import { formatSeed, seedHistory } from './history/seed';
 import { suggestLayer } from './learning/layers';
 import type { ScopedReplayReport } from './learning/replay';
 import { Scheduler, type TickResult } from './scheduler/scheduler';
@@ -38,10 +40,17 @@ Usage: rufus [--dir <workspace>] <command>
   tick                         one scheduler pass: start flows whose trigger is due (for cron/launchd)
   watch [--interval <30s>]     keep ticking in the foreground (default every 60s)
   emit <event> [payloadJson]   fire flows with an onEvent(<event>) trigger
-  replay <flowId> [--limit N]  re-run saved human-reviewed cases against today's flow and verify checks
+  seed <file> --flow <flowId> [--step <aiStep>] [--limit N] [--dry-run]
+                               Day 1: load real past (incoming -> reply) pairs from a JSON/JSONL file as replay cases
+  mine [--ai] [--provider <name>] [--limit N] [--scope <scope>] [--json] [--save]
+                               what your history says: voice, rules, recurring intents (free, offline);
+                               --ai adds workflow blueprints and lessons from a provider
+  replay <flowId> [--limit N] [--provider <name>]
+                               re-run saved human-reviewed cases against today's flow and verify checks
   replay --scope <flow:id|role:name|global> [--sample N]
                                replay a scope; global replays a small golden sample of every flow
-  compare <flowId> [--limit N] plain AI vs. code-assisted AI on your saved cases, same verify
+  compare <flowId> [--limit N] [--provider <name>]
+                               plain AI vs. code-assisted AI on your saved cases, same verify
   chat <message...>            talk to your chief of staff: status, flows, lessons, run <flow> [json],
                                learn <scope>: <rule>, or ask anything in your own words
 `;
@@ -122,9 +131,13 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   };
   const prune = bool('--prune');
   const force = bool('--force');
+  const dryRun = bool('--dry-run');
+  const useAi = bool('--ai');
+  const asJson = bool('--json');
+  const save = bool('--save');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
-  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel']) {
+  for (const flag of ['--dir', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider']) {
     const i = args.indexOf(flag);
     if (i === -1) continue;
     const value = args[i + 1];
@@ -154,6 +167,13 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     if (v === undefined) return undefined;
     if (!(Number(v) > 0)) throw new Error(`${flag} needs a positive number.`);
     return Number(v);
+  };
+
+  /** `--provider <name>`: fail on an unknown name now, instead of reporting it as a model failure per case. */
+  const providerFlag = (): string | undefined => {
+    const name = flags['--provider'];
+    if (name !== undefined) engine.providerFor(name);
+    return name;
   };
 
   switch (cmd) {
@@ -329,7 +349,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
       }
       const [flowId] = rest;
       if (!flowId) throw new Error('Usage: rufus replay <flowId> [--limit N]  or  rufus replay --scope <scope> [--sample N]');
-      const report = await engine.replay(flowId, { limit });
+      const report = await engine.replay(flowId, { limit, provider: providerFlag() });
       if (!report.total) return io.out(`No saved cases for "${flowId}" yet. They are saved when a human answers a card.`);
       io.out(`Replayed ${report.total} case(s) for "${flowId}": ${report.passed} passed, ${report.failed} failed, ${report.skipped} skipped.`);
       io.out(`Against what the AI drafted back then: ${report.improved} improved, ${report.regressed} regressed, ${report.unchanged} unchanged.`);
@@ -343,9 +363,39 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     case 'compare': {
       const [flowId] = rest;
       if (!flowId) throw new Error('Usage: rufus compare <flowId> [--limit N]');
-      const report = await engine.compare(flowId, { limit: positive('--limit') });
+      const report = await engine.compare(flowId, { limit: positive('--limit'), provider: providerFlag() });
       for (const line of formatCompare(report)) io.out(line);
       if (report.errored) process.exitCode = 1;
+      return;
+    }
+
+    case 'seed': {
+      const [file] = rest;
+      const flowId = flags['--flow'];
+      if (!file || !flowId) throw new Error('Usage: rufus seed <file.json|file.jsonl> --flow <flowId> [--step <aiStep>] [--limit N] [--dry-run]');
+      const report = await seedHistory(engine, path.resolve(file), { flowId, step: flags['--step'], limit: positive('--limit'), dryRun });
+      for (const line of formatSeed(report)) io.out(line);
+      return;
+    }
+
+    case 'mine': {
+      const provider = useAi ? (flags['--provider'] !== undefined ? providerFlag() : defaultMineProvider(config)) : undefined;
+      if (!useAi && flags['--provider'] !== undefined) throw new Error('--provider only applies with --ai.');
+      const report = await mineHistory(engine, {
+        ai: useAi,
+        provider,
+        limit: positive('--limit'),
+        buckets: bucketsFromConfig(config.mine),
+        minPairs: config.mine?.minPairs,
+        minShare: config.mine?.minShare,
+      });
+      if (save && report.pairsAnalyzed) await store.writeJson(store.mineReportFile, report);
+      if (asJson) io.out(JSON.stringify(report, null, 2));
+      else {
+        for (const line of formatMine(report, { scope: flags['--scope'] })) io.out(line);
+        if (!useAi && report.pairsAnalyzed) io.out('Add --ai for workflow blueprints and lessons from a provider.');
+      }
+      if (save && report.pairsAnalyzed && !asJson) io.out(`Saved ${store.mineReportFile}`);
       return;
     }
 

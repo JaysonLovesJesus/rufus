@@ -8,6 +8,7 @@ export const newId = (prefix: string): string => `${prefix}_${randomBytes(4).toS
 /**
  * Plain, readable JSON files inside a workspace directory:
  *   runs/<runId>.json   lessons.json   config.json   scheduler.json   cases/<flowId>.json
+ *   history/pairs.jsonl (after `rufus seed`)
  * Writes are atomic (temp file + rename).
  */
 export class FileStore {
@@ -34,6 +35,16 @@ export class FileStore {
   casesFile(flowId: string): string {
     return path.join(this.casesDir, `${flowId}.json`);
   }
+  /** Real past exchanges from `rufus seed`: `history/pairs.jsonl`, plus the last `rufus mine --save` report. */
+  get historyDir(): string {
+    return path.join(this.dir, 'history');
+  }
+  get pairsFile(): string {
+    return path.join(this.historyDir, 'pairs.jsonl');
+  }
+  get mineReportFile(): string {
+    return path.join(this.historyDir, 'mine-report.json');
+  }
 
   /** Idempotent: creates the workspace layout if missing. */
   async init(): Promise<void> {
@@ -57,9 +68,14 @@ export class FileStore {
   }
 
   async writeJson(file: string, data: unknown): Promise<void> {
+    await this.writeText(file, JSON.stringify(data, null, 2) + '\n');
+  }
+
+  /** Atomic text write (temp file + rename). */
+  async writeText(file: string, text: string): Promise<void> {
     const tmp = `${file}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
     await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
+    await fs.writeFile(tmp, text, 'utf8');
     await fs.rename(tmp, file);
   }
 

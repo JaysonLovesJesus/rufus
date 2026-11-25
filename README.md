@@ -195,7 +195,10 @@ When `engine.answer()` resolves a card that follows an AI draft, Rufus saves a c
 1. **Examples in the prompt.** Every `ctx.ai` call gets, in its system prompt, the flow's scoped Lessons plus the last 3 human reviews of that same step (draft, and whether the human chose, rewrote or discarded). Each is truncated, and the block is plain text you can read in the request. Set `includeExamples: 5` or `false` per step.
 2. **Replay.** `rufus replay <flowId> [--limit N]` (or `engine.replay(flowId)`) re-runs each case against today's ai step: current prompt, `verify`/`parse`, lessons and examples (the case under test is left out of its own examples). It reports passed/failed/skipped, the exact `verify` reason for each failure, and, comparing with the draft saved in the case, how many `improved` (failed today's `verify` then, passes now) or `regressed` (the reverse). Exit code is 1 if any case fails.
 
-Replay never re-runs `ctx.code` steps (they may send things); it reuses the results saved in the original run, and stops at the reviewed ai step. It does call your provider once or more per case. The pass/fail signal is your `verify`, so a rule that is not in `verify` is not measured.
+Replay never re-runs `ctx.code` steps (they may send things); it reuses the results saved in the original run, and stops at the reviewed ai step. It does call your provider once or more per case. The pass/fail signal is your `verify`, so a rule that is not in `verify` is not measured. (The one exception: cases made by `rufus seed` have no original run, so replay executes the flow's `ctx.code` steps on the historical input. Keep side effects after the ai step.)
+
+`rufus replay <flowId> --provider <name>` (and `compare --provider <name>`) runs the ai step on that named provider instead, so you can ask "would the cheap model have passed these same cases?" before you switch.
+
 ## Compare: how much does Code help the AI?
 
 `rufus compare <flowId> [--limit N]` (or `engine.compare(flowId, { limit })`) replays your saved human-reviewed cases twice, graded by the exact same `verify`/`parse`:
@@ -211,6 +214,69 @@ Code lift: +3 case(s) (+50 points).
 ```
 
 `CompareReport` has `plain` and `assisted` (`passed`, `failed`, `passRate`, `avgAttempts`), `delta` (`assisted.passed - plain.passed`, negative if the extra scaffolding hurt), `deltaRate`, per-case results, and `skipped` / `errored` counts. Like replay, it never re-runs `ctx.code` steps (it reuses the original run's saved results), and it only measures what `verify` can check. It costs at least two provider calls per case; use `--limit`. A case where the provider itself failed (offline, no key) is left out of the rates and reported, never scored as a wrong answer, and the CLI exits 1.
+
+## Day 1: bootstrap from your own history (`seed` and `mine`)
+
+Replay and compare need saved cases, and cases normally take weeks of real use to pile up. Skip the wait: feed Rufus the exchanges you already have.
+
+A **history pair** is one real exchange: someone wrote `incoming`, a human answered with `reply`.
+
+```ts
+interface HistoryPair {
+  id: string; channel: string; threadId?: string; sender: string;
+  incoming: string; reply: string; incomingAt?: string; replyAt?: string;
+  tags?: string[]; metadata?: Record<string, unknown>;
+}
+```
+
+Have a chronological message export instead? `extractPairsFromMessages(messages, { selfIds, maxGapMs })` turns `{ id, threadId, channel, sender, isFromMe, text, timestamp }` into pairs: bursts from one sender merge into one turn, empty and media-only messages are ignored, and a reply only counts if it follows within `maxGapMs` (default 24h). Write the result as JSONL (one pair per line) or a JSON array.
+
+```sh
+# 1. Load pairs as replay cases for a flow (and keep them in history/pairs.jsonl)
+rufus seed history.jsonl --flow reply-drafter [--step draft] [--limit 200] [--dry-run]
+
+# 2. What does your history say? Free, offline, exact
+rufus mine [--limit N] [--json] [--save]
+
+# 3. Optionally let a model name the workflows and propose lessons
+rufus mine --ai [--provider smart] [--scope flow:reply-drafter]
+
+# 4. Measure it on real cases, on Day 1
+rufus compare reply-drafter --limit 20 --provider fast
+rufus propose flow:reply-drafter "Keep replies to at most 12 words." --layer code
+```
+
+**`seed`** dedupes by `id` (or a hash of channel + sender + incoming + reply), within the file and against what is already saved, so running it twice changes nothing. It reports invalid records instead of failing, and writes atomically. Each pair also becomes a replay case for `--flow`. The case's `input` is `{ channel, threadId?, sender, incoming, incomingAt?, tags?, metadata? }` (the `HistoryInput` type), so write the flow to read `ctx.input.incoming`; `--step` names the ai step that writes the reply (default `draft`). A seeded case treats what the human actually wrote as the reference: replay reports whether that real reply passes today's `verify` (`before`), and the real replies also appear as `Human replied: "..."` examples in the prompt.
+
+**`mine`** is code first. `analyzeHistory(pairs)` computes, with no AI and no cost: volume by channel and the most frequent senders; your voice (median and 90th percentile word count, lowercase-start %, trailing-period %, em-dash count, exclamation and question %, emoji, greetings and sign-offs, typical reply time); **candidate rules** that are exactly true of at least 90% of your replies, each with its count (`Keep replies to at most 5 words. (19/20)`; `code` rules belong in `verify`, `principle` rules in the prompt); and recurring intents, bucketed by channel with a deterministic keyword match (confirmations, follow-ups, scheduling, logistics, questions, other; first match wins, so the counts add up) with exact counts and sample pairs. Below 10 pairs no rule is proposed. Tune it in `config.json`:
+
+```json
+{ "mine": { "buckets": [{ "id": "invoices", "label": "Invoice questions", "pattern": "invoice|receipt|refund" }], "minPairs": 10, "minShare": 0.9, "provider": "smart" } }
+```
+
+**`mine --ai`** sends a provider the code-assembled statistics plus a small sample (24 pairs by default, picked round-robin across the biggest intents and trimmed; contact names are withheld), never the raw history. It returns *workflow blueprints* (name, frequency quoting your counts, trigger, what code handles, what the AI handles, where you approve) and *lessons* tagged `code`, `context` or `principle`, each with a ready-to-paste `rufus propose` line, so the regression gate still decides what is kept. Unparseable output is retried with the exact reason, like any `ctx.ai` step. `--save` writes the report to `history/mine-report.json`.
+
+## Fast and smart model tiers
+
+Code does the heavy lifting, so many ai steps only phrase a result. Send those to a cheap, fast model and keep judgment on a strong one. Name the tiers in `config.json`:
+
+```json
+{
+  "version": 1,
+  "provider": { "type": "command", "command": "claude", "args": ["-p", "--model", "sonnet"] },
+  "providers": {
+    "fast":  { "type": "command", "command": "claude", "args": ["-p", "--model", "haiku"] },
+    "smart": { "type": "command", "command": "claude", "args": ["-p", "--model", "sonnet"] }
+  }
+}
+```
+
+```ts
+const decision = await ctx.ai('decide', { prompt: 'Should this wait for the human?', context, provider: 'smart' }); // judgment
+const message  = await ctx.ai('phrase', { prompt: 'Say it in one friendly line.', context: { decision }, provider: 'fast' }); // wording only
+```
+
+`fast` and `smart` are just names (any key of `providers` works, see below). `--provider <name>` is accepted by `rufus mine --ai`, `rufus compare` and `rufus replay`; with no flag, `mine --ai` uses `mine.provider`, else `smart` if you defined it. The way to choose: run `rufus compare <flow> --provider fast` on your seeded cases. If the fast tier passes the same `verify`, switch that step.
 
 ## Learning guardrails: no monkey-patching
 
@@ -247,6 +313,7 @@ Rufus keeps **all state outside the repo**, in a workspace directory: `--dir <pa
   lessons.json    saved lessons
   scheduler.json  lastRunAt per flow (created by the first tick)
   cases/          saved human reviews, one file per flow (replay + prompt examples)
+  history/        pairs.jsonl from `rufus seed`, mine-report.json from `rufus mine --save`
   runs/           one readable JSON file per run
   flows/          your *.flow.ts files, loaded by the CLI
 ```
@@ -301,7 +368,7 @@ defineFlow({ id: 'inbox', name: 'Inbox', description: '...', provider: 'claude' 
 });
 ```
 
-`chief.provider` sets the model for free-form Chief of Staff chat. Replay and `rufus compare` use the same routing. Library users pass `providers: { name: provider }` to `Engine`; `createProviders(config)` builds them from a config.
+`chief.provider` sets the model for free-form Chief of Staff chat. Replay and `rufus compare` use the same routing (and `--provider <name>` overrides it for one run). See *Fast and smart model tiers* above for a `fast`/`smart` setup. Library users pass `providers: { name: provider }` to `Engine`; `createProviders(config)` builds them from a config.
 
 ## Layout
 
@@ -309,6 +376,7 @@ defineFlow({ id: 'inbox', name: 'Inbox', description: '...', provider: 'claude' 
 src/engine/     defineFlow, Engine, step runner, AI verify loop, providers
 src/store/      atomic JSON file store (no native deps)
 src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay; compare (plain vs. assisted)
+src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `mine` (voice, rules, intents, optional AI blueprints)
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop
 src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Telegram and Beeper adapters
 src/chief/      ChiefOfStaff: fast code commands + code-assembled free-form chat

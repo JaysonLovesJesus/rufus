@@ -193,11 +193,23 @@ export interface LearningConfig {
   maxLessonsPerScope?: number;
 }
 
+/** `rufus mine` settings. */
+export interface MineConfig {
+  /** Named provider for `rufus mine --ai`. Default: `smart` if configured, else the default provider. */
+  provider?: string;
+  /** Your own intent buckets (first match wins). Replaces the built-in ones. `pattern` is a case-insensitive regex. */
+  buckets?: Array<{ id: string; label?: string; pattern: string }>;
+  /** Fewest pairs before rules are proposed (default 10). */
+  minPairs?: number;
+  /** Share of replies a rule must hold for, 0-1 (default 0.9). */
+  minShare?: number;
+}
+
 export interface RufusConfig {
   version: 1;
   /** The default provider, used when a flow or step does not name one. */
   provider?: ProviderConfig;
-  /** Extra named providers, e.g. `claude`, `fast`. Pick one with `meta.provider` or `ctx.ai(..., { provider })`. */
+  /** Extra named providers, e.g. `fast` (cheap model for phrasing) and `smart` (judgment). Pick one with `meta.provider` or `ctx.ai(..., { provider })`. */
   providers?: Record<string, ProviderConfig>;
   /** Chief of Staff chat settings. */
   chief?: { /** Named provider (a key of `providers`) for free-form chat. */ provider?: string };
@@ -206,4 +218,5 @@ export interface RufusConfig {
   /** The scheduler stays silent in this window unless a trigger is `urgent`. */
   quietHours?: QuietHours;
   learning?: LearningConfig;
+  mine?: MineConfig;
 }
