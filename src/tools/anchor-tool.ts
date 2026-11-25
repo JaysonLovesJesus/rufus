@@ -13,6 +13,7 @@ import {
   type ScheduleBlock,
 } from '../anchor/anchor';
 import type { ToolDefinition } from './tools';
+import { commitPendingPlan } from '../unified/planner';
 
 /**
  * `anchor.update`: edit your own schedule and goals in `anchor.json` from chat ("remove Study block", "move gym to 6").
@@ -24,6 +25,7 @@ import type { ToolDefinition } from './tools';
  *   { op: "move_block", titleOrId, start, end, allowOverlap? }
  *   { op: "add_goal", title, priority?, horizon? }
  *   { op: "remove_goal", titleOrId }                         marks it inactive
+ *   { op: "apply_plan" }                                     v17: writes the day plan Rufus proposed (after their yes)
  */
 
 export const ANCHOR_TOOL = 'anchor.update';
@@ -33,7 +35,8 @@ export type AnchorUpdateArgs =
   | { op: 'add_block'; start: string; end: string; title: string; kind?: BlockKind; allowOverlap?: boolean }
   | { op: 'move_block'; titleOrId: string; start: string; end: string; allowOverlap?: boolean }
   | { op: 'add_goal'; title: string; priority?: GoalPriority; horizon?: GoalHorizon }
-  | { op: 'remove_goal'; titleOrId: string };
+  | { op: 'remove_goal'; titleOrId: string }
+  | { op: 'apply_plan' };
 
 export interface AnchorUpdateResult {
   op: string;
@@ -102,10 +105,16 @@ export function anchorUpdateTool(): ToolDefinition<Record<string, unknown>, Anch
   return {
     name: ANCHOR_TOOL,
     description:
-      'Edit your schedule and goals in anchor.json (private, local). args: {"op":"remove_block","titleOrId"} | {"op":"add_block","start":"HH:MM","end":"HH:MM","title","kind"?} | {"op":"move_block","titleOrId","start","end"} | {"op":"add_goal","title","priority"?} | {"op":"remove_goal","titleOrId"}',
+      'Edit your schedule and goals in anchor.json (private, local). args: {"op":"remove_block","titleOrId"} | {"op":"add_block","start":"HH:MM","end":"HH:MM","title","kind"?} | {"op":"move_block","titleOrId","start","end"} | {"op":"add_goal","title","priority"?} | {"op":"remove_goal","titleOrId"} | {"op":"apply_plan"} (only after they said yes to the day plan you proposed)',
     readOnly: false,
     local: true,
     async execute(args, ctx) {
+      if (args?.op === 'apply_plan') {
+        const done = await commitPendingPlan(ctx.dir, ctx.now);
+        if (!done) throw new Error('There is no day plan waiting for a yes (it may have expired). Propose one first.');
+        const after = await loadAnchor(ctx.dir, ctx.now);
+        return { op: 'apply_plan', done: done.text, today: after.schedule.date === localDate(ctx.now) ? after.schedule.blocks.map(describe) : [] };
+      }
       const anchor = await loadAnchor(ctx.dir, ctx.now);
       const r = applyAnchorUpdate(anchor, args ?? {}, ctx.now);
       const saved = await saveAnchor(ctx.dir, r.anchor, ctx.now);

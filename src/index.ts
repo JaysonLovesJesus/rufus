@@ -194,6 +194,7 @@ export {
   upsertGoal,
   upsertScheduleBlock,
   findScheduleConflicts,
+  dayFor,
   checkBoundaries,
   formatAnchorSummary,
   parseTimeRange,
@@ -303,10 +304,40 @@ export {
 export { parseLoopReply, isBareVerdict, refOf, recipientOf, MAX_REASON_CHARS, formatLoopItem, formatCheckin, replyHint, draftOf, type LoopReply } from './unified/loop-text';
 export { think, gatherBoard, parseThought, thinkInterval, thinkSkipReason, freshThinkState, THINK_PROMPT, SILENT, DEFAULT_THINK_EVERY, DEFAULT_BACKOFF_AFTER, MAX_BACKOFF_FACTOR, type ThinkOptions, type ThinkState } from './unified/think';
 export { rememberNote, rememberTool, noteItem, loadHumanNotes, guessKind, guessVerdict, REMEMBER_TOOL, HUMAN_NOTE_TAG, NOTE_KINDS, NOTE_ACTION_TYPES, type HumanNote, type NoteKind, type NoteVerdict, type RememberOptions, type RememberResult } from './chief/learning';
-export { UnifiedDaemon, DEFAULT_CHECKIN_MS, type UnifiedDaemonOptions, type StartTickReport } from './unified/daemon';
+export { UnifiedDaemon, DEFAULT_CHECKIN_MS, DEFAULT_CALENDAR_SYNC_MS, type UnifiedDaemonOptions, type StartTickReport, type DayPlannerOptions, type BreakDigestOptions } from './unified/daemon';
 export { acceptNudge, blocksToNudge, clock12, formatNudge, formatMorningBrief, nudgePrompt, speakableTitle, inQuietHours, isMorning, phoneSignalHandler, PHONE_KINDS, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, type HeartbeatOptions } from './unified/heartbeat';
 export { startSignalWebhook, validateWebhookSignal, DEFAULT_WEBHOOK_PORT, MIN_WEBHOOK_TOKEN_LENGTH, type SignalWebhook, type SignalWebhookOptions } from './unified/webhook';
 export { nowSummary, type NowOptions } from './unified/now';
+export { syncCalendarToAnchor, parseCalendarEvents, mergeCalendarEvents, calendarBlockId, conflictKey, CALENDAR_TOOL, CALENDAR_SOURCE, type CalendarEvent, type CalendarConflict, type CalendarSyncResult } from './unified/calendar-sync';
+export {
+  proposeDayPlan,
+  openGaps,
+  focusCandidates,
+  codePlan,
+  validatePlan,
+  protectedRangesToday,
+  formatPlanSummary,
+  range12,
+  applyDayPlan,
+  commitPendingPlan,
+  savePendingPlan,
+  loadPendingPlan,
+  clearPendingPlan,
+  dayPlanFile,
+  PLAN_APPROVE,
+  PLAN_DECLINE,
+  PLAN_REQUEST,
+  PLAN_SOURCE,
+  PLAN_TTL_MS,
+  DAY_PLAN_FILE,
+  type DayPlan,
+  type Gap,
+  type PlannedBlock,
+  type PlannerOptions,
+  type PendingPlan,
+  type PlanKind,
+} from './unified/planner';
+export { buildBreakDigest, digestCandidates, isNoisePage, codeBullet, formatDigest, EMPTY_DIGEST, DIGEST_REQUEST, DEFAULT_DIGEST_LOOKBACK_HOURS, DEFAULT_DIGEST_MAX, type BreakDigest, type DigestOptions, type DigestTopic } from './unified/digest';
 export { assignNumbers, loadStartState, saveStartState, requestCheckin, takeCheckinRequest, freshStartState, START_STATE_FILE, CHECKIN_REQUEST_FILE, type StartState } from './unified/state';
 export { inboxSensor, appendSignal, scheduleBlockHandler, INBOX_FILE } from './engine/loop-builtins';
 export { cleanMessageText, stripHtml, decodeEntities, isPlaceholderText, filterNoise, type FilterNoiseResult } from './history/noise';

@@ -8,10 +8,12 @@ import { CorpusStore, queryCorpus } from '../corpus';
 import type { MasterLoop } from '../engine/loop';
 import { buildPersona, loadSoul, relevantHits, timeFacts, withPersona } from '../soul/soul';
 import { ToolGatedError, type ToolRegistry } from '../tools/tools';
-import type { AiMessage } from '../types';
+import type { AiMessage, AiProvider } from '../types';
 import { queueChiefAction } from './actions';
 import { REMEMBER_TOOL, rememberNote } from './learning';
 import { DEFAULT_CHAT_TURNS, appendChatTurns, formatChatHistory, loadChatHistory } from './history';
+import { clearPendingPlan, commitPendingPlan, loadPendingPlan, PLAN_APPROVE, PLAN_DECLINE, PLAN_REQUEST, proposeDayPlan, savePendingPlan } from '../unified/planner';
+import { buildBreakDigest, DIGEST_REQUEST } from '../unified/digest';
 
 /** What the Chief of Staff says back, plus any cards whose full text is already in that reply. */
 export interface ChiefReply {
@@ -61,7 +63,9 @@ export type ChiefCommand =
   | { kind: 'lessons' }
   | { kind: 'run'; flowId: string; inputJson?: string }
   | { kind: 'learn'; scope: string; rule: string }
-  | { kind: 'remember'; text: string };
+  | { kind: 'remember'; text: string }
+  | { kind: 'plan' }
+  | { kind: 'digest' };
 
 export interface ChiefOfStaffOptions {
   engine: Engine;
@@ -258,6 +262,23 @@ export class ChiefOfStaff {
   }
 
   private async answer(trimmed: string): Promise<ChiefReply> {
+    // v17: a day plan waiting for a yes. Only a short yes/no answers it; anything else is ordinary chat.
+    if (PLAN_APPROVE.test(trimmed) || PLAN_DECLINE.test(trimmed)) {
+      const dir = this.loop?.dir ?? this.dir;
+      const now = this.now();
+      if (await loadPendingPlan(dir, now).catch(() => undefined)) {
+        try {
+          if (PLAN_DECLINE.test(trimmed)) {
+            await clearPendingPlan(dir);
+            return { text: "No problem — I'll leave that time open.", cards: [], via: 'command' };
+          }
+          const done = await commitPendingPlan(dir, now);
+          if (done) return { text: done.text, cards: [], via: 'command' };
+        } catch (err) {
+          return { text: `Couldn't put that on the schedule: ${oneLine(message(err), 300)}`, cards: [], via: 'command' };
+        }
+      }
+    }
     const command = this.classify(trimmed);
     if (!command) return this.chat(trimmed);
     try {
@@ -285,6 +306,8 @@ export class ChiefOfStaff {
     if (STATUS_WORDS.has(word)) return { kind: 'status' };
     if (word === 'flows') return { kind: 'flows' };
     if (word === 'lessons') return { kind: 'lessons' };
+    if (PLAN_REQUEST.test(trimmed)) return { kind: 'plan' };
+    if (DIGEST_REQUEST.test(trimmed)) return { kind: 'digest' };
 
     const known = new Set(this.engine.listFlows().map((f) => f.meta.id));
     const run = /^run\s+(\S+)(?:\s+([\s\S]+))?$/i.exec(trimmed);
@@ -331,7 +354,39 @@ export class ChiefOfStaff {
         await rememberNote(this.loop?.dir ?? this.dir, { text: c.text }, { now: this.now() });
         return reply(`Got it, I'll keep that in mind: "${oneLine(c.text, 160)}".`);
       }
+      case 'plan':
+        return reply(await this.planDay());
+      case 'digest':
+        return reply(await this.breakDigest());
     }
+  }
+
+  /** The chat model, or undefined when none is configured (the planner and digest then fall back to plain code). */
+  private optionalProvider(): AiProvider | undefined {
+    try {
+      return this.engine.providerFor(this.providerName);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** v17 "plan my day": proposes a plan for today's open time. Nothing is written until they say yes. */
+  async planDay(): Promise<string> {
+    const dir = this.loop?.dir ?? this.dir;
+    const now = this.now();
+    const [anchor, soul] = await Promise.all([loadAnchor(dir, now), loadSoul(dir).catch(() => undefined)]);
+    const ai = this.optionalProvider();
+    const plan = await proposeDayPlan({ anchor, now, ...(ai ? { ai } : {}), ...(soul ? { soul } : {}) });
+    if (plan.blocks.length) await savePendingPlan(dir, plan, now);
+    else await clearPendingPlan(dir);
+    return plan.summary;
+  }
+
+  /** v17 "break digest": 2-3 things from recent browsing worth revisiting. Read-only. */
+  async breakDigest(): Promise<string> {
+    const dir = this.loop?.dir ?? this.dir;
+    const ai = this.optionalProvider();
+    return (await buildBreakDigest({ dir, now: this.now(), ...(ai ? { ai } : {}) })).text;
   }
 
   // ---------- commands (all plain code) ----------

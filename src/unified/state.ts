@@ -31,6 +31,14 @@ export interface StartState {
   think?: ThinkState;
   /** v15: when the human last said or reacted anything. */
   lastHumanAt?: string;
+  /** v17: when the calendar was last mirrored into the Anchor. */
+  lastCalendarSyncAt?: string;
+  /** v17: calendar conflicts already mentioned (so each is said once). */
+  calendarConflicts?: string[];
+  /** v17: the local date the day planner last proposed a plan on its own. */
+  lastPlanOffer?: string;
+  /** v17: scroll/break blocks that already got their digest (`<date>:<blockId>`). */
+  digested?: string[];
 }
 
 export const START_STATE_FILE = 'start-state.json';

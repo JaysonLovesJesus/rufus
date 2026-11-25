@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { CardBridge, type IncomingMessage, type LiveChannel, type TickReport } from '../channels/bridge';
-import { loadAnchor, localDate } from '../anchor/anchor';
+import { loadAnchor, localDate, protectedNow } from '../anchor/anchor';
 import { chiefActionHandler } from '../chief/actions';
 import { ChiefOfStaff } from '../chief/chief';
 import { appendChatTurns } from '../chief/history';
@@ -14,7 +14,12 @@ import { REMEMBER_TOOL, rememberTool } from '../chief/learning';
 import { draftOf, formatCheckin, formatLoopItem, isBareVerdict, parseLoopReply, recipientOf, refOf, type LoopReply } from './loop-text';
 import { freshThinkState, think, thinkSkipReason, type ThinkOptions } from './think';
 import { acceptNudge, blocksToNudge, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, formatMorningBrief, formatNudge, inQuietHours, isMorning, markNudged, nudgePrompt, phoneSignalHandler, type HeartbeatOptions } from './heartbeat';
-import type { ScheduleBlock } from '../anchor/anchor';
+import type { BlockKind, ScheduleBlock } from '../anchor/anchor';
+import { loadSoul, scheduleNow } from '../soul/soul';
+import { CALENDAR_TOOL, conflictKey, syncCalendarToAnchor, type CalendarSyncResult } from './calendar-sync';
+import { loadPendingPlan, openGaps, proposeDayPlan, range12, savePendingPlan, type PlannerOptions } from './planner';
+import { buildBreakDigest } from './digest';
+import { speakableTitle } from './heartbeat';
 import { nowSummary } from './now';
 import { assignNumbers, loadStartState, saveStartState, takeCheckinRequest, type StartState } from './state';
 
@@ -52,7 +57,34 @@ export interface UnifiedDaemonOptions {
   pendingTtlMs?: number;
   /** v15: the proactive Jarvis think-beat. Off unless set (`rufus start` turns it on every 45 minutes by default). */
   think?: ThinkOptions | false;
+  /**
+   * v17: mirror today's real calendar (`calendar.read`, read-only) into the Anchor, on the first pass and then every
+   * `everyMs` (default 20 minutes). Plain code, $0. On by default whenever `calendar.read` is registered; `false`: off.
+   */
+  calendarSync?: { everyMs?: number } | false;
+  /** v17: the proactive day planner: once a day, offers a plan for a big open stretch. Off unless set. */
+  planner?: DayPlannerOptions | false;
+  /** v17: a curated break digest at the start of scheduled `scroll` (and other chosen) blocks. Off unless set. */
+  breakDigest?: BreakDigestOptions | false;
   now?: () => Date;
+}
+
+export interface DayPlannerOptions extends PlannerOptions {
+  /** Offer a plan only when at least this many minutes are open. Default 90. */
+  minOpenMinutes?: number;
+  /** Local `HH:MM-HH:MM` window in which it may offer. Default `09:00-17:00`. */
+  window?: string;
+  /** One fast-tier call lays out the plan (checked in code). Default false: plain code, $0. */
+  ai?: boolean;
+}
+
+export interface BreakDigestOptions {
+  /** Block kinds that get a digest when they start. Default `['scroll']`. */
+  kinds?: BlockKind[];
+  /** Word the bullets with one fast-tier call. Default false: plain code, $0. */
+  ai?: boolean;
+  /** Only this soon after the block starts. Default 10 minutes. */
+  withinMinutes?: number;
 }
 
 export interface StartTickReport {
@@ -74,6 +106,12 @@ export interface StartTickReport {
   expired?: string[];
   /** v15: what the think-beat did this pass: `sent`, `silent`, `started`, or `skipped: <why>`. */
   thought?: string;
+  /** v17: the calendar sync this pass, when it ran. */
+  calendar?: CalendarSyncResult;
+  /** v17: the day plan proposed this pass. */
+  planned?: string;
+  /** v17: the break digest sent this pass. */
+  digest?: string;
   /** Problems this pass; the next pass retries. */
   errors: string[];
 }
@@ -83,6 +121,12 @@ const KEEP_HANDLED = 500;
 const KEEP_SENT = 100;
 /** A think-beat never interrupts a live conversation: it waits until the human has been quiet this long. */
 const CONVERSATION_QUIET_MS = 5 * 60_000;
+export const DEFAULT_CALENDAR_SYNC_MS = 20 * 60_000;
+const KEEP_KEYS = 200;
+const hhmmToMin = (t: string): number => {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(t.trim());
+  return m ? Number(m[1]) * 60 + Number(m[2]) : NaN;
+};
 
 const hash = (text: string): string => createHash('sha1').update(text.trim()).digest('hex');
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -136,6 +180,9 @@ export class UnifiedDaemon {
   private readonly checkinEveryMs: number;
   private readonly heartbeat: HeartbeatOptions | false;
   private readonly thinkOpts: ThinkOptions | false;
+  private readonly calendarSync: { everyMs: number } | false;
+  private readonly planner: DayPlannerOptions | false;
+  private readonly digestOpts: BreakDigestOptions | false;
   private readonly pendingTtlMs: number;
   private readonly bubblePauseMs: number;
   private readonly now: () => Date;
@@ -159,6 +206,9 @@ export class UnifiedDaemon {
     if (!(this.checkinEveryMs > 0)) throw new Error('checkinEveryMs must be above 0.');
     this.heartbeat = opts.heartbeat === false ? false : (opts.heartbeat ?? {});
     this.thinkOpts = opts.think && opts.think.everyMs > 0 ? opts.think : false;
+    this.calendarSync = opts.calendarSync === false ? false : { everyMs: Math.max(60_000, opts.calendarSync?.everyMs ?? DEFAULT_CALENDAR_SYNC_MS) };
+    this.planner = opts.planner ? opts.planner : false;
+    this.digestOpts = opts.breakDigest ? opts.breakDigest : false;
     this.pendingTtlMs = opts.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
     this.bubblePauseMs = Math.max(0, opts.bubblePauseMs ?? 350);
     // Your schedule and goals are editable from chat ("remove the study block"): private and local, so no Verify item.
@@ -220,6 +270,14 @@ export class UnifiedDaemon {
       } catch (err) {
         report.errors.push(`expire: ${message(err)}`);
       }
+      // The real calendar goes into the Anchor first, so chat, heads-ups and the planner all see the real day.
+      if (this.calendarSync && this.loop.tools.has(CALENDAR_TOOL)) {
+        try {
+          await this.calendarPass(state, report, this.calendarSync.everyMs);
+        } catch (err) {
+          report.errors.push(`calendar: ${message(err)}`);
+        }
+      }
       if (this.channel?.poll) {
         if (state.since === undefined) {
           state.since = this.now().toISOString(); // first pass: listen from now on, never replay old chat
@@ -264,6 +322,20 @@ export class UnifiedDaemon {
           report.errors.push(`heartbeat: ${message(err)}`);
         }
       }
+      if (this.digestOpts) {
+        try {
+          await this.digestPass(state, report, this.digestOpts);
+        } catch (err) {
+          report.errors.push(`digest: ${message(err)}`);
+        }
+      }
+      if (this.planner) {
+        try {
+          await this.plannerPass(state, report, this.planner);
+        } catch (err) {
+          report.errors.push(`planner: ${message(err)}`);
+        }
+      }
       if (this.thinkOpts) {
         try {
           await this.thinkPass(state, report, this.thinkOpts);
@@ -305,6 +377,92 @@ export class UnifiedDaemon {
       sent.push(text);
     }
     if (sent.length) report.proactive = [...(report.proactive ?? []), ...sent];
+  }
+
+  /** The quiet hours every proactive pass respects (the heartbeat's, else the think-beat's, else the default). */
+  private quietHours(): string | false {
+    if (this.heartbeat && this.heartbeat.quietHours !== undefined) return this.heartbeat.quietHours;
+    if (this.thinkOpts && this.thinkOpts.quietHours !== undefined) return this.thinkOpts.quietHours;
+    return DEFAULT_QUIET_HOURS;
+  }
+
+  /**
+   * v17: mirrors today's calendar into the Anchor (first pass, then every `everyMs`). $0. A new collision between a real
+   * event still ahead and one of your own blocks is mentioned once (outside quiet hours); nothing is moved for you.
+   */
+  private async calendarPass(state: StartState, report: StartTickReport, everyMs: number): Promise<void> {
+    const now = this.now();
+    if (state.lastCalendarSyncAt && now.getTime() - Date.parse(state.lastCalendarSyncAt) < everyMs) return;
+    state.lastCalendarSyncAt = now.toISOString(); // a failing calendar is retried next interval, not every pass
+    const result = await syncCalendarToAnchor(this.loop.dir, this.loop.tools, now);
+    report.calendar = result;
+    if (inQuietHours(now, this.quietHours())) return;
+    const date = localDate(now);
+    const minsNow = now.getHours() * 60 + now.getMinutes();
+    const said = state.calendarConflicts ?? [];
+    for (const c of result.conflicts) {
+      const key = conflictKey(date, c);
+      if (said.includes(key) || hhmmToMin(c.event.end) <= minsNow) continue;
+      said.push(key);
+      const mine = c.blocks.map((b) => speakableTitle(b.title, 32));
+      const text = `Heads up — your calendar has ${speakableTitle(c.event.title, 40)} at ${range12(c.event.start, c.event.end)}, right on top of your ${mine.join(' and ')} block. Want me to move ${mine.length > 1 ? 'them' : 'it'}?`;
+      await this.say(text);
+      report.proactive = [...(report.proactive ?? []), text];
+    }
+    state.calendarConflicts = said.filter((k) => k.startsWith(`${date}:`)).slice(-KEEP_KEYS);
+  }
+
+  /**
+   * v17: once a day, when a big stretch is open and you're not mid-conversation, offers a plan for it. It only asks:
+   * the blocks wait in `day-plan.json` until you say yes.
+   */
+  private async plannerPass(state: StartState, report: StartTickReport, opts: DayPlannerOptions): Promise<void> {
+    const now = this.now();
+    const date = localDate(now);
+    if (state.lastPlanOffer === date || report.proactive?.length) return;
+    const [from, to] = (opts.window ?? '09:00-17:00').split('-').map(hhmmToMin);
+    const mins = now.getHours() * 60 + now.getMinutes();
+    if (!(mins >= from! && mins < to!)) return;
+    if (inQuietHours(now, this.quietHours())) return;
+    if (state.lastHumanAt && now.getTime() - Date.parse(state.lastHumanAt) < CONVERSATION_QUIET_MS) return;
+    const anchor = await loadAnchor(this.loop.dir, now);
+    if (protectedNow(anchor, now)) return;
+    if (await loadPendingPlan(this.loop.dir, now)) return;
+    const open = openGaps(anchor, now, opts).reduce((n, g) => n + g.minutes, 0);
+    if (open < (opts.minOpenMinutes ?? 90)) return;
+    const ai = opts.ai ? this.engine.routeProvider({ tier: 'fast' }) : undefined;
+    const soul = opts.ai ? await loadSoul(this.loop.dir).catch(() => undefined) : undefined;
+    const plan = await proposeDayPlan({ anchor, now, options: opts, ...(ai ? { ai } : {}), ...(soul ? { soul } : {}) });
+    if (!plan.blocks.length) return;
+    await savePendingPlan(this.loop.dir, plan, now);
+    state.lastPlanOffer = date;
+    await this.say(plan.summary, false, true);
+    if (state.think) {
+      state.think.unanswered += 1;
+      state.think.lastSentAt = now.toISOString();
+      state.think.lastAt = now.toISOString();
+    }
+    report.planned = plan.summary;
+    report.proactive = [...(report.proactive ?? []), plan.summary];
+  }
+
+  /** v17: at the start of a scheduled scroll (or chosen) block, a short curated digest instead of a feed. */
+  private async digestPass(state: StartState, report: StartTickReport, opts: BreakDigestOptions): Promise<void> {
+    const now = this.now();
+    if (inQuietHours(now, this.quietHours())) return;
+    const anchor = await loadAnchor(this.loop.dir, now);
+    const { current } = scheduleNow(anchor, now);
+    if (!current || current.status !== 'planned' || !(opts.kinds ?? ['scroll']).includes(current.kind)) return;
+    const since = now.getHours() * 60 + now.getMinutes() - hhmmToMin(current.start);
+    if (since > (opts.withinMinutes ?? 10)) return;
+    const key = `${localDate(now)}:${current.id}`;
+    if (state.digested?.includes(key)) return;
+    state.digested = [...(state.digested ?? []), key].slice(-KEEP_KEYS);
+    const ai = opts.ai ? this.engine.routeProvider({ tier: 'fast' }) : undefined;
+    const digest = await buildBreakDigest({ dir: this.loop.dir, anchor, now, ...(ai ? { ai } : {}) });
+    await this.say(digest.text, false, true);
+    report.digest = digest.text;
+    report.proactive = [...(report.proactive ?? []), digest.text];
   }
 
   /** Expires Verify items that reached you more than `pendingTtlMs` ago. Undelivered items wait for their check-in. */
@@ -418,6 +576,11 @@ export class UnifiedDaemon {
     }
 
     if (parsed?.kind === 'decision') {
+      // v17: a bare "yes" while a day plan also waits for a yes: never guess which (it could send a message).
+      if (parsed.ref === undefined && /^(yes|y)[.!\s]*$/i.test(text) && (await loadPendingPlan(this.loop.dir, this.now()))) {
+        const n = state.numbers[delivered[0]!.id];
+        return this.say(`Did you mean the plan or #${n}? Reply "plan yes" for the plan, or "#${n} send" for that one.`);
+      }
       if (parsed.ref !== undefined) {
         const target = pending.find((r) => state.numbers[r.id] === parsed.ref);
         if (!target) {

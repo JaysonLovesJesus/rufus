@@ -507,6 +507,15 @@ export interface StartConfig {
   think?: { tools?: string[]; provider?: string; quietHours?: string | false };
   /** v15: a Verify item that waited this long after reaching you expires (never sends). Default `60m`. */
   pendingTtl?: string;
+  /** v17: mirror today's `calendar.read` events into the Anchor on start and every `every` (default `20m`). `false`: off. */
+  calendarSync?: false | { every?: string };
+  /**
+   * v17: the proactive day planner. Once a day, inside `window` (default `09:00-17:00`), when at least `minOpenMinutes`
+   * (default 90) are open, it offers a plan in chat; nothing is written until you say yes. Default on; `false`: off.
+   */
+  planner?: false | { window?: string; minOpenMinutes?: number; dayStart?: string; dayEnd?: string; maxFocusMinutes?: number; breakMinutes?: number; scroll?: boolean; ai?: boolean };
+  /** v17: a short curated digest when a scheduled `scroll` block (or the `kinds` you name) starts. Default on; `false`: off. */
+  breakDigest?: false | { kinds?: Array<'focus' | 'meeting' | 'break' | 'scroll' | 'personal' | 'protected'>; ai?: boolean; withinMinutes?: number };
 }
 
 /** Guardrails against piling up prompt rules. */

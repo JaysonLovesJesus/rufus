@@ -198,6 +198,7 @@ function describeStartTick(r: StartTickReport): string[] {
   if (r.sentNow.length) lines.push(`sent ${r.sentNow.length} item(s) right away`);
   if (r.checkin.length) lines.push(`check-in: sent ${r.checkin.length} item(s)`);
   if (r.batched.length) lines.push(`${r.batched.length} item(s) waiting for the next check-in`);
+  if (r.calendar?.changed) lines.push(`calendar: ${r.calendar.synced} event(s) today (+${r.calendar.added.length} / -${r.calendar.removed.length} / ~${r.calendar.updated.length})${r.calendar.conflicts.length ? `, ${r.calendar.conflicts.length} conflict(s)` : ''}`);
   for (const p of r.proactive ?? []) lines.push(`said: ${p.split('\n')[0]}`);
   if (r.expired?.length) lines.push(`${r.expired.length} item(s) expired unanswered (nothing was sent)`);
   if (r.bridge) lines.push(...describeBridgeTick(r.bridge));
@@ -752,6 +753,9 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
           ...(config.start?.heartbeat !== undefined ? { heartbeat: config.start.heartbeat } : {}),
           ...(thinkEveryMs > 0 ? { think: { everyMs: thinkEveryMs, ...(config.start?.think?.tools ? { tools: config.start.think.tools } : {}), ...(config.start?.think?.provider ? { provider: config.start.think.provider } : {}), ...(config.start?.think?.quietHours !== undefined ? { quietHours: config.start.think.quietHours } : {}) } } : {}),
           pendingTtlMs: parseDuration(config.start?.pendingTtl ?? '60m'),
+          calendarSync: config.start?.calendarSync === false ? false : { everyMs: parseDuration(config.start?.calendarSync?.every ?? '20m') },
+          planner: config.start?.planner === false ? false : (config.start?.planner ?? {}),
+          breakDigest: config.start?.breakDigest === false ? false : (config.start?.breakDigest ?? {}),
           ...(now ? { now } : {}),
         });
         const report = (r: StartTickReport): void => {

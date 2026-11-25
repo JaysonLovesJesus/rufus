@@ -342,7 +342,7 @@ export function findScheduleConflicts(day: DaySchedule, slot: Pick<ScheduleBlock
 }
 
 /** The day to edit: the current one, or a fresh one for another date (the current day is archived, never lost). */
-function dayFor(anchor: Anchor, date: string | undefined): { anchor: Anchor; day: DaySchedule } {
+export function dayFor(anchor: Anchor, date: string | undefined): { anchor: Anchor; day: DaySchedule } {
   if (!date || date === anchor.schedule.date) return { anchor, day: anchor.schedule };
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`"${date}" is not a date. Use YYYY-MM-DD.`);
   const archived = anchor.pastSchedules?.find((d) => d.date === date);
