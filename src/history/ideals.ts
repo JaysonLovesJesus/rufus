@@ -136,43 +136,111 @@ export function chronological(pairs: HistoryPair[]): HistoryPair[] {
     .map((e) => e.p);
 }
 
+/** What the observations say about a lesson. This is the lesson's own living evidence (see `LessonStore.review`). */
+export interface LessonEvidence {
+  /** Applicable replies (all history) that honor the lesson. */
+  forCount: number;
+  /** Applicable replies (all history) that break it. */
+  againstCount: number;
+  /** Of the latest window of applicable replies: how many break it, and how many were looked at. */
+  recentAgainst?: number;
+  recentTotal?: number;
+  /** `tension`: the latest replies keep breaking it. `stale`: too few recent replies to say. `aligned`: recent replies agree. */
+  status?: 'aligned' | 'tension' | 'stale';
+}
+
+interface Reading {
+  check: LessonCheck;
+  recent: { violations: number; of: number; rate: number };
+  allTime: { violations: number; of: number; rate: number };
+  enough: boolean;
+  tension: boolean;
+}
+
+function readChecks(rule: string, ordered: HistoryPair[], opts: DriftOptions): Reading[] {
+  const windowSize = Math.max(1, Math.floor(opts.windowSize ?? 15));
+  const minSamples = opts.minSamples ?? 5;
+  const minRate = opts.minRate ?? 0.4;
+  return checksForRule(rule).map((c) => {
+    const applicable = ordered.filter((p) => !c.applies || c.applies(p.reply));
+    const recent = applicable.slice(-windowSize);
+    const violations = recent.filter((p) => c.violates(p.reply)).length;
+    const rate = recent.length ? violations / recent.length : 0;
+    const allViolations = applicable.filter((p) => c.violates(p.reply)).length;
+    const allRate = applicable.length ? allViolations / applicable.length : 0;
+    const enough = recent.length >= minSamples;
+    return {
+      check: c,
+      recent: { violations, of: recent.length, rate: round3(rate) },
+      allTime: { violations: allViolations, of: applicable.length, rate: round3(allRate) },
+      enough,
+      tension: enough && rate >= minRate,
+    };
+  });
+}
+
+/** The question put to the human when a lesson is in tension. */
+export function driftMessage(rule: string, recent: { violations: number; of: number; rate: number }, allTime: { rate: number }): string {
+  return `Saved lesson "${rule}" disagrees with ${recent.violations}/${recent.of} of your latest replies (${pct(recent.rate)}; ${pct(allTime.rate)} of all history). Keep it as an aspiration, refine it into conditional logic, or retire it?`;
+}
+
+/**
+ * What the observations say about one rule, or `undefined` when the rule makes no claim code can measure (taste,
+ * or conditional logic). With several measurable claims, the one in the most tension speaks for the lesson.
+ */
+export function lessonEvidence(rule: string, pairs: HistoryPair[], opts: DriftOptions = {}): LessonEvidence | undefined {
+  const readings = readChecks(rule, chronological(pairs), opts);
+  if (!readings.length) return undefined;
+  const pick = readings.reduce((best, r) => {
+    if (r.tension !== best.tension) return r.tension ? r : best;
+    return r.recent.of > best.recent.of || (r.recent.of === best.recent.of && r.recent.rate > best.recent.rate) ? r : best;
+  });
+  return {
+    forCount: pick.allTime.of - pick.allTime.violations,
+    againstCount: pick.allTime.violations,
+    recentAgainst: pick.recent.violations,
+    recentTotal: pick.recent.of,
+    status: pick.tension ? 'tension' : pick.enough ? 'aligned' : 'stale',
+  };
+}
+
+/** The human-facing question for a lesson whose evidence says `tension`. */
+export function tensionMessage(rule: string, e: LessonEvidence): string | undefined {
+  if (e.status !== 'tension' || e.recentAgainst === undefined || !e.recentTotal) return undefined;
+  const all = e.forCount + e.againstCount;
+  return driftMessage(rule, { violations: e.recentAgainst, of: e.recentTotal, rate: e.recentAgainst / e.recentTotal }, { rate: all ? e.againstCount / all : 0 });
+}
+
 /**
  * Saved lessons that your latest replies keep contradicting. A lesson is an ideal, so it stays in force (see
  * `buildSituationalContext`), but when 40% or more of the last 15 applicable replies break it (at least 5 of them
  * seen), Rufus says so and asks: keep it as an aspiration, refine it into conditional logic, or retire it. The window
  * counts observations, not days, so a fast shift shows up immediately and a slow channel is not misjudged by an
  * arbitrary cutoff. Hardened lessons (already enforced in code) and conditional ones are skipped.
+ *
+ * This is the per-claim view of the same measurement `LessonStore.review` keeps on each lesson as evidence: prefer
+ * `lessons.review(pairs)`, which updates the lessons and returns the ones in tension.
  */
 export function detectLessonDrift(lessons: LessonInput[], pairs: HistoryPair[], opts: DriftOptions = {}): LessonDrift[] {
-  const windowSize = Math.max(1, Math.floor(opts.windowSize ?? 15));
-  const minSamples = opts.minSamples ?? 5;
-  const minRate = opts.minRate ?? 0.4;
   const ordered = chronological(pairs);
   const out: LessonDrift[] = [];
   const seen = new Set<string>();
   for (const l of lessons) {
     if (typeof l !== 'string' && l.hardened) continue;
     const rule = ruleOf(l);
-    for (const c of checksForRule(rule)) {
-      const key = `${rule}\u0000${c.id}`;
+    for (const r of readChecks(rule, ordered, opts)) {
+      const key = `${rule}\u0000${r.check.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const applicable = ordered.filter((p) => !c.applies || c.applies(p.reply));
-      const recent = applicable.slice(-windowSize);
-      if (recent.length < minSamples) continue;
-      const violations = recent.filter((p) => c.violates(p.reply)).length;
-      const rate = violations / recent.length;
-      if (rate < minRate) continue;
-      const allViolations = applicable.filter((p) => c.violates(p.reply)).length;
-      const allRate = applicable.length ? allViolations / applicable.length : 0;
+      if (!r.tension) continue;
       out.push({
         ...(typeof l !== 'string' && l.id ? { lessonId: l.id } : {}),
         rule,
-        check: c.id,
-        claim: c.label,
-        recent: { violations, of: recent.length, rate: round3(rate) },
-        allTime: { violations: allViolations, of: applicable.length, rate: round3(allRate) },
-        message: `Saved lesson "${rule}" disagrees with ${violations}/${recent.length} of your latest replies (${pct(rate)}; ${pct(allRate)} of all history). Keep it as an aspiration, refine it into conditional logic, or retire it?`,
+        check: r.check.id,
+        claim: r.check.label,
+        recent: r.recent,
+        allTime: r.allTime,
+        message: driftMessage(rule, r.recent, r.allTime),
       });
     }
   }

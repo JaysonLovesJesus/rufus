@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import type { AiProvider, AiRequest, ProviderConfig, RufusConfig } from '../types';
+import type { AiProvider, AiRequest, ProviderConfig, RufusConfig, Tier } from '../types';
 
 type Scripted = string | ((req: AiRequest) => string | Promise<string>);
 
@@ -91,4 +91,17 @@ export function createProviders(config: Pick<RufusConfig, 'provider' | 'provider
     if (built) providers[name] = built;
   }
   return { provider: createProvider(config.provider), providers };
+}
+
+/**
+ * Which provider serves an ai step: its explicit `provider` name, else its `tier` (`providers.fast` / `providers.smart`)
+ * if that tier is configured, else the flow's provider, else the default. An unconfigured tier is never an error, so a
+ * flow that says `tier: 'fast'` still runs on a one-provider setup.
+ */
+export function pickProvider(
+  o: { provider?: string; tier?: Tier; flowProvider?: string },
+  from: { providerFor(name?: string): AiProvider; tierFor(tier: Tier): AiProvider | undefined },
+): AiProvider {
+  if (o.provider) return from.providerFor(o.provider);
+  return (o.tier && from.tierFor(o.tier)) || from.providerFor(o.flowProvider);
 }

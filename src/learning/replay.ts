@@ -2,6 +2,8 @@ import { AiVerificationError, buildSystemPrompt, runAiStep } from '../engine/ai'
 import type { Engine } from '../engine/engine';
 import type {
   AiStepOptions,
+  EscalateOptions,
+  EscalateResult,
   Flow,
   FlowContext,
   HumanAnswer,
@@ -296,6 +298,23 @@ class ReplayContext implements FlowContext<any> {
     return this.saved(key) as HumanAnswer;
   }
 
+  /** Replay judges the step on the strongest model rung (`smart`): "would today's best model pass this saved case?" */
+  escalate(name: string, opts: EscalateOptions<string> & { parse?: undefined }): Promise<EscalateResult<string>>;
+  escalate<T>(name: string, opts: EscalateOptions<T> & { parse: (raw: string) => T }): Promise<EscalateResult<T>>;
+  async escalate(name: string, opts: EscalateOptions<any>): Promise<EscalateResult<any>> {
+    const prefix = `ai:${name}`;
+    const n = (this.seen.get(prefix) ?? 0) + 1;
+    const key = n === 1 ? prefix : `${prefix}#${n}`;
+    const saved = this.original.steps[key];
+    if (saved?.handoff && key !== this.c.stepKey) {
+      this.keyFor('ai', name);
+      return { rung: 'human', answer: await this.human(name, { title: name, summary: '' }), reason: saved.handoff.reason };
+    }
+    const { fast: _fast, smart, human: _human, ...base } = opts;
+    const value = await this.ai(name, <AiStepOptions<any> & { parse: (raw: string) => any }>{ ...base, tier: 'smart', provider: smart?.provider, model: smart?.model, maxRetries: smart?.maxRetries });
+    return { rung: saved?.rung ?? 'smart', value, attempts: 1 };
+  }
+
   ai(name: string, opts: AiStepOptions<string> & { parse?: undefined }): Promise<string>;
   ai<T>(name: string, opts: AiStepOptions<T> & { parse: (raw: string) => T }): Promise<T>;
   async ai(name: string, opts: AiStepOptions<any>): Promise<any> {
@@ -311,7 +330,7 @@ class ReplayContext implements FlowContext<any> {
     const before = (await (this.c.seeded ? this.humanBefore(opts) : check(opts, this.c.aiDraft))).ok ? 'passed' : 'failed';
     try {
       const { value, attempts } = await runAiStep({
-        provider: this.engine.providerFor(this.providerName ?? opts.provider ?? this.flow.meta.provider),
+        provider: this.providerName ? this.engine.providerFor(this.providerName) : this.engine.routeProvider({ provider: opts.provider, tier: opts.tier, flowProvider: this.flow.meta.provider }),
         system: this.system,
         step: name,
         opts: this.mode === 'plain' ? plainOpts(opts, this.input) : opts,

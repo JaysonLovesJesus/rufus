@@ -75,6 +75,25 @@ export interface AiProvider {
   complete(req: AiRequest): Promise<string>;
 }
 
+/** The two model tiers. Name them under `config.providers` (`fast`, `smart`); an unconfigured tier falls back to the default provider. */
+export type Tier = 'fast' | 'smart';
+
+/**
+ * The Spectrum of Intelligence, cheapest and most exact first: `code`, then a `fast` model, then a `smart` model, then a
+ * `human`. Work should stay as far left as it can.
+ */
+export type Rung = 'code' | Tier | 'human';
+
+/** How many steps of a run each rung handled. Stored on the run as `run.spectrum`. */
+export interface Spectrum {
+  code: number;
+  fast: number;
+  smart: number;
+  human: number;
+  /** Steps where `fast` could not pass `verify`, so they moved up a rung. Only present when it happened. */
+  escalated?: number;
+}
+
 export type VerifyResult = { ok: true } | { ok: false; reason: string };
 
 export interface AiStepOptions<T = string> {
@@ -88,6 +107,12 @@ export interface AiStepOptions<T = string> {
   model?: string;
   /** Name of a provider in `config.providers` (or `"default"`). Beats the flow's `meta.provider`. */
   provider?: string;
+  /**
+   * Which rung of the spectrum this step needs: `fast` for wording and light classification, `smart` for judgment.
+   * Resolves to `config.providers.fast` / `.smart`; if that tier is not configured, the flow's (or the default) provider is used.
+   * `provider` (by name) beats `tier`. A step with neither counts as `smart` in `run.spectrum`.
+   */
+  tier?: Tier;
   /** Turn raw model text into `T`. A throw counts as a failed verification. */
   parse?: (raw: string) => T;
   /**
@@ -96,6 +121,32 @@ export interface AiStepOptions<T = string> {
    */
   includeExamples?: number | false;
 }
+
+/** Per-rung tweaks for `ctx.escalate`. */
+export interface RungOptions {
+  model?: string;
+  /** Name of a provider in `config.providers`. Beats the rung's tier. */
+  provider?: string;
+  /** Retries on this rung before moving up. Default 1 for `fast`, 2 for `smart`. */
+  maxRetries?: number;
+}
+
+/** What a human sees when both models failed `verify`. A function gets the last failure so the card can show it. */
+export type EscalateHumanSpec = HumanStepSpec | ((failure: { reason: string; lastOutput: string }) => HumanStepSpec);
+
+export interface EscalateOptions<T = string> extends Omit<AiStepOptions<T>, 'tier' | 'provider' | 'model' | 'maxRetries'> {
+  /** The cheap first try. */
+  fast?: RungOptions;
+  /** Used only if `fast` cannot pass `verify`. */
+  smart?: RungOptions;
+  /** Last rung: if `smart` also fails `verify`, ask a human. Without it, the step fails like a normal ai step. */
+  human?: EscalateHumanSpec;
+}
+
+/** Which rung handled an escalated step, and what it produced. */
+export type EscalateResult<T> =
+  | { rung: Tier; value: T; attempts: number }
+  | { rung: 'human'; answer: HumanAnswer; reason: string };
 
 // ---------- Flows ----------
 
@@ -119,6 +170,12 @@ export interface FlowContext<I = unknown> {
   /** Code-assisted AI step. */
   ai(name: string, opts: AiStepOptions<string> & { parse?: undefined }): Promise<string>;
   ai<T>(name: string, opts: AiStepOptions<T> & { parse: (raw: string) => T }): Promise<T>;
+  /**
+   * Climb the spectrum: try a `fast` model, check it with the deterministic `verify`, and only if it cannot pass move to
+   * a `smart` model, then (if `human` is given) to a person. Records the rung that handled it in `run.spectrum`.
+   */
+  escalate(name: string, opts: EscalateOptions<string> & { parse?: undefined }): Promise<EscalateResult<string>>;
+  escalate<T>(name: string, opts: EscalateOptions<T> & { parse: (raw: string) => T }): Promise<EscalateResult<T>>;
   /** Pause for a human. Resolves with their answer after `engine.answer()`. */
   human(name: string, spec: HumanStepSpec): Promise<HumanAnswer>;
 }
@@ -138,6 +195,12 @@ export interface StepRecord {
   result?: unknown;
   /** ai only: how many attempts it took. */
   attempts?: number;
+  /** ai only: the rung that handled it (`fast` or `smart`). Absent on older runs, which count as `smart`. */
+  rung?: Tier;
+  /** ai only: `fast` could not pass `verify`, so the step moved up (to `smart`, or to a human). */
+  escalated?: boolean;
+  /** ai only: every model rung failed `verify` and a human step (same name) took over. */
+  handoff?: { reason: string; lastOutput: string };
   /** human only: the card shown to the human. */
   card?: HumanCard;
 }
@@ -151,6 +214,8 @@ export interface RunRecord {
   input: unknown;
   steps: Record<string, StepRecord>;
   pendingCardId?: string;
+  /** Which rung of the spectrum handled each step so far. */
+  spectrum?: Spectrum;
   output?: unknown;
   error?: string;
   createdAt: string;

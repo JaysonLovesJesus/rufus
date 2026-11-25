@@ -1,7 +1,8 @@
 export { defineFlow, isFlow } from './engine/flow';
 export { Engine, type EngineOptions } from './engine/engine';
 export { AiVerificationError } from './engine/ai';
-export { FakeProvider, OpenAiCompatibleProvider, CommandProvider, createProvider, createProviders, DEFAULT_PROVIDER } from './engine/providers';
+export { summarizeSpectrum, formatSpectrum, spectrumOf, addSpectrum, emptySpectrum } from './engine/spectrum';
+export { FakeProvider, OpenAiCompatibleProvider, CommandProvider, createProvider, createProviders, pickProvider, DEFAULT_PROVIDER } from './engine/providers';
 export { FileStore } from './store';
 export { CaseStore, captureCase, formatExamples, type ReplayCase } from './learning/cases';
 export { compareFlow, formatCompare, type CompareOptions, type CompareReport, type CompareArm, type CompareCaseResult } from './learning/compare';
@@ -11,7 +12,7 @@ export { proposeLesson, type ProposeInput, type ProposeOptions, type ProposeResu
 export { suggestLayer, type LessonLayer, type LayerSuggestion } from './learning/layers';
 export { Scheduler, type TickResult, type TickStatus } from './scheduler/scheduler';
 export { at, every, onEvent, isQuiet, type Trigger, type TriggerContext, type TriggerOptions, type QuietHours } from './scheduler/triggers';
-export { LessonStore, LessonCapError, MAX_LESSONS_PER_SCOPE, scopes, type Lesson, type LessonStoreOptions } from './learning/lessons';
+export { LessonStore, LessonCapError, MAX_LESSONS_PER_SCOPE, scopes, describeTension, type Lesson, type LessonEvidence, type LessonStoreOptions } from './learning/lessons';
 export { formatCardAsText, parseTextReply, PlainTextChannel, type ChannelAdapter } from './channels/text';
 export type * from './types';
 export { CardBridge, type CardBridgeOptions, type IncomingMessage, type LiveChannel, type TickReport } from './channels/bridge';
@@ -85,7 +86,7 @@ export {
 export { evaluateHoldout, splitHoldout, formatHoldout, invariantHolds, type HoldoutEvaluation, type HoldoutResult, type HoldoutOptions, type HoldoutSplit } from './history/eval';
 export { conditionalAnalysis, describeTrigger, DEFAULT_CONTRAST, FEATURE_LABELS, LONG_REPLY_WORDS, type ConditionalRule, type ContrastOptions, type Trigger as ConditionalTrigger, type FeatureId, type BehaviorId } from './history/contrast';
 export { DEFAULT_HALF_LIFE_DAYS, DEFAULT_HALF_LIFE_OBSERVATIONS, pairWeigher, type WeightOptions, type IdealOverride } from './history/profiles';
-export { detectLessonDrift, checksForRule, idealConstraints, type DriftOptions, type LessonDrift, type LessonInput, type LessonCheck, type IdealConstraints } from './history/ideals';
+export { detectLessonDrift, lessonEvidence, tensionMessage, checksForRule, idealConstraints, type DriftOptions, type LessonDrift, type LessonInput, type LessonCheck, type IdealConstraints } from './history/ideals';
 export type { RecencyReport } from './history/mine';
 export { recencyWeight, rankWeights, resolveHalfLife, resolveRecencyMode, type RecencyMode, type RecencyOptions } from './recency';
 export {

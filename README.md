@@ -349,7 +349,9 @@ ctx.voiceHint;
 
 With `explicitLessons` (saved lessons or plain rule text), `voiceHint` puts **Ideals (override history)** above **Historical habits (descriptive baseline)**. Code applies what it can verify: a greeting rule (`Always greet`, `Skip the greeting`) sets `greetHint`, a word cap (`at most 15 words`) caps `approxWords` and the `lengthBand`, and each change is listed in `idealOverrides` with what history alone would have done. Lessons about taste, conditional lessons ("only in group chats") and contradictory greeting lessons stay as labeled text and change no decision.
 
-**Drift.** `detectLessonDrift(lessons, pairs, { windowSize = 15, minSamples = 5, minRate = 0.4 })` looks at the last N *applicable* replies, however many hours or months they span, and flags a saved lesson (greeting, em dashes, exclamations, emoji, sign-offs, trailing period, lowercase start, word cap) that at least 40% of them break. `rufus mine` prints it under **Tension / drift**:
+**Lessons are living beliefs backed by observations.** There is one learning system, not two. `engine.reviewLessons()` (or `lessons.review(pairs)`) checks every saved lesson against your reply history and keeps the result on the lesson as `evidence` (`forCount`, `againstCount`, `recentAgainst` / `recentTotal`, and a `status` of `aligned`, `tension` or `stale`), then returns the lessons in tension. `rufus lessons` (and `rufus chat lessons`) runs it for you, so one list shows all your lessons and flags the ones your latest replies keep contradicting. A review never retires or rewrites anything, and lessons about taste or conditional logic, which code cannot measure, simply carry no evidence.
+
+**The check behind it.** `detectLessonDrift(lessons, pairs, { windowSize = 15, minSamples = 5, minRate = 0.4 })` (the same measurement, per claim, and still exported) looks at the last N *applicable* replies, however many hours or months they span, and flags a saved lesson (greeting, em dashes, exclamations, emoji, sign-offs, trailing period, lowercase start, word cap) that at least 40% of them break. `rufus mine` prints it under **Tension / drift**:
 
 ```
 [drift] Saved lesson "Do not use em dashes." disagrees with 10/15 of your latest replies (67%; 14% of all history). Keep it as an aspiration, refine it into conditional logic, or retire it?
@@ -376,6 +378,31 @@ Code does the heavy lifting, so many ai steps only phrase a result. Send those t
 const decision = await ctx.ai('decide', { prompt: 'Should this wait for the human?', context, provider: 'smart' }); // judgment
 const message  = await ctx.ai('phrase', { prompt: 'Say it in one friendly line.', context: { decision }, provider: 'fast' }); // wording only
 ```
+
+### The Spectrum of Intelligence: code, then fast, then smart, then you
+
+Every flow is a climb: do as much as possible in **code**, hand wording and light judgment to a **fast** model, hand real judgment to a **smart** model, and bring in a **human** last. Rufus makes the rungs first-class:
+
+```ts
+// Pick a rung per step. An unconfigured tier falls back to the flow's (or the default) provider, so nothing breaks.
+await ctx.ai('phrase', { prompt: '...', context, tier: 'fast' });
+await ctx.ai('judge',  { prompt: '...', context, tier: 'smart' });
+
+// Or let it climb on its own: fast first, the deterministic `verify` decides, smart only if fast cannot pass, then a human.
+const r = await ctx.escalate('reply', {
+  prompt: 'Write a two-sentence reply.',
+  context,
+  verify: (text) => (text.length < 280 ? { ok: true } : { ok: false, reason: 'too long' }),
+  fast:  { maxRetries: 1 },                                  // default 1
+  smart: { maxRetries: 2 },                                  // default 2
+  human: ({ reason }) => ({ title: 'Write this one', summary: reason }), // optional last rung
+});
+if (r.rung === 'human') { /* r.answer */ } else { /* r.value, r.rung is 'fast' or 'smart' */ }
+```
+
+`provider: 'name'` still beats `tier`. With no separate fast tier configured, `escalate` asks the one model once (with its retries) instead of twice. The failed attempts are saved on the run, so resuming after a human answers never re-asks a model.
+
+Each run records which rung handled each step as `run.spectrum`, e.g. `code 2 · fast 1 · smart 0 · human 1` (plus `· 1 escalated` when fast had to hand up). An ai step with no `tier` counts as `smart`; a provider literally named `fast` or `smart` counts as that tier. `rufus run` / `answer` print it as `Handled by: ...`, and `rufus chat status` shows the total across your runs, so you can see how much stayed in code and fast versus how much needed smart or you. Replay judges an escalated step on its `smart` rung.
 
 `fast` and `smart` are just names (any key of `providers` works, see below). `--provider <name>` is accepted by `rufus mine --ai`, `rufus compare` and `rufus replay`; with no flag, `mine --ai` uses `mine.provider`, else `smart` if you defined it. The way to choose: run `rufus compare <flow> --provider fast` on your seeded cases. If the fast tier passes the same `verify`, switch that step.
 
@@ -475,7 +502,7 @@ defineFlow({ id: 'inbox', name: 'Inbox', description: '...', provider: 'claude' 
 ## Layout
 
 ```
-src/engine/     defineFlow, Engine, step runner, AI verify loop, providers
+src/engine/     defineFlow, Engine, step runner, AI verify loop, providers, spectrum (code / fast / smart / human)
 src/store/      atomic JSON file store (no native deps)
 src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay; compare (plain vs. assisted)
 src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `ideals` (explicit lessons as constraints, drift), `mine` (voice, invariants, intents, recency, optional AI blueprints)

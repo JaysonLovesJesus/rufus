@@ -10,6 +10,8 @@ import { ChiefOfStaff } from './chief/chief';
 import { Engine } from './engine/engine';
 import { isFlow } from './engine/flow';
 import { createProviders } from './engine/providers';
+import { formatSpectrum, spectrumOf, spectrumTotal } from './engine/spectrum';
+import { describeTension } from './learning/lessons';
 import { formatCompare } from './learning/compare';
 import { bucketsFromConfig, defaultMineProvider, formatMine, mineHistory } from './history/mine';
 import { formatSeed, loadPairs, seedHistory } from './history/seed';
@@ -34,7 +36,7 @@ Usage: rufus [--dir <workspace>] <command>
   bridge [--once] [--interval <sec>] [--channel telegram|beeper]
                                text new cards to your chat and apply your replies
   lessons [--prune [--older-than <days>] [--max-unused <n>]]
-                               show saved lessons (with the layer each belongs in), or prune stale ones
+                               show saved lessons (layer, and any in tension with your latest replies), or prune stale ones
   propose <scope> <rule...> [--layer code|context|principle] [--sample N] [--force]
                                replay the scope with the rule on trial; save it only if nothing regresses
   demo [--reply <text>]        run the example flow (add --reply to answer it right away)
@@ -99,7 +101,7 @@ function describeTick(r: TickResult, io: Io): void {
   }
 }
 
-function describe(result: RunResult, io: Io): void {
+async function describe(result: RunResult, io: Io, store: FileStore): Promise<void> {
   if (result.status === 'completed') {
     io.out(`Done (${result.runId}).`);
     io.out(JSON.stringify(result.output, null, 2));
@@ -111,6 +113,9 @@ function describe(result: RunResult, io: Io): void {
     io.out(formatCardAsText(result.card));
     io.out(`\nAnswer with: rufus answer ${result.card.id} <reply>`);
   }
+  // Which rung of the spectrum (code -> fast -> smart -> human) did the work.
+  const run = await store.getRun(result.runId).catch(() => undefined);
+  if (run && spectrumTotal(spectrumOf(run)) > 0) io.out(`Handled by: ${formatSpectrum(spectrumOf(run))}`);
 }
 
 function summarizeScoped(r: ScopedReplayReport): string {
@@ -207,7 +212,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     case 'run': {
       const [flowId, inputJson] = rest;
       if (!flowId) throw new Error('Usage: rufus run <flowId> [inputJson]');
-      return describe(await engine.start(flowId, inputJson ? JSON.parse(inputJson) : undefined), io);
+      return describe(await engine.start(flowId, inputJson ? JSON.parse(inputJson) : undefined), io, store);
     }
 
     case 'pending': {
@@ -225,7 +230,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
       const card = (await engine.pending()).find((c) => c.id === run.pendingCardId)!;
       const parsed = parseTextReply(words.join(' '), card);
       if (!parsed) throw new Error(`Could not read that as an answer. This card only takes: ${card.options.map((o, i) => `${i + 1} (${o.label})`).join(', ')}.`);
-      return describe(await engine.answer(card.id, parsed), io);
+      return describe(await engine.answer(card.id, parsed), io, store);
     }
 
     case 'bridge': {
@@ -263,6 +268,8 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
         for (const l of removed) io.out(`  ${l.id}  x${l.count}  ${l.scope}  ${l.rule}`);
         return;
       }
+      // Lessons are living beliefs: check them against your reply history (if any) so one list shows the lessons and which are in tension.
+      await engine.reviewLessons();
       const lessons = await engine.lessons.all();
       if (!lessons.length) return io.out('No lessons yet. Reply to a card with a "Lesson: <rule>" line to add one.');
       const ready = new Set((await engine.lessons.candidatesForCode()).map((l) => l.id));
@@ -272,7 +279,10 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
       for (const l of lessons) {
         const tag = l.hardened ? ' [in code]' : ready.has(l.id) ? ' [ready to harden into code]' : '';
         const layer = l.layer === 'principle' ? '' : `  [${l.layer}]`;
-        io.out(`${l.id}  x${l.count}  ${l.scope}${layer}  ${l.rule}${tag}`);
+        const tension = l.evidence?.status === 'tension' ? ' [in tension]' : '';
+        io.out(`${l.id}  x${l.count}  ${l.scope}${layer}  ${l.rule}${tag}${tension}`);
+        const question = describeTension(l);
+        if (question) io.out(`    ${question}`);
         if (!l.hardened) {
           const s = suggestLayer(l.rule);
           if (s.layer !== l.layer && s.layer !== 'principle') io.out(`    suggested layer: ${s.layer}. ${s.reason}`);
@@ -306,16 +316,16 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
     case 'demo': {
       io.out('Demo: code -> ai (with verify retry) -> human pause -> resume -> code\n');
       const first = await engine.start('triage-draft', demoInput);
-      if (first.status !== 'waiting_human') return describe(first, io);
+      if (first.status !== 'waiting_human') return describe(first, io, store);
       const run = await store.getRun(first.runId);
       const attempts = run.steps['ai:draft-reply']?.attempts;
       io.out(`The AI draft failed the code check once and was retried (attempts: ${attempts}).\n`);
-      if (reply === undefined) return describe(first, io);
+      if (reply === undefined) return describe(first, io, store);
       io.out(formatCardAsText(first.card));
       io.out(`\n> ${reply}\n`);
       const parsed = parseTextReply(reply, first.card);
       if (!parsed) throw new Error('Could not read that reply.');
-      return describe(await engine.answer(first.card.id, parsed), io);
+      return describe(await engine.answer(first.card.id, parsed), io, store);
     }
 
     case 'tick': {

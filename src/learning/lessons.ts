@@ -1,5 +1,9 @@
 import { newId, type FileStore } from '../store';
 import type { LessonLayer } from './layers';
+import { lessonEvidence, tensionMessage, type DriftOptions, type LessonEvidence } from '../history/ideals';
+import type { HistoryPair } from '../history/types';
+
+export type { LessonEvidence } from '../history/ideals';
 
 /** Scope strings: `global`, `flow:<id>`, `role:<name>`. */
 export const scopes = {
@@ -26,6 +30,17 @@ export interface Lesson {
   updatedAt: string;
   /** Last time this lesson was injected into a `ctx.ai` prompt. Absent if it never was. */
   lastUsedAt?: string;
+  /**
+   * What your observations say about this lesson, kept fresh by `LessonStore.review`. A lesson is a living belief:
+   * it stays in force, but when your latest replies keep breaking it (`status: "tension"`) it is flagged for you.
+   * Absent for lessons code cannot measure (taste, conditional logic) and until a first review.
+   */
+  evidence?: LessonEvidence;
+}
+
+/** The question to put to the human for a lesson in tension, or undefined when it is not. */
+export function describeTension(lesson: Pick<Lesson, 'rule' | 'evidence'>): string | undefined {
+  return lesson.evidence ? tensionMessage(lesson.rule, lesson.evidence) : undefined;
 }
 
 export interface LessonStoreOptions {
@@ -271,6 +286,30 @@ export class LessonStore {
         }
       }
       if (changed) await this.write(file);
+    });
+  }
+
+  /**
+   * Check every lesson against your observations (replies, newest by date) and keep the result on the lesson as
+   * `evidence`. Returns the lessons in tension: your latest replies keep contradicting them, so it is your call to
+   * keep one as an aspiration, refine it into conditional logic, or retire it. Nothing is retired for you, and a
+   * review never changes `count`, `updatedAt` or whether a lesson is injected. Hardened lessons (enforced by code) and
+   * lessons code cannot measure are left alone. Deterministic: no AI, $0.
+   */
+  review(observations: HistoryPair[], opts: DriftOptions = {}): Promise<Lesson[]> {
+    return this.serial(async () => {
+      const file = await this.read();
+      let changed = false;
+      for (const l of file.lessons) {
+        if (l.hardened) continue;
+        const next = lessonEvidence(l.rule, observations, opts);
+        if (JSON.stringify(next) === JSON.stringify(l.evidence)) continue;
+        if (next) l.evidence = next;
+        else delete l.evidence;
+        changed = true;
+      }
+      if (changed) await this.write(file);
+      return file.lessons.filter((l) => l.evidence?.status === 'tension').sort(byPriority);
     });
   }
 

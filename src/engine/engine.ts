@@ -7,7 +7,11 @@ import { proposeLesson, type ProposeInput, type ProposeOptions, type ProposeResu
 import { LessonCapError } from '../learning/lessons';
 import type { ChannelAdapter } from '../channels/text';
 import { StepRunner } from './context';
-import { DEFAULT_PROVIDER } from './providers';
+import { DEFAULT_PROVIDER, pickProvider } from './providers';
+import { summarizeSpectrum } from './spectrum';
+import { loadPairs } from '../history/seed';
+import type { DriftOptions } from '../history/ideals';
+import type { Lesson } from '../learning/lessons';
 import type {
   AiProvider,
   Flow,
@@ -17,6 +21,7 @@ import type {
   LearningConfig,
   RunRecord,
   RunResult,
+  Tier,
 } from '../types';
 
 export interface EngineOptions {
@@ -71,6 +76,11 @@ export class Engine {
     throw new Error(`Unknown AI provider "${name}". ${known.length ? `Configured: ${known.join(', ')}.` : 'None configured: add it under "providers" in config.json.'}`);
   }
 
+  /** Provider for an ai step: its `provider` name, else its `tier`, else the flow's provider, else the default. See `pickProvider`. */
+  routeProvider(o: { provider?: string; tier?: Tier; flowProvider?: string }): AiProvider {
+    return pickProvider(o, { providerFor: (n) => this.providerFor(n), tierFor: (t) => this.providers[t] });
+  }
+
   register(...flows: Flow[]): this {
     for (const f of flows) this.flows.set(f.meta.id, f);
     return this;
@@ -105,6 +115,15 @@ export class Engine {
    */
   proposeLesson(input: ProposeInput, opts?: ProposeOptions): Promise<ProposeResult> {
     return proposeLesson(this, input, opts);
+  }
+
+  /**
+   * Check every saved lesson against your reply history (`history/pairs.jsonl`, see `rufus seed`), keep the result on
+   * the lesson as `evidence`, and return the ones in tension. See `LessonStore.review`.
+   */
+  async reviewLessons(opts?: DriftOptions): Promise<Lesson[]> {
+    await this.init();
+    return this.lessons.review(await loadPairs(this.store), opts);
   }
 
   private init(): Promise<void> {
@@ -205,7 +224,13 @@ export class Engine {
 
   private async execute(run: RunRecord, flow: Flow): Promise<RunResult> {
     const runner = new StepRunner(
-      { store: this.store, lessons: this.lessons, cases: this.cases, providerFor: (name) => this.providerFor(name) },
+      {
+        store: this.store,
+        lessons: this.lessons,
+        cases: this.cases,
+        providerFor: (name) => this.providerFor(name),
+        tierFor: (tier) => this.providers[tier],
+      },
       run,
       flow,
     );
@@ -236,6 +261,7 @@ export class Engine {
       delete run.error;
       result = { status: 'completed', runId: run.id, output: run.output };
     }
+    run.spectrum = summarizeSpectrum(run.steps);
     await this.store.saveRun(run);
     // The run is already safely saved; a channel hiccup must not lose it.
     if (result.status === 'waiting_human' && runner.cardIsNew) await this.channel?.sendCard(result.card);

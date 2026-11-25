@@ -1,6 +1,7 @@
 import { formatCardAsText } from '../channels/text';
 import type { Engine } from '../engine/engine';
-import { LessonCapError } from '../learning/lessons';
+import { LessonCapError, describeTension } from '../learning/lessons';
+import { addSpectrum, emptySpectrum, formatSpectrum, spectrumOf, spectrumTotal } from '../engine/spectrum';
 import type { HumanCard, RunResult } from '../types';
 
 /** What the Chief of Staff says back, plus any cards whose full text is already in that reply. */
@@ -138,7 +139,10 @@ export class ChiefOfStaff {
   private async status(): Promise<string> {
     const [cards, runs] = await Promise.all([this.engine.pending(), this.engine.store.listRuns()]);
     const active = runs.filter((r) => r.status === 'running' || r.status === 'waiting_human');
-    if (!cards.length && !active.length) return 'All clear: nothing is waiting on you and no flows are running.';
+    // Where the work went across all runs: how much stayed in code and a fast model, how much needed smart or you.
+    const spectrum = runs.reduce((sum, r) => addSpectrum(sum, spectrumOf(r)), emptySpectrum());
+    const where = spectrumTotal(spectrum) ? [`Handled by (${runs.length} run${runs.length === 1 ? '' : 's'}): ${formatSpectrum(spectrum)}`] : [];
+    if (!cards.length && !active.length) return ['All clear: nothing is waiting on you and no flows are running.', ...where].join('\n');
     const lines: string[] = [];
     if (cards.length) {
       lines.push(`Waiting on you (${cards.length}):`);
@@ -149,14 +153,17 @@ export class ChiefOfStaff {
       lines.push(`Running (${others.length}):`);
       for (const r of others) lines.push(`- ${r.flowId} (${r.id})`);
     }
-    return lines.join('\n');
+    return [...lines, ...where].join('\n');
   }
 
   private async lessons(): Promise<string> {
+    await this.engine.reviewLessons();
     const all = await this.engine.lessons.all();
     if (!all.length) return 'No lessons yet. Add one with "learn <scope>: <rule>", or a "Lesson: <rule>" line when you answer a card.';
     const ready = new Set((await this.engine.lessons.candidatesForCode()).map((l) => l.id));
-    const lines = all.map((l) => `- ${l.rule} (${l.scope}, x${l.count}${l.hardened ? ', in code' : ready.has(l.id) ? ', ready to harden into code' : ''})`);
+    const lines = all.map((l) => `- ${l.rule} (${l.scope}, x${l.count}${l.hardened ? ', in code' : ready.has(l.id) ? ', ready to harden into code' : ''}${l.evidence?.status === 'tension' ? ', in tension' : ''})`);
+    const tense = all.map((l) => describeTension(l)).filter((q): q is string => !!q);
+    if (tense.length) lines.push('', 'In tension with your latest replies:', ...tense.map((q) => `- ${q}`));
     if (ready.size) lines.push(`${ready.size} lesson(s) keep coming back: they are ready to become code checks.`);
     return lines.join('\n');
   }
@@ -222,7 +229,7 @@ export class ChiefOfStaff {
         summary: oneLine(c.summary, 200),
         options: c.options.map((o, i) => `${i + 1}) ${o.label}`),
       })),
-      lessons: lessons.slice(0, 20).map((l) => ({ scope: l.scope, rule: l.rule, count: l.count, hardened: l.hardened, readyToHarden: readyIds.has(l.id) })),
+      lessons: lessons.slice(0, 20).map((l) => ({ scope: l.scope, rule: l.rule, count: l.count, hardened: l.hardened, readyToHarden: readyIds.has(l.id), ...(l.evidence?.status ? { evidence: l.evidence.status } : {}) })),
       recentRuns: runs
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         .slice(0, 5)
