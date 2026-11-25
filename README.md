@@ -281,7 +281,7 @@ At runtime, call `buildSituationalContext({ channel, sender, isGroup, incoming, 
 
 A chief of staff does not only know your chats. It knows your mail, the sites you live in, the notes you are working on and what is on your calendar. v7 adds one local corpus for all of it, and two principles for how Rufus uses your past:
 
-1. **History is a recency-weighted baseline.** What you did last month says more about you than what you did two years ago, so every summary decays old activity (exponential half-life) instead of averaging it in.
+1. **History is a recency-weighted baseline.** What you did last month says more about you than what you did two years ago, so every summary decays old activity (exponential half-life, counted in observations rather than calendar days) instead of averaging it in.
 2. **Ideals beat habits.** People change, and do not always live up to what they believe. Rufus helps you live up to the lessons you *stated*; it does not freeze your rushed habits. But ideals do not overpower evolution either: when your latest replies keep contradicting a saved lesson, Rufus asks you about it instead of enforcing a stale rule forever.
 
 ### One corpus, four adapters (`rufus collect`)
@@ -308,19 +308,19 @@ Write your own: a `SourceAdapter` is `{ id, source, collect(options) => Promise<
 ### The Life Context Snapshot (`rufus context`)
 
 ```sh
-rufus context                       # recency-weighted snapshot of everything
+rufus context                       # observation-weighted snapshot of everything
 rufus context passport renewal      # $0 keyword lookup across chats, email, browsing, files, calendar
 rufus context invoice --source email --since 90 --limit 5 [--json] [--half-life 90]
 ```
 
-`buildCorpusSummary(items, { now, halfLifeDays = 90 })` is pure and deterministic. Every weight is `0.5^(age / halfLife)`, so last month outweighs two years ago without throwing anything away (`--half-life 0` turns weighting off). It reports:
+`buildCorpusSummary(items, { now, halfLifeObservations = 200 })` is pure and deterministic. By default every weight is `0.5^(rank / 200)`, where rank counts how many items are newer: Rufus follows the *evidence*, not a wall-clock timer, so a shift over 20 messages in two days (or six months) is picked up at the same pace. Pass `halfLifeDays` (or `--half-life 90`) for a calendar decay instead; `--half-life 0` turns weighting off. Upcoming events keep full weight. It reports:
 
 - **Volume by source**, raw and as a share of recent activity (`chat` comes from your seeded history).
-- **Top active domains and recurring portals** from browsing and email senders (common mail providers are ignored). Browser visit counts add up logarithmically so one page with thousands of visits cannot drown the rest. A portal is a domain you return to on 3+ days or 10+ times; a keyword-only guess labels it `banking`, `travel`, `scheduling` or `docs` when the name says so.
-- **Recently active projects and files**: folders of notes ranked by recent edits, and the latest files.
+- **Active sites & human contacts** and recurring portals from browsing and email senders (common mail providers are ignored). Machine-sent mail (`noreply`, `no-reply`, `donotreply`, `notifications`, `alerts`, `mailer-daemon`, and `accounts.*`, `business-updates.*`, `messages.*` senders) is kept out of them and listed on its own `Automated alerts / digests` line, so real portals and people are not buried. Browser visit counts add up logarithmically so one page with thousands of visits cannot drown the rest. A portal is a domain you return to on 3+ days or 10+ times; a keyword-only guess labels it `banking`, `travel`, `scheduling` or `docs` when the name says so.
+- **Recently active projects and files**: folders of notes ranked by recent edits, and the latest files. Generic subfolders (`outbox`, `inbox`, `docs`, `notes`, `private`, `tmp`, `src`, `data`, `assets`, `archive`, `drafts`, `logs`, date-stamped folders like `2026-11-27-*`) roll up into the nearest real project folder, so counts merge under one label (`project-a`, or `parent/project-a` if two projects share a name).
 - **Calendar commitments**: what is on in the next 7 days (recurring events are expanded from their `RRULE`, UTC) and the recurring commitments with their next occurrence.
 
-`queryCorpus(items, { query, sources?, sinceDays?, limit?, halfLifeDays? })` ranks by relevance times recency: title, tags, actor/domain, source and summary matches (exact or prefix), a phrase bonus, and a recency factor that softens but never erases an old exact match. It takes milliseconds, so call it from any flow's `ctx.code` step and hand the AI the exact context:
+`queryCorpus(items, { query, sources?, sinceDays?, limit?, halfLifeDays?, halfLifeObservations?, dedupeTitles?, maxPerTitle?, diversify? })` ranks by relevance times recency: title, tags, actor/domain, source and summary matches (exact or prefix), a phrase bonus, and a recency factor that softens but never erases an old exact match. Near-duplicates (same source and normalized title, like four `captions.txt` files from different date folders) are collapsed to `maxPerTitle` (default 2; `dedupeTitles: false` keeps all), and when several sources match, each gets a floor of the top results so one noisy source cannot fill every slot (`diversify: false` or a single `sources` entry gives a plain top-N). It takes milliseconds, so call it from any flow's `ctx.code` step and hand the AI the exact context:
 
 ```ts
 import { CorpusStore, queryCorpus } from './src';
@@ -332,9 +332,9 @@ const hits = await ctx.code('find-context', async () => {
 const draft = await ctx.ai('draft-reply', { prompt: '...', context: { incoming: ctx.input, related: hits } });
 ```
 
-### Recency in history analysis (default 180 days)
+### Recency in history analysis (default: observation rank, half-life 100 replies)
 
-`analyzeHistory`, `buildContactProfiles` and `buildSituationalContext` weight your replies by age: `halfLifeDays` (default **180**; `0` turns it off) or `halfLifeObservations` for a rank-based decay (the Nth newest reply weighs half the newest, however long those took, so a fast shift shows up at once). Rates, medians and the 90th percentile are weighted; reply counts and the contact-breadth gates stay raw, because evidence thresholds must count real replies. Weighted slices carry an `effectiveCount`. `rufus mine` adds a "Recency-weighted" line plus an "Evolving" note wherever your recent style differs from the all-time average, and an invariant that held for years but not across your latest 60 replies is demoted instead of being reported as a wall. Set it in `config.json` (`"mine": { "halfLifeDays": 120 }` or `halfLifeObservations`) or per run with `--half-life`. Conditional-logic contrast and tier thresholds still use raw counts.
+`analyzeHistory`, `buildContactProfiles` and `buildSituationalContext` weight your replies by observation rank: `halfLifeObservations` (default **100**: the Nth newest reply weighs half the newest, however long those took, so a fast shift shows up at once and a slow one at the same pace). Pass `halfLifeDays` (e.g. 180) for a calendar decay instead; `0` turns weighting off. Rates, medians and the 90th percentile are weighted; reply counts and the contact-breadth gates stay raw, because evidence thresholds must count real replies. Weighted slices carry an `effectiveCount`. `rufus mine` adds a "Recency-weighted" line plus an "Evolving" note wherever your recent style differs from the all-time average, and an invariant that held for years but not across your latest 60 replies is demoted instead of being reported as a wall. Set it in `config.json` (`"mine": { "halfLifeObservations": 60 }` or `halfLifeDays`) or per run with `--half-life`. Conditional-logic contrast and tier thresholds still use raw counts.
 
 ### Ideals over habits, and drift
 

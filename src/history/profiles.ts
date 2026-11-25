@@ -3,7 +3,7 @@
 import type { ReplyHabit } from './extract';
 import type { PriorMessage, HistoryPair } from './types';
 import { idealConstraints, detectLessonDrift, ruleOf, type DriftOptions, type LessonDrift, type LessonInput } from './ideals';
-import { rankWeights, recencyWeight, resolveHalfLife, toMs, type TimeLike } from '../recency';
+import { rankWeights, recencyWeight, resolveRecencyMode, toMs, type TimeLike } from '../recency';
 import { DEFAULT_BUCKETS, EMOJI, GREETING, OTHER_BUCKET, SIGN_OFF, classify, median, percentile, snippet, words, type IntentBucket } from './stats';
 
 // ---------- Vocabulary ----------
@@ -169,15 +169,17 @@ const delayMins = (p: HistoryPair): number | undefined => {
 
 // ---------- Recency weighting ----------
 
-/** Recent months matter more as your style evolves: a reply this many days old counts half as much as one from today. */
+/** Observation-rank decay is the default: the Nth newest reply counts half as much as the newest, however long those N took. */
+export const DEFAULT_HALF_LIFE_OBSERVATIONS = 100;
+/** Only used when `halfLifeDays` is passed explicitly (e.g. `--half-life 180`); there is no default calendar timer. */
 export const DEFAULT_HALF_LIFE_DAYS = 180;
 
 export interface WeightOptions {
   /** Reference "today" (default: now). Weights are only relative, so this rarely changes a result. */
   now?: TimeLike;
-  /** Time-based decay: days for a reply's weight to halve. Default 180; `0` or `Infinity` turns weighting off. */
+  /** Calendar decay, only when passed: days for a reply's weight to halve. `0` or `Infinity` turns weighting off. */
   halfLifeDays?: number;
-  /** Rank-based decay instead (wins over `halfLifeDays`): the Nth newest reply weighs half the newest, whether those N spanned two days or two months. Makes fast shifts show up immediately. */
+  /** Rank-based decay (the default, 100): the Nth newest reply weighs half the newest, whether those N spanned two days or two months. Wins over `halfLifeDays`. */
   halfLifeObservations?: number;
 }
 
@@ -186,14 +188,10 @@ const timeOf = (p: HistoryPair): string | undefined => p.incomingAt ?? p.replyAt
 /** Per-pair weight function for `pairs`, or `undefined` when weighting is off. Slices of the same pair objects share it. */
 export function pairWeigher(pairs: HistoryPair[], o: WeightOptions = {}): ((p: HistoryPair) => number) | undefined {
   const times = pairs.map(timeOf);
-  let weights: number[];
-  if (o.halfLifeObservations !== undefined && Number.isFinite(o.halfLifeObservations) && o.halfLifeObservations > 0) weights = rankWeights(times, o.halfLifeObservations);
-  else {
-    const half = resolveHalfLife(o.halfLifeDays, DEFAULT_HALF_LIFE_DAYS);
-    if (half === undefined) return undefined;
-    const now = toMs(o.now) ?? Date.now();
-    weights = times.map((t) => recencyWeight(t, now, half));
-  }
+  const mode = resolveRecencyMode(o, DEFAULT_HALF_LIFE_OBSERVATIONS);
+  if (mode.kind === 'off') return undefined;
+  const now = toMs(o.now) ?? Date.now();
+  const weights = mode.kind === 'rank' ? rankWeights(times, mode.half) : times.map((t) => recencyWeight(t, now, mode.half));
   const byPair = new Map(pairs.map((p, i) => [p, weights[i]!] as const));
   return (p) => byPair.get(p) ?? 1;
 }

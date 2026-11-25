@@ -84,16 +84,20 @@ export {
 } from './history/mine';
 export { evaluateHoldout, splitHoldout, formatHoldout, invariantHolds, type HoldoutEvaluation, type HoldoutResult, type HoldoutOptions, type HoldoutSplit } from './history/eval';
 export { conditionalAnalysis, describeTrigger, DEFAULT_CONTRAST, FEATURE_LABELS, LONG_REPLY_WORDS, type ConditionalRule, type ContrastOptions, type Trigger as ConditionalTrigger, type FeatureId, type BehaviorId } from './history/contrast';
-export { DEFAULT_HALF_LIFE_DAYS, pairWeigher, type WeightOptions, type IdealOverride } from './history/profiles';
+export { DEFAULT_HALF_LIFE_DAYS, DEFAULT_HALF_LIFE_OBSERVATIONS, pairWeigher, type WeightOptions, type IdealOverride } from './history/profiles';
 export { detectLessonDrift, checksForRule, idealConstraints, type DriftOptions, type LessonDrift, type LessonInput, type LessonCheck, type IdealConstraints } from './history/ideals';
 export type { RecencyReport } from './history/mine';
-export { recencyWeight, rankWeights, resolveHalfLife, type RecencyOptions } from './recency';
+export { recencyWeight, rankWeights, resolveHalfLife, resolveRecencyMode, type RecencyMode, type RecencyOptions } from './recency';
 export {
   ADAPTERS,
   CorpusStore,
   GENERIC_MAIL_DOMAINS,
   browserAdapter,
   buildCorpusSummary,
+  isAutomatedSender,
+  projectFolderOf,
+  GENERIC_FOLDERS,
+  DEFAULT_CORPUS_HALF_LIFE_OBSERVATIONS,
   calendarAdapter,
   categoryOfDomain,
   collectInto,
@@ -113,6 +117,7 @@ export {
   type CorpusHit,
   type CorpusItem,
   type CorpusSummary,
+  type AutomatedSender,
   type DomainActivity,
   type EmailOptions,
   type FilesOptions,

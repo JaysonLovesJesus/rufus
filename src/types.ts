@@ -195,9 +195,9 @@ export interface LearningConfig {
 
 /** `rufus mine` settings. */
 export interface MineConfig {
-  /** Recency weighting: days for a reply's weight to halve (default 180; 0 turns it off). Recent months describe you better than two-year-old habits. */
+  /** Calendar-based recency, only when set: days for a reply's weight to halve (0 turns weighting off). By default weighting follows observations instead (see `halfLifeObservations`). */
   halfLifeDays?: number;
-  /** Rank-based alternative (wins over `halfLifeDays`): the Nth newest reply weighs half the newest, however long those N took. */
+  /** Rank-based recency (the default, 100): the Nth newest reply weighs half the newest, however long those N took. Wins over `halfLifeDays`. */
   halfLifeObservations?: number;
   /** Named provider for `rufus mine --ai`. Default: `smart` if configured, else the default provider. */
   provider?: string;

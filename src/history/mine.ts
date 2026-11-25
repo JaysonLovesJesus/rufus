@@ -7,7 +7,8 @@ import type { HistoryPair } from './types';
 import { evaluateHoldout, formatHoldout, type HoldoutOptions, type HoldoutResult } from './eval';
 import { conditionalAnalysis, contrastOptionsFrom, isInvariantShare, type ConditionalRule, type ContrastOptions } from './contrast';
 import { chronological, detectLessonDrift, type DriftOptions, type LessonDrift, type LessonInput } from './ideals';
-import { DEFAULT_SLICE_GATE, RHYTHM_LABELS, TIERS, DEFAULT_HALF_LIFE_DAYS, buildContactProfiles, pairWeigher, sliceGateIssue, styleOf as styleOfPairs, type WeightOptions, tierBySender, channelName, chatKindOf, rhythmOf, type ClosenessTier, type ContactProfiles, type SliceGate, type StyleSlice } from './profiles';
+import { DEFAULT_SLICE_GATE, RHYTHM_LABELS, TIERS, DEFAULT_HALF_LIFE_OBSERVATIONS, buildContactProfiles, pairWeigher, sliceGateIssue, styleOf as styleOfPairs, type WeightOptions, tierBySender, channelName, chatKindOf, rhythmOf, type ClosenessTier, type ContactProfiles, type SliceGate, type StyleSlice } from './profiles';
+import { resolveRecencyMode } from '../recency';
 import { DEFAULT_BUCKETS, EMOJI, GREETING, OTHER_BUCKET, SHORT_WORDS, SIGN_OFF, classify, median, percentile, round1, snippet, tally, top, words, type IntentBucket } from './stats';
 
 export { DEFAULT_BUCKETS, OTHER_BUCKET, SHORT_WORDS, classify, type IntentBucket };
@@ -123,6 +124,13 @@ export interface RecencyReport {
 
 /** Situation-by-situation statistics (contact names left out; see `buildContactProfiles` for those). */
 export type ContextBreakdown = Omit<ContactProfiles, 'contacts'> & { contacts: number; gate: SliceGate };
+
+/** The header wording for the weighting in use, e.g. `observation-weighted, half-life 100 replies`. */
+function recencyBasis(opts: WeightOptions): string {
+  const m = resolveRecencyMode(opts, DEFAULT_HALF_LIFE_OBSERVATIONS);
+  if (m.kind === 'off') return 'unweighted';
+  return m.kind === 'days' ? `calendar-weighted, half-life ${Math.round(m.half)} days` : `observation-weighted, half-life ${m.half} replies`;
+}
 
 export interface AnalyzeOptions extends WeightOptions {
   /** Your stated ideals (saved lessons, or plain rule text) to check for drift against your latest replies. */
@@ -444,7 +452,7 @@ export function analyzeHistory(pairs: HistoryPair[], opts: AnalyzeOptions = {}):
     }
     const allTime = styleOfPairs(pairs);
     recency = {
-      basis: opts.halfLifeObservations !== undefined && opts.halfLifeObservations > 0 ? `rank half-life ${opts.halfLifeObservations} replies` : `half-life ${Math.round(opts.halfLifeDays ?? DEFAULT_HALF_LIFE_DAYS)} days`,
+      basis: recencyBasis(opts),
       effectivePairs: weighted.effectiveCount,
       weighted,
       allTime,

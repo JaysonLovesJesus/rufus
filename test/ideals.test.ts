@@ -73,15 +73,15 @@ describe('recency weighting', () => {
     expect(flat.effectiveCount).toBeUndefined();
   });
 
-  it('feeds profiles and the situational lookup, with 180 days as the default half-life', () => {
+  it('feeds profiles and the situational lookup (calendar decay when halfLifeDays is passed)', () => {
     const old = Array.from({ length: 30 }, (_, i) => pair('Hello! Sounds good, thanks so much for letting me know about the plan for this week.', 500 - i, { sender: 'Sam Rivera' }));
     const recent = Array.from({ length: 6 }, (_, i) => pair('ok', 5 - i, { sender: 'Sam Rivera' }));
     const all = [...old, ...recent];
-    const defaulted = buildContactProfiles(all, { now: NOW });
+    const defaulted = buildContactProfiles(all, { now: NOW, halfLifeDays: 180 });
     const off = buildContactProfiles(all, { now: NOW, halfLifeDays: 0 });
     expect(defaulted.contacts[0]!.style.medianWords).toBeLessThan(off.contacts[0]!.style.medianWords);
     expect(defaulted.contacts[0]!.style.medianWords).toBeLessThanOrEqual(3);
-    const ctx = buildSituationalContext(incoming, all, { now: NOW });
+    const ctx = buildSituationalContext(incoming, all, { now: NOW, halfLifeDays: 180 });
     expect(ctx.style!.medianWords).toBeLessThanOrEqual(3);
     expect(ctx.voiceHint).not.toContain('Ideals');
     const flat = buildSituationalContext(incoming, all, { now: NOW, halfLifeDays: 0 });
@@ -90,17 +90,39 @@ describe('recency weighting', () => {
     expect(ranked.style!.medianWords).toBeLessThanOrEqual(3);
   });
 
+  it('weights by observation rank by default, so a strategy shift inside 24 hours is followed at the pace of the evidence', () => {
+    const hour = 3_600_000;
+    // 30 long old-style replies, then 30 short ones, all within the same day: a wall-clock timer would see no difference.
+    const mk = (reply: string, k: number): HistoryPair => pair(reply, undefined, { incomingAt: new Date(NOW - 20 * hour + k * 0.1 * hour).toISOString(), replyAt: new Date(NOW - 20 * hour + k * 0.1 * hour + 1000).toISOString() });
+    const first = Array.from({ length: 30 }, (_, i) => mk('Hello! Sounds good, thanks so much for letting me know about the plan for this week.', i));
+    const last = Array.from({ length: 30 }, (_, i) => mk('ok', 30 + i));
+    const all = [...first, ...last];
+    const byDays = pairWeigher(all, { now: NOW, halfLifeDays: 90 })!;
+    expect(Math.min(...all.map(byDays)) / Math.max(...all.map(byDays))).toBeGreaterThan(0.99); // calendar decay is blind to it
+    const weigh = pairWeigher(all, { now: NOW })!; // default: observation rank, half-life 100 replies
+    expect(weigh(last.at(-1)!)).toBe(1);
+    expect(weigh(last[0]!)).toBeCloseTo(Math.pow(0.5, 29 / 100), 6);
+    expect(weigh(first[0]!)).toBeCloseTo(Math.pow(0.5, 59 / 100), 6);
+    expect(styleOf(all, weigh).greetingRate).toBeLessThan(styleOf(all).greetingRate); // the recent short style counts more
+    const sharp = pairWeigher(all, { now: NOW, halfLifeObservations: 5 })!;
+    expect(styleOf(all, sharp).medianWords).toBe(1);
+    expect(pairWeigher(all, { now: NOW, halfLifeDays: 0 })).toBeUndefined(); // explicit off still works
+    const a = analyzeHistory(all, { now: NOW });
+    expect(a.recency!.basis).toBe('observation-weighted, half-life 100 replies');
+  });
+
   it('analyzeHistory reports how you are evolving', () => {
     const old = Array.from({ length: 80 }, (_, i) => pair('no worries, see you then', 600 - i));
     const recent = Array.from({ length: 20 }, (_, i) => pair(`Hi! Great news, see you then! ${i}`, 20 - i * 0.5));
-    const a = analyzeHistory([...old, ...recent], { now: NOW });
+    expect(analyzeHistory([...old, ...recent], { now: NOW }).recency!.basis).toBe('observation-weighted, half-life 100 replies');
+    const a = analyzeHistory([...old, ...recent], { now: NOW, halfLifeObservations: 20 }); // a sharper pace shows the shift
     expect(a.recency).toBeDefined();
-    expect(a.recency!.basis).toBe('half-life 180 days');
     expect(a.recency!.weighted.exclamationRate).toBeGreaterThan(a.recency!.allTime.exclamationRate);
     expect(a.recency!.evolution.join(' ')).toMatch(/Exclamation rate: .* lately vs .* over all history \(up\)/);
-    expect(formatAnalysis(a).join('\n')).toContain('Recency-weighted (half-life 180 days');
+    expect(formatAnalysis(a).join('\n')).toContain('Recency-weighted (observation-weighted, half-life 20 replies');
     expect(analyzeHistory([...old, ...recent], { now: NOW, halfLifeDays: 0 }).recency).toBeUndefined();
-    expect(analyzeHistory([...old, ...recent], { now: NOW, halfLifeObservations: 10 }).recency!.basis).toBe('rank half-life 10 replies');
+    expect(analyzeHistory([...old, ...recent], { now: NOW, halfLifeObservations: 10 }).recency!.basis).toBe('observation-weighted, half-life 10 replies');
+    expect(analyzeHistory([...old, ...recent], { now: NOW, halfLifeDays: 180 }).recency!.basis).toBe('calendar-weighted, half-life 180 days');
   });
 
   it('demotes an "invariant" that held for years but not in your latest replies', () => {
@@ -241,7 +263,7 @@ describe('rufus mine surfaces drift from saved lessons', () => {
     const text = lines.join('\n');
     expect(text).toContain('Tension / drift');
     expect(text).toContain('Keep it as an aspiration, refine it into conditional logic, or retire it?');
-    expect(text).toContain('Recency-weighted (half-life 180 days');
+    expect(text).toContain('Recency-weighted (observation-weighted, half-life 100 replies');
     const saved = JSON.parse(await readFile(path.join(dir, 'lessons.json'), 'utf8')) as { lessons: unknown[] };
     expect(saved.lessons).toHaveLength(1);
   });

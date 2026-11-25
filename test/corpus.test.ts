@@ -12,7 +12,10 @@ import {
   corpusItemsFromPairs,
   emailAdapter,
   filesAdapter,
+  formatCorpusSummary,
   getAdapter,
+  isAutomatedSender,
+  projectFolderOf,
   queryCorpus,
   type CorpusItem,
 } from '../src';
@@ -444,7 +447,7 @@ const corpus: CorpusItem[] = [
 ];
 
 describe('buildCorpusSummary', () => {
-  const s = buildCorpusSummary(corpus, { now: NOW });
+  const s = buildCorpusSummary(corpus, { now: NOW, halfLifeDays: 90 }); // calendar decay, passed explicitly
 
   it('counts volume by source, raw and recency-weighted', () => {
     expect(Object.fromEntries(s.bySource.map((v) => [v.source, v.count]))).toEqual({ browser: 5, email: 2, file: 3, calendar: 4, chat: 1 });
@@ -496,7 +499,8 @@ describe('buildCorpusSummary', () => {
   });
 
   it('is deterministic and handles an empty corpus', () => {
-    expect(buildCorpusSummary(corpus, { now: NOW })).toEqual(s);
+    expect(buildCorpusSummary(corpus, { now: NOW, halfLifeDays: 90 })).toEqual(s);
+    expect(buildCorpusSummary(corpus, { now: NOW })).toEqual(buildCorpusSummary(corpus, { now: NOW }));
     expect(buildCorpusSummary([], { now: NOW })).toMatchObject({ total: 0, bySource: [], domains: [], calendar: { upcoming: [], recurring: [] } });
   });
 });
@@ -615,7 +619,7 @@ describe('rufus collect / rufus context', () => {
     await run('collect', 'browser', path.join(src, 'history.json'));
 
     const snapshot = await run('context');
-    expect(snapshot).toContain('Life Context Snapshot (recency-weighted, half-life 90 days): 4 item(s)');
+    expect(snapshot).toContain('Life Context Snapshot (observation-weighted, half-life 200 items): 4 item(s)');
     expect(snapshot).toMatch(/chat: 1/);
     expect(snapshot).toContain('bank.example.org');
     expect(snapshot).toContain('[banking]');
@@ -629,5 +633,168 @@ describe('rufus collect / rufus context', () => {
     expect((JSON.parse(await run('context', '--json', '--source', 'browser')) as { total: number }).total).toBe(1);
     await expect(run('context', '--half-life', 'abc')).rejects.toThrow(/--half-life/);
     expect(await run('context', '--half-life', '0')).toContain('unweighted');
+  });
+});
+
+// ---------- v7.1: observation recency, project grouping, automated mail, diverse queries ----------
+
+describe('observation-rank recency in the corpus', () => {
+  const HOUR = 3_600_000;
+  it('adapts at the evidence pace by default, even when every timestamp falls inside 24 hours', () => {
+    const base = Date.parse(NOW) - 20 * HOUR;
+    const stamp = (k: number): string => new Date(base + k * 0.1 * HOUR).toISOString();
+    const old = Array.from({ length: 40 }, (_, k) => item({ id: `old${k}`, source: 'browser', kind: 'visit', domain: 'oldhabit.example.org', timestamp: stamp(k), summary: 'old' }));
+    const fresh = Array.from({ length: 40 }, (_, k) => item({ id: `new${k}`, source: 'browser', kind: 'visit', domain: 'newfocus.example.org', timestamp: stamp(40 + k), summary: 'new' }));
+    const all = [...old, ...fresh];
+    const byObs = buildCorpusSummary(all, { now: NOW, halfLifeObservations: 10 });
+    expect(byObs.halfLifeObservations).toBe(10);
+    expect(byObs.domains[0]!.domain).toBe('newfocus.example.org');
+    expect(byObs.domains[0]!.weight).toBeGreaterThan(byObs.domains[1]!.weight * 5);
+    // A calendar timer cannot tell them apart: same day, near-equal weights.
+    const byDays = buildCorpusSummary(all, { now: NOW, halfLifeDays: 90 });
+    expect(byDays.domains[0]!.weight / byDays.domains[1]!.weight).toBeLessThan(1.05);
+    // The default is observation rank (200): a recent shift already tilts the picture.
+    const def = buildCorpusSummary(all, { now: NOW });
+    expect(def.halfLifeObservations).toBe(200);
+    expect(def.halfLifeDays).toBeUndefined();
+    expect(def.domains[0]!.domain).toBe('newfocus.example.org');
+    expect(formatCorpusSummary(def)[0]).toContain('observation-weighted, half-life 200 items');
+    expect(formatCorpusSummary(buildCorpusSummary(all, { now: NOW, halfLifeDays: 90 }))[0]).toContain('recency-weighted, half-life 90 days');
+    expect(buildCorpusSummary(all, { now: NOW, halfLifeDays: 0 }).halfLifeObservations).toBeUndefined();
+  });
+
+  it('upcoming events keep full weight and take no rank from past evidence', () => {
+    const items = [
+      item({ id: 'past', source: 'file', kind: 'note', path: '/w/proj/a.md', timestamp: ago(1), summary: 'a' }),
+      item({ id: 'future', source: 'calendar', kind: 'event', title: 'Next week', timestamp: '2026-06-20T09:00:00.000Z', summary: 'e', metadata: { recurring: false } }),
+    ];
+    const s = buildCorpusSummary(items, { now: NOW });
+    expect(s.bySource.find((v) => v.source === 'file')!.weight).toBe(1);
+    expect(s.bySource.find((v) => v.source === 'calendar')!.weight).toBe(1);
+  });
+
+  it('queryCorpus ranks recency by observation too, and still lets a perfect old match beat a weak new one', () => {
+    const items = [
+      item({ id: 'a', source: 'file', kind: 'note', title: 'Budget plan', timestamp: ago(400), summary: 'budget' }),
+      item({ id: 'b', source: 'file', kind: 'note', title: 'Budget plan v2', timestamp: ago(399), summary: 'budget' }),
+    ];
+    const hits = queryCorpus(items, { query: 'budget', now: NOW, halfLifeObservations: 1 });
+    expect(hits.map((h) => h.item.id)).toEqual(['b', 'a']);
+    expect(hits[0]!.score).toBeGreaterThan(hits[1]!.score);
+  });
+});
+
+describe('smart project grouping', () => {
+  it('climbs out of generic and date-stamped subfolders to the real project', () => {
+    expect(projectFolderOf('/w/project-a/outbox/2026-11-27')).toBe('/w/project-a');
+    expect(projectFolderOf('/w/project-a/docs')).toBe('/w/project-a');
+    expect(projectFolderOf('/w/project-a/2026-11-27-session')).toBe('/w/project-a');
+    expect(projectFolderOf('/w/project-a/private/drafts')).toBe('/w/project-a');
+    expect(projectFolderOf('/w/project-a')).toBe('/w/project-a');
+    expect(projectFolderOf('/outbox')).toBe('/outbox'); // nothing meaningful above: keep what we have
+  });
+
+  it('merges counts for the same real folder, never lists a generic name, and disambiguates equal names', () => {
+    const f = (id: string, p: string, d: number): CorpusItem => item({ id, source: 'file', kind: 'note', path: p, title: path.basename(p), timestamp: ago(d), summary: id });
+    const items = [
+      f('1', '/w/project-a/outbox/2026-11-27/captions.txt', 1),
+      f('2', '/w/project-a/outbox/2026-11-26/captions.txt', 2),
+      f('3', '/w/project-a/docs/readme.md', 3),
+      f('4', '/w/project-a/private/notes.md', 3),
+      f('5', '/w/project-a/plan.md', 4),
+      f('6', '/w/project-b/tmp/scratch.md', 2),
+      f('7', '/other/project-b/src/main.md', 5),
+    ];
+    const s = buildCorpusSummary(items, { now: NOW, topN: 10 });
+    const names = s.projects.map((p) => p.name);
+    expect(names).not.toContain('outbox');
+    expect(names).not.toContain('docs');
+    expect(names).not.toContain('private');
+    expect(names).not.toContain('tmp');
+    expect(names.some((n) => /^\d{4}-/.test(n))).toBe(false);
+    const a = s.projects.find((p) => p.path === '/w/project-a')!;
+    expect(a).toMatchObject({ name: 'project-a', files: 5 });
+    expect(s.projects.filter((p) => p.path.endsWith('project-a'))).toHaveLength(1);
+    // Two different real folders both called project-b get a parent prefix.
+    expect(names).toContain('w/project-b');
+    expect(names).toContain('other/project-b');
+    expect(formatCorpusSummary(s).join('\n')).toContain('project-a: 5 file(s)');
+  });
+});
+
+describe('automated alerts are kept apart from sites and people', () => {
+  const mail = (id: string, from: string, domain: string, d = 1): CorpusItem =>
+    item({ id, source: 'email', kind: 'received', domain, actor: from.split('@')[0], timestamp: ago(d), summary: id, metadata: { from } });
+
+  it('detects noreply-style addresses and notification hosts, only for email', () => {
+    expect(isAutomatedSender(mail('a', 'noreply@bank.example.org', 'bank.example.org'))).toBe(true);
+    expect(isAutomatedSender(mail('b', 'no-reply@shop.example.org', 'shop.example.org'))).toBe(true);
+    expect(isAutomatedSender(mail('c', 'donotreply@x.example.org', 'x.example.org'))).toBe(true);
+    expect(isAutomatedSender(mail('d', 'notifications@app.example.org', 'app.example.org'))).toBe(true);
+    expect(isAutomatedSender(mail('e', 'alerts@bank.example.org', 'bank.example.org'))).toBe(true);
+    expect(isAutomatedSender(mail('f', 'mailer-daemon@mail.example.org', 'mail.example.org'))).toBe(true);
+    expect(isAutomatedSender(mail('g', 'team@accounts.example.org', 'accounts.example.org'))).toBe(true);
+    expect(isAutomatedSender(mail('h', 'x@business-updates.example.org', 'business-updates.example.org'))).toBe(true);
+    expect(isAutomatedSender(mail('i', 'x@messages.example.org', 'messages.example.org'))).toBe(true);
+    expect(isAutomatedSender(mail('j', 'priya@travel.example.org', 'travel.example.org'))).toBe(false);
+    expect(isAutomatedSender(item({ id: 'k', source: 'browser', kind: 'visit', domain: 'accounts.example.org', timestamp: ago(1), summary: 'k' }))).toBe(false);
+  });
+
+  it('lists real portals and humans cleanly, with automated senders on their own line', () => {
+    const items = [
+      item({ id: 'v1', source: 'browser', kind: 'visit', domain: 'bank.example.org', timestamp: ago(1), metadata: { visitCount: 5 }, summary: 'bank' }),
+      mail('h1', 'priya@travel.example.org', 'travel.example.org', 1),
+      mail('n1', 'noreply@bank.example.org', 'bank.example.org', 1),
+      mail('n2', 'alerts@bank.example.org', 'bank.example.org', 2),
+      mail('n3', 'no-reply@accounts.example.org', 'accounts.example.org', 1),
+      mail('n4', 'noreply@accounts.example.org', 'accounts.example.org', 3),
+      mail('n5', 'noreply@accounts.example.org', 'accounts.example.org', 4),
+    ];
+    const s = buildCorpusSummary(items, { now: NOW });
+    expect(s.domains.map((d) => d.domain).sort()).toEqual(['bank.example.org', 'travel.example.org']);
+    expect(s.domains.find((d) => d.domain === 'bank.example.org')).toMatchObject({ count: 5, sources: ['browser'] }); // alerts did not inflate the portal
+    expect(s.automated.map((a) => [a.domain, a.count])).toEqual([['accounts.example.org', 3], ['bank.example.org', 2]]);
+    const text = formatCorpusSummary(s).join('\n');
+    expect(text).toContain('Active sites & human contacts:');
+    expect(text).toContain('Automated alerts / digests: accounts.example.org (3), bank.example.org (2).');
+    const sites = text.slice(text.indexOf('Active sites'), text.indexOf('Automated alerts'));
+    expect(sites).not.toContain('accounts.example.org');
+  });
+});
+
+describe('queryCorpus dedupes near-duplicates and diversifies sources', () => {
+  const caption = (k: number): CorpusItem => item({ id: `cap${k}`, source: 'file', kind: 'note', title: 'captions.txt', path: `/w/p/outbox/2026-11-2${k}/captions.txt`, timestamp: ago(k), summary: 'captions for the launch video', tags: ['txt'] });
+  const items: CorpusItem[] = [
+    ...[1, 2, 3, 4, 5].map(caption),
+    item({ id: 'chat1', source: 'chat', kind: 'exchange', actor: 'Sam Rivera', timestamp: ago(30), summary: 'Sam Rivera: can you send the captions? → sent' }),
+    item({ id: 'mail1', source: 'email', kind: 'received', title: 'Captions for review', actor: 'Priya', timestamp: ago(40), summary: 'please review the captions' }),
+    item({ id: 'cal1', source: 'calendar', kind: 'event', title: 'Captions review', timestamp: ago(50), summary: 'sync', metadata: { recurring: false } }),
+    item({ id: 'web1', source: 'browser', kind: 'visit', title: 'Captions style guide', domain: 'docs.example.org', timestamp: ago(60), summary: 'guide' }),
+  ];
+
+  it('collapses same-source same-title items to maxPerTitle (default 2) unless opted out', () => {
+    const ids = (o = {}) => queryCorpus(items, { query: 'captions', now: NOW, sources: ['file'], ...o }).map((h) => h.item.id);
+    expect(ids()).toHaveLength(2);
+    expect(ids({ maxPerTitle: 3 })).toHaveLength(3);
+    expect(ids({ dedupeTitles: false })).toHaveLength(5);
+    // Different titles are not duplicates.
+    expect(queryCorpus([...items, item({ id: 'x', source: 'file', kind: 'note', title: 'captions-notes.txt', timestamp: ago(1), summary: 'captions' })], { query: 'captions', now: NOW, sources: ['file'] })).toHaveLength(3);
+  });
+
+  it('does not let five identical files crowd out matching chats, emails, events and visits', () => {
+    const hits = queryCorpus(items, { query: 'captions', now: NOW, limit: 5 });
+    const found = new Set(hits.map((h) => h.item.source));
+    expect(found).toEqual(new Set(['file', 'chat', 'email', 'calendar', 'browser']));
+    expect(hits.filter((h) => h.item.source === 'file').length).toBeLessThanOrEqual(2);
+    // Results stay sorted by score.
+    expect(hits.map((h) => h.score)).toEqual([...hits.map((h) => h.score)].sort((a, b) => b - a));
+    // Without dedupe and diversity, the files take every slot.
+    const crowded = queryCorpus(items, { query: 'captions', now: NOW, limit: 5, dedupeTitles: false, diversify: false });
+    expect(crowded.every((h) => h.item.source === 'file')).toBe(true);
+  });
+
+  it('keeps a plain top-N when restricted to one source or when only one source matches', () => {
+    expect(queryCorpus(items, { query: 'captions', now: NOW, sources: ['chat'], limit: 5 }).map((h) => h.item.id)).toEqual(['chat1']);
+    expect(queryCorpus(items.filter((i) => i.source === 'file'), { query: 'captions', now: NOW, limit: 5, dedupeTitles: false }).map((h) => h.item.id)).toHaveLength(5);
   });
 });

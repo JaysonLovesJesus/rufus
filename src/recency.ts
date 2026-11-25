@@ -53,3 +53,19 @@ export function rankWeights(times: TimeLike[], halfLifeObservations: number): nu
   });
   return out;
 }
+
+export type RecencyMode = { kind: 'off' } | { kind: 'days'; half: number } | { kind: 'rank'; half: number };
+
+/**
+ * Pick the weighting mode. Evidence pace is the default: a valid `halfLifeObservations` wins, then an explicitly passed
+ * `halfLifeDays` (`0`/`Infinity` = off), else `defaultObservations`. A wall-clock timer only applies when asked for.
+ */
+export function resolveRecencyMode(opts: { halfLifeDays?: number; halfLifeObservations?: number }, defaultObservations: number): RecencyMode {
+  const obs = opts.halfLifeObservations;
+  if (obs !== undefined && Number.isFinite(obs) && obs > 0) return { kind: 'rank', half: obs };
+  if (opts.halfLifeDays !== undefined) {
+    const half = resolveHalfLife(opts.halfLifeDays, opts.halfLifeDays);
+    return half === undefined ? { kind: 'off' } : { kind: 'days', half };
+  }
+  return { kind: 'rank', half: defaultObservations };
+}

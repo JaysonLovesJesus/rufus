@@ -2,7 +2,7 @@
 // ways to read it. Everything here is deterministic arithmetic over local data: $0, no AI, no network, milliseconds.
 import path from 'node:path';
 import type { HistoryPair } from '../history/types';
-import { DAY_MS, recencyWeight, resolveHalfLife, toMs, type TimeLike } from '../recency';
+import { DAY_MS, rankWeights, recencyWeight, resolveRecencyMode, toMs, type TimeLike } from '../recency';
 import { browserAdapter } from './adapters/browser';
 import { calendarAdapter } from './adapters/calendar';
 import { emailAdapter } from './adapters/email';
@@ -72,6 +72,31 @@ export function corpusItemsFromPairs(pairs: HistoryPair[]): CorpusItem[] {
   });
 }
 
+// ---------- Recency ----------
+
+/** Corpus items weigh by observation rank by default: the Nth newest item counts half as much as the newest. */
+export const DEFAULT_CORPUS_HALF_LIFE_OBSERVATIONS = 200;
+
+interface WeightKnobs {
+  halfLifeDays?: number;
+  halfLifeObservations?: number;
+}
+
+/**
+ * Per-item weight. Default is evidence pace (`halfLifeObservations`, 200): ten messages in two days move the picture as much
+ * as ten over six months. `halfLifeDays` (explicit only) switches to a calendar timer; `0` turns weighting off. Future and
+ * unreadable timestamps (upcoming events) count fully and take no rank.
+ */
+function corpusWeigher(items: CorpusItem[], nowMs: number, o: WeightKnobs): { weigh: (i: CorpusItem) => number; mode: ReturnType<typeof resolveRecencyMode> } {
+  const mode = resolveRecencyMode(o, DEFAULT_CORPUS_HALF_LIFE_OBSERVATIONS);
+  if (mode.kind === 'off') return { weigh: () => 1, mode };
+  if (mode.kind === 'days') return { weigh: (i) => recencyWeight(i.timestamp, nowMs, mode.half), mode };
+  const past = items.filter((i) => (toMs(i.timestamp) ?? Infinity) <= nowMs);
+  const weights = rankWeights(past.map((i) => i.timestamp), mode.half);
+  const byItem = new Map(past.map((i, k) => [i, weights[k]!] as const));
+  return { weigh: (i) => byItem.get(i) ?? 1, mode };
+}
+
 // ---------- Life context snapshot ----------
 
 /** Mail providers say nothing about which service you rely on, so they are not "portals". */
@@ -91,6 +116,54 @@ export function categoryOfDomain(domain: string): DomainCategory | undefined {
   const tokens = domain.toLowerCase().split(/[.-]/);
   for (const [category, words] of CATEGORY_WORDS) if (words.some((w) => tokens.some((t) => (w.length >= 5 ? t.includes(w) : t === w)))) return category;
   return undefined;
+}
+
+const AUTOMATED_LOCAL = /^(?:no[-_.]?reply|do[-_.]?not[-_.]?reply|notifications?|alerts?|mailer[-_.]?daemon|postmaster|bounces?)(?:[-_.+].*)?$/i;
+const AUTOMATED_HOST_LABELS = new Set(['accounts', 'business-updates', 'messages', 'notifications', 'notification', 'alerts', 'noreply', 'no-reply']);
+
+/**
+ * Deterministic: is this email from a machine (security notice, digest, receipt robot) rather than a person or a portal you
+ * use? Looks at the sender address (`noreply`, `no-reply`, `donotreply`, `notifications`, `alerts`, `mailer-daemon`) and at
+ * sender domains that start with `accounts.`, `business-updates.`, `messages.`.
+ */
+export function isAutomatedSender(item: Pick<CorpusItem, 'source' | 'actor' | 'domain' | 'metadata'>): boolean {
+  if (item.source !== 'email') return false;
+  const from = (item.metadata as { from?: unknown } | undefined)?.from;
+  const address = typeof from === 'string' ? from : item.actor?.includes('@') ? item.actor : undefined;
+  const local = address?.split('@')[0]?.trim();
+  if (local && AUTOMATED_LOCAL.test(local)) return true;
+  const parts = item.domain?.toLowerCase().split('.') ?? [];
+  return parts.length >= 3 && AUTOMATED_HOST_LABELS.has(parts[0]!);
+}
+
+/** Folder names that say nothing about which project a file belongs to. */
+export const GENERIC_FOLDERS = new Set(['outbox', 'inbox', 'docs', 'doc', 'notes', 'private', 'tmp', 'temp', 'src', 'data', 'assets', 'archive', 'drafts', 'logs']);
+const DATE_FOLDER = /^\d{4}-\d{2}-\d{2}(?:[-_T ].*)?$/;
+const isGenericFolder = (name: string): boolean => GENERIC_FOLDERS.has(name.toLowerCase()) || DATE_FOLDER.test(name);
+
+/** The nearest folder at or above `dir` that names a project; `dir` itself when everything above is generic. */
+export function projectFolderOf(dir: string): string {
+  let cur = dir;
+  while (isGenericFolder(path.basename(cur))) {
+    const up = path.dirname(cur);
+    if (up === cur || !path.basename(up)) return dir;
+    cur = up;
+  }
+  return cur;
+}
+
+/** Shortest trailing path (`name`, then `parent/name`, ...) that tells every folder apart. */
+function uniqueLabels(dirs: string[]): Map<string, string> {
+  const segs = new Map(dirs.map((d) => [d, d.split(/[\\/]+/).filter(Boolean)] as const));
+  const out = new Map<string, string>();
+  for (const d of dirs) {
+    const parts = segs.get(d)!;
+    let n = 1;
+    const label = (k: number): string => parts.slice(-k).join('/') || d;
+    while (n < parts.length && dirs.some((o) => o !== d && label(n) === segs.get(o)!.slice(-n).join('/'))) n++;
+    out.set(d, label(n));
+  }
+  return out;
 }
 
 export interface SourceVolume {
@@ -120,12 +193,20 @@ export interface DomainActivity {
 }
 
 export interface ProjectActivity {
-  /** The folder's name. */
+  /** A short, unambiguous label (`project-a`, or `parent/project-a` when two projects share a name). */
   name: string;
   path: string;
   files: number;
   weight: number;
   lastModified: string;
+}
+
+export interface AutomatedSender {
+  /** Sender domain of machine-sent mail (notifications, alerts, digests). */
+  domain: string;
+  count: number;
+  weight: number;
+  lastSeen: string;
 }
 
 export interface UpcomingCommitment {
@@ -149,12 +230,17 @@ export interface RecurringCommitment {
 
 export interface CorpusSummary {
   now: string;
+  /** Set only when a calendar half-life was passed explicitly. */
   halfLifeDays?: number;
+  /** Set when weighting follows observation rank (the default, 200 items). */
+  halfLifeObservations?: number;
   total: number;
   span?: { from: string; to: string };
   bySource: SourceVolume[];
-  /** Most active websites and email senders, recency-weighted. */
+  /** Most active websites and human email senders, recency-weighted (automated mail is listed apart in `automated`). */
   domains: DomainActivity[];
+  /** Notification / alert / digest senders, kept out of `domains` so real sites and people are not buried. */
+  automated: AutomatedSender[];
   /** The `domains` you keep coming back to. */
   portals: DomainActivity[];
   /** Folders of notes you have been working in lately. */
@@ -166,8 +252,10 @@ export interface CorpusSummary {
 export interface SummaryOptions {
   /** Reference "today". Default: now. */
   now?: TimeLike;
-  /** Days for an item's weight to halve. Default 90, so this quarter outweighs two years ago. `0` or `Infinity` turns weighting off. */
+  /** Calendar decay, used only when passed: days for an item's weight to halve. `0` or `Infinity` turns weighting off. */
   halfLifeDays?: number;
+  /** Rank decay (the default, 200): the Nth newest item weighs half the newest, however long those N took. Wins over `halfLifeDays`. */
+  halfLifeObservations?: number;
   /** How many domains / projects / files to list. Default 8. */
   topN?: number;
   /** How far ahead "upcoming" looks. Default 7 days. */
@@ -176,22 +264,21 @@ export interface SummaryOptions {
   ignoreDomains?: string[];
 }
 
-export const DEFAULT_CORPUS_HALF_LIFE_DAYS = 90;
 const r2 = (n: number): number => Math.round(n * 100) / 100;
 const iso = (ms: number): string => new Date(ms).toISOString();
 
 /**
- * A Life Context Snapshot: what the corpus says about your life *lately*. Every number is recency-weighted
- * (exponential decay, `halfLifeDays` default 90), so last month outweighs two years ago, yet nothing is thrown away.
+ * A Life Context Snapshot: what the corpus says about your life *lately*. Every number is recency-weighted by observation
+ * rank (exponential decay, `halfLifeObservations` default 200), so what you did in your latest items outweighs old history at the
+ * pace of the evidence, not a wall-clock timer, yet nothing is thrown away. Pass `halfLifeDays` for a calendar decay instead.
  * Pure and deterministic for a given `now`.
  */
 export function buildCorpusSummary(items: CorpusItem[], opts: SummaryOptions = {}): CorpusSummary {
   const nowMs = toMs(opts.now) ?? Date.now();
-  const half = resolveHalfLife(opts.halfLifeDays, DEFAULT_CORPUS_HALF_LIFE_DAYS);
+  const { weigh: w, mode } = corpusWeigher(items, nowMs, opts);
   const topN = Math.max(1, Math.floor(opts.topN ?? 8));
   const horizonDays = opts.horizonDays ?? 7;
   const ignore = new Set((opts.ignoreDomains ?? GENERIC_MAIL_DOMAINS).map((d) => d.toLowerCase()));
-  const w = (i: CorpusItem): number => recencyWeight(i.timestamp, nowMs, half);
 
   const stamps = items.map((i) => i.timestamp).sort();
   const totalWeight = items.reduce((s, i) => s + w(i), 0);
@@ -207,8 +294,17 @@ export function buildCorpusSummary(items: CorpusItem[], opts: SummaryOptions = {
 
   // Domains: where you browse and who emails you, weighted by recency.
   const doms = new Map<string, { weight: number; count: number; sources: Set<string>; days: Set<string>; last: string }>();
+  const autos = new Map<string, { weight: number; count: number; last: string }>();
   for (const i of items) {
     if (!i.domain || (i.source !== 'browser' && i.source !== 'email') || (i.source === 'email' && ignore.has(i.domain))) continue;
+    if (isAutomatedSender(i)) {
+      const a = autos.get(i.domain) ?? { weight: 0, count: 0, last: i.timestamp };
+      a.weight += w(i);
+      a.count++;
+      if (i.timestamp > a.last) a.last = i.timestamp;
+      autos.set(i.domain, a);
+      continue;
+    }
     const visits = i.source === 'browser' ? Math.max(1, Number((i.metadata as { visitCount?: unknown } | undefined)?.visitCount) || 1) : 1;
     const e = doms.get(i.domain) ?? { weight: 0, count: 0, sources: new Set<string>(), days: new Set<string>(), last: i.timestamp };
     e.weight += w(i) * (1 + Math.log(visits));
@@ -234,19 +330,25 @@ export function buildCorpusSummary(items: CorpusItem[], opts: SummaryOptions = {
     })
     .sort((a, b) => b.weight - a.weight || a.domain.localeCompare(b.domain));
 
+  const automated: AutomatedSender[] = [...autos.entries()]
+    .map(([domain, a]) => ({ domain, count: a.count, weight: r2(a.weight), lastSeen: a.last }))
+    .sort((a, b) => b.weight - a.weight || a.domain.localeCompare(b.domain))
+    .slice(0, topN);
+
   // Files and projects.
   const files = items.filter((i) => i.source === 'file' && i.path);
   const folders = new Map<string, { files: number; weight: number; last: string }>();
   for (const f of files) {
-    const dir = path.dirname(f.path!);
+    const dir = projectFolderOf(path.dirname(f.path!));
     const e = folders.get(dir) ?? { files: 0, weight: 0, last: f.timestamp };
     e.files++;
     e.weight += w(f);
     if (f.timestamp > e.last) e.last = f.timestamp;
     folders.set(dir, e);
   }
+  const labels = uniqueLabels([...folders.keys()]);
   const projects: ProjectActivity[] = [...folders.entries()]
-    .map(([dir, e]) => ({ name: path.basename(dir) || dir, path: dir, files: e.files, weight: r2(e.weight), lastModified: e.last }))
+    .map(([dir, e]) => ({ name: labels.get(dir) ?? (path.basename(dir) || dir), path: dir, files: e.files, weight: r2(e.weight), lastModified: e.last }))
     .sort((a, b) => b.weight - a.weight || a.path.localeCompare(b.path))
     .slice(0, topN);
   const recentFiles = [...files]
@@ -256,13 +358,15 @@ export function buildCorpusSummary(items: CorpusItem[], opts: SummaryOptions = {
 
   return {
     now: iso(nowMs),
-    ...(half !== undefined ? { halfLifeDays: half } : {}),
+    ...(mode.kind === 'days' ? { halfLifeDays: mode.half } : {}),
+    ...(mode.kind === 'rank' ? { halfLifeObservations: mode.half } : {}),
     total: items.length,
     ...(stamps.length ? { span: { from: stamps[0]!, to: stamps.at(-1)! } } : {}),
     bySource: [...bySource.entries()]
       .map(([source, e]) => ({ source, count: e.count, weight: r2(e.weight), share: totalWeight ? Math.round((e.weight / totalWeight) * 1000) / 1000 : 0, newest: e.newest }))
       .sort((a, b) => b.weight - a.weight || a.source.localeCompare(b.source)),
     domains: domains.slice(0, topN),
+    automated,
     portals: domains.filter((d) => d.recurring).slice(0, topN),
     projects,
     recentFiles,
@@ -304,8 +408,16 @@ export interface QueryOptions {
   /** Default 10. */
   limit?: number;
   now?: TimeLike;
-  /** Recency half-life in days. Default 90. `0` or `Infinity` ranks by relevance alone. */
+  /** Calendar recency decay, used only when passed (days to halve). `0` or `Infinity` ranks by relevance alone. */
   halfLifeDays?: number;
+  /** Rank decay (the default, 200): the Nth newest candidate weighs half the newest. Wins over `halfLifeDays`. */
+  halfLifeObservations?: number;
+  /** Near-duplicates (same source, same normalized title) are collapsed to `maxPerTitle`. Default true; `false` keeps every one. */
+  dedupeTitles?: boolean;
+  /** How many items with the same source and title may appear. Default 2. */
+  maxPerTitle?: number;
+  /** When several sources match, guarantee each a share of the top results so one noisy source cannot fill them all. Default true. */
+  diversify?: boolean;
 }
 
 export interface CorpusHit {
@@ -337,19 +449,19 @@ const FIELDS: Array<[(i: CorpusItem) => string, number]> = [
  */
 export function queryCorpus(items: CorpusItem[], opts: QueryOptions = {}): CorpusHit[] {
   const nowMs = toMs(opts.now) ?? Date.now();
-  const half = resolveHalfLife(opts.halfLifeDays, DEFAULT_CORPUS_HALF_LIFE_DAYS);
   const limit = Math.max(1, Math.floor(opts.limit ?? 10));
   const sources = opts.sources?.length ? new Set(opts.sources.map((s) => (s === 'files' ? 'file' : s))) : undefined;
   const since = opts.sinceDays !== undefined ? nowMs - opts.sinceDays * DAY_MS : undefined;
   const terms = [...new Set(words(opts.query ?? '').filter((t) => !STOP.has(t)))];
   const phrase = terms.length > 1 ? terms.join(' ') : undefined;
 
+  // Recency is ranked among the candidates you asked about (their sources and period), at the pace of the evidence.
+  const candidates = items.filter((item) => (!sources || sources.has(item.source)) && (since === undefined || Date.parse(item.timestamp) >= since));
+  const { weigh } = corpusWeigher(candidates, nowMs, opts);
+
   const hits: CorpusHit[] = [];
-  for (const item of items) {
-    if (sources && !sources.has(item.source)) continue;
-    const at = Date.parse(item.timestamp);
-    if (since !== undefined && at < since) continue;
-    const recency = recencyWeight(at, nowMs, half);
+  for (const item of candidates) {
+    const recency = weigh(item);
     if (!terms.length) {
       hits.push({ item, score: recency, matched: [] });
       continue;
@@ -374,7 +486,43 @@ export function queryCorpus(items: CorpusItem[], opts: QueryOptions = {}): Corpu
     if (phrase && words(`${item.title ?? ''} ${item.summary}`).join(' ').includes(phrase)) relevance += 2;
     hits.push({ item, score: Math.round(relevance * (0.3 + 0.7 * recency) * 1000) / 1000, matched });
   }
-  return hits.sort((a, b) => b.score - a.score || b.item.timestamp.localeCompare(a.item.timestamp) || a.item.id.localeCompare(b.item.id)).slice(0, limit);
+  let ranked = hits.sort((a, b) => b.score - a.score || b.item.timestamp.localeCompare(a.item.timestamp) || a.item.id.localeCompare(b.item.id));
+
+  if (opts.dedupeTitles !== false) {
+    const maxPer = Math.max(1, Math.floor(opts.maxPerTitle ?? 2));
+    const seen = new Map<string, number>();
+    ranked = ranked.filter((h) => {
+      const title = normalizeTitle(h.item.title);
+      if (!title) return true;
+      const key = `${h.item.source}\u0000${title}`;
+      const n = (seen.get(key) ?? 0) + 1;
+      seen.set(key, n);
+      return n <= maxPer;
+    });
+  }
+  if (opts.diversify === false || sources?.size === 1) return ranked.slice(0, limit);
+  return diversify(ranked, limit);
+}
+
+/** `Captions.TXT`, `captions.txt ` and `captions (2).txt` are the same thing for deduplication. */
+const normalizeTitle = (t: string | undefined): string => (t ?? '').toLowerCase().replace(/\(\d+\)/g, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
+ * Keep the best `floor` items of every matching source (floor = limit / (2 x sources), at least 1), then fill the rest by
+ * score. The result stays sorted by score. With one matching source this is a plain top-N.
+ */
+function diversify(ranked: CorpusHit[], limit: number): CorpusHit[] {
+  const bySource = new Map<string, CorpusHit[]>();
+  for (const h of ranked) bySource.set(h.item.source, [...(bySource.get(h.item.source) ?? []), h]);
+  if (bySource.size < 2) return ranked.slice(0, limit);
+  const floor = Math.max(1, Math.floor(limit / (2 * bySource.size)));
+  const picked = new Set<CorpusHit>();
+  // Sources are visited best-first, so with more sources than slots the strongest sources win.
+  for (const hs of [...bySource.values()].sort((a, b) => b[0]!.score - a[0]!.score)) {
+    for (const h of hs.slice(0, floor)) if (picked.size < limit) picked.add(h);
+  }
+  for (const h of ranked) if (picked.size < limit) picked.add(h);
+  return ranked.filter((h) => picked.has(h));
 }
 
 // ---------- Plain-English output ----------
@@ -383,13 +531,14 @@ const day = (t: string): string => t.slice(0, 10);
 
 export function formatCorpusSummary(s: CorpusSummary): string[] {
   if (!s.total) return ['The corpus is empty. Collect something first: rufus collect files ./notes  (also: calendar, browser, email).'];
-  const basis = s.halfLifeDays !== undefined ? `recency-weighted, half-life ${Math.round(s.halfLifeDays)} days` : 'unweighted';
+  const basis = s.halfLifeObservations !== undefined ? `observation-weighted, half-life ${Math.round(s.halfLifeObservations)} items` : s.halfLifeDays !== undefined ? `recency-weighted, half-life ${Math.round(s.halfLifeDays)} days` : 'unweighted';
   const lines = [`Life Context Snapshot (${basis}): ${s.total} item(s)${s.span ? ` from ${day(s.span.from)} to ${day(s.span.to)}` : ''}.`, '', 'By source (raw count, share of recent activity):'];
   for (const v of s.bySource) lines.push(`  ${v.source}: ${v.count} (${Math.round(v.share * 100)}% of recent activity, newest ${day(v.newest)})`);
   if (s.domains.length) {
-    lines.push('', 'Top active sites and senders:');
+    lines.push('', 'Active sites & human contacts:');
     for (const d of s.domains) lines.push(`  ${d.domain}: ${d.count} ${d.count === 1 ? 'visit/email' : 'visits/emails'} on ${d.activeDays} day(s), last ${day(d.lastSeen)} (${d.sources.join('+')})${d.category ? ` [${d.category}]` : ''}${d.recurring ? ' - recurring' : ''}`);
   }
+  if (s.automated.length) lines.push('', `Automated alerts / digests: ${s.automated.map((a) => `${a.domain} (${a.count})`).join(', ')}.`);
   if (s.projects.length) {
     lines.push('', 'Recently active projects (folders):');
     for (const p of s.projects) lines.push(`  ${p.name}: ${p.files} file(s), last edited ${day(p.lastModified)}`);
