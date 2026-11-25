@@ -147,13 +147,13 @@ describe('formatLoopItem: short plain text, no buttons', () => {
   });
 
   it('verify: the incoming message, the draft, and the reply line', () => {
-    expect(formatLoopItem(run({}), 1)).toBe('[#1] Sam: "Can we move to 3?"\nDraft: Sure, 3 works.\nReply: 1 = accept, 2 = reject, or type your edit');
-    expect(formatLoopItem(run({ urgency: 'urgent' }), 2, { multi: true })).toBe('[#2] (urgent) Sam: "Can we move to 3?"\nDraft: Sure, 3 works.\nReply: #2 1 = accept, #2 2 = reject, or #2 type your edit');
+    expect(formatLoopItem(run({}), 1)).toBe('Sam texted "Can we move to 3?" — want me to reply "Sure, 3 works."? (1 to send, 2 to skip, or type your own version)');
+    expect(formatLoopItem(run({ urgency: 'urgent' }), 2, { multi: true })).toBe('#2 Heads up: Sam texted "Can we move to 3?" — want me to reply "Sure, 3 works."? (#2 1 to send, #2 2 to skip, or #2 + your own version)');
   });
 
   it('plan and human-step items, and a promotion hint', () => {
-    expect(formatLoopItem(run({ status: 'awaiting_human_plan', goal: 'Book the venue', question: 'Which date?' }), 3)).toBe('[#3] Plan: Book the venue\nSam: "Can we move to 3?"\nWhich date?\nReply: 1 = go ahead, 2 = drop it, or type a better plan');
-    expect(formatLoopItem(run({ status: 'awaiting_human_execute', humanStep: 'Record the intro video', signal: { id: 's', surface: 'anchor', kind: 'x' } }), 1)).toBe('[#1] Your step: Record the intro video\nReply: 1 = done, 2 = skip');
+    expect(formatLoopItem(run({ status: 'awaiting_human_plan', goal: 'Book the venue', question: 'Which date?' }), 3)).toBe('Sam texted "Can we move to 3?". Want me to book the venue? Which date? (1 to go ahead, 2 to drop it, or type a better plan)');
+    expect(formatLoopItem(run({ status: 'awaiting_human_execute', humanStep: 'Record the intro video', signal: { id: 's', surface: 'anchor', kind: 'x' } }), 1)).toBe("Your turn: Record the intro video. (1 when it's done, 2 to skip)");
     expect(formatLoopItem(run({ promotionHint: 'Stop checking?' }), 1)).toMatch(/\nStop checking\?$/);
   });
 
@@ -163,9 +163,9 @@ describe('formatLoopItem: short plain text, no buttons', () => {
       { run: run({}), n: 1 },
       { run: run({ id: 'loop_2', signal: { id: 't', surface: 'chat', kind: 'm', text: 'Lunch?', actor: 'Alex' } }), n: 2 },
     ]);
-    expect(text).toContain('Check-in: 2 waiting on you. Start each answer with its number, like "#1 1".');
-    expect(text).toContain('[#2] Alex: "Lunch?"');
-    expect(text).toContain('Reply: #2 1 = accept');
+    expect(text).toContain('2 things waiting on you. Start each answer with its number, like "#1 1".');
+    expect(text).toContain('#2 Alex texted "Lunch?"');
+    expect(text).toContain('(#2 1 to send, #2 2 to skip');
   });
 
   it('assignNumbers keeps numbers stable and reuses the smallest free one', () => {
@@ -185,7 +185,7 @@ describe('rufus start: the unified daemon', () => {
     expect(first.loop!.signals).toBe(3);
     expect(first.sentNow).toHaveLength(1);
     expect(first.batched).toHaveLength(2);
-    expect(s.chat.sent).toEqual(['[#2] (urgent) Ops: "The server is down"\nDraft: Re: The server is down\nReply: 1 = accept, 2 = reject, or type your edit']);
+    expect(s.chat.sent).toEqual(['Heads up: Ops texted "The server is down" — want me to reply "Re: The server is down"? (1 to send, 2 to skip, or type your own version)']);
 
     s.advance(HOUR);
     const quiet = await s.daemon.tick();
@@ -197,9 +197,9 @@ describe('rufus start: the unified daemon', () => {
     const due = await s.daemon.tick();
     expect(due.checkin).toHaveLength(2);
     expect(s.chat.sent).toHaveLength(2);
-    expect(s.chat.last()).toMatch(/^Check-in: 2 waiting on you\./);
-    expect(s.chat.last()).toContain('[#1] Sam: "Lunch Thursday?"');
-    expect(s.chat.last()).toContain('[#3] Alex: "Any notes on the deck?"');
+    expect(s.chat.last()).toMatch(/^2 things waiting on you\./);
+    expect(s.chat.last()).toContain('#1 Sam texted "Lunch Thursday?"');
+    expect(s.chat.last()).toContain('#3 Alex texted "Any notes on the deck?"');
     expect(s.chat.buttons).toBe(0);
   });
 
@@ -221,7 +221,7 @@ describe('rufus start: the unified daemon', () => {
     await s.signal('First?', 'urgent');
     await s.signal('Second?', 'urgent');
     await s.daemon.tick();
-    expect(s.chat.sent[1]).toContain('Reply: #2 1 = accept'); // the second one already knows it is not alone
+    expect(s.chat.sent[1]).toContain('(#2 1 to send'); // the second one already knows it is not alone
     s.chat.human('1');
     await s.daemon.tick();
     expect(s.chat.last()).toBe('2 items are waiting. Start with the number, like "#1 1" or "#1 2".');
@@ -259,7 +259,7 @@ describe('rufus start: the unified daemon', () => {
     expect(r.checkin).toHaveLength(2);
     expect(s.chat.last()).toMatch(/^Now: 2026-11-25 08:00/);
     expect(s.chat.last()).toContain('Waiting on you (2):');
-    expect(s.chat.last()).toContain('Check-in: 2 waiting on you.');
+    expect(s.chat.last()).toContain('2 things waiting on you.');
     s.chat.human('#2 1');
     expect((await s.daemon.tick()).decided).toMatchObject([{ n: 2, verdict: 'accept' }]);
     expect(s.log).toEqual(['Re: Deck notes?']);
@@ -273,7 +273,7 @@ describe('rufus start: the unified daemon', () => {
     await requestCheckin(s.dir);
     const r = await s.daemon.tick();
     expect(r.checkin).toHaveLength(1);
-    expect(s.chat.last()).toBe('[#1] Sam: "Lunch?"\nDraft: Re: Lunch?\nReply: 1 = accept, 2 = reject, or type your edit');
+    expect(s.chat.last()).toBe('Sam texted "Lunch?" — want me to reply "Re: Lunch?"? (1 to send, 2 to skip, or type your own version)');
     await expect(access(path.join(s.dir, 'checkin.request'))).rejects.toThrow(); // consumed
   });
 
@@ -307,11 +307,33 @@ describe('rufus start: the unified daemon', () => {
     expect((await s.daemon.tick()).decided).toMatchObject([{ n: 1, verdict: 'reject' }]);
   });
 
+  it('chat can answer with just a reaction (here: the emoji, since this app cannot react) or with silence', async () => {
+    const r = await setup({ chief: 'REACT: 👍' });
+    await r.daemon.tick();
+    r.chat.human('ok thanks');
+    await r.daemon.tick();
+    expect(r.chat.sent).toEqual(['👍']);
+
+    const q = await setup({ chief: 'NO_REPLY' });
+    await q.daemon.tick();
+    q.chat.human('heading out');
+    await q.daemon.tick();
+    expect(q.chat.sent).toEqual([]);
+  });
+
+  it('a two-bubble chat reply goes out as two short messages, never one dense wall', async () => {
+    const s = await setup({ chief: 'Moved it to 2pm.\n---\nWant me to let Sam know?' });
+    await s.daemon.tick();
+    s.chat.human('move my 1pm an hour later');
+    await s.daemon.tick();
+    expect(s.chat.sent).toEqual(['Moved it to 2pm.', 'Want me to let Sam know?']);
+  });
+
   it('without a chat channel, items print to the terminal', async () => {
     const s = await setup({ channel: false });
     await s.signal('Ping?', 'urgent');
     await s.daemon.tick();
-    expect(s.printed).toEqual(['[#1] (urgent) Sam: "Ping?"\nDraft: Re: Ping?\nReply: 1 = accept, 2 = reject, or type your edit']);
+    expect(s.printed).toEqual(['Heads up: Sam texted "Ping?" — want me to reply "Re: Ping?"? (1 to send, 2 to skip, or type your own version)']);
   });
 });
 
@@ -364,7 +386,7 @@ describe('CLI: rufus now, rufus start, rufus decide #n, and the pruned help', ()
     await appendSignal(dir, { surface: 'chat', kind: 'message.received', text: 'Call me asap, it is urgent', actor: 'Ops', data: { chatId: 'c1' } }, NOW);
     const c = lines();
     await main(['--dir', dir, 'start', '--once'], c.io, { channel: chat, now: () => NOW });
-    expect(chat.sent).toEqual(['[#1] (urgent) Your step: Reply to Ops (chat): "Call me asap, it is urgent"\nReply: 1 = done, 2 = skip']);
+    expect(chat.sent).toEqual(['Heads up: your turn: Reply to Ops (chat): "Call me asap, it is urgent". (1 when it\'s done, 2 to skip)']);
     expect(c.out.join('\n')).toContain('sent 1 item(s) right away');
     expect(chat.buttons).toBe(0);
   });

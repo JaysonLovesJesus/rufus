@@ -77,10 +77,20 @@ interface TelegramCallback {
   from?: TelegramUser;
   message?: TelegramMessage;
 }
+type TelegramReactionType = { type: 'emoji'; emoji: string } | { type: string; emoji?: string };
+interface TelegramReaction {
+  chat?: TelegramChat;
+  message_id: number;
+  user?: TelegramUser;
+  date?: number;
+  old_reaction?: TelegramReactionType[];
+  new_reaction?: TelegramReactionType[];
+}
 interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   callback_query?: TelegramCallback;
+  message_reaction?: TelegramReaction;
 }
 
 /** Telegram Bot API over plain `fetch`, no dependencies. Short-polls `getUpdates`; never reads other chats. */
@@ -112,15 +122,28 @@ export class TelegramChannel implements LiveChannel {
     return this.sendText(text, keyboard.length ? { inline_keyboard: keyboard } : undefined);
   }
 
+  /** Shows "typing..." in the chat while Rufus works. Best effort: never throws. */
+  async typing(): Promise<void> {
+    await this.call('sendChatAction', { chat_id: this.opts.chatId, action: 'typing' }).catch(() => undefined);
+  }
+
+  /** Puts an emoji reaction on a message in the chat (e.g. a 👍 on "ok thanks"). Best effort: never throws. */
+  async react(messageId: string, emoji: string): Promise<void> {
+    const id = Number(messageId);
+    if (!Number.isInteger(id) || !emoji.trim()) return;
+    await this.call('setMessageReaction', { chat_id: this.opts.chatId, message_id: id, reaction: [{ type: 'emoji', emoji: emoji.trim() }] }).catch(() => undefined);
+  }
+
   /**
    * New messages from the configured chat, oldest first. Voice notes and audio arrive as their
-   * transcript when `transcribe` is set. Other chats, bots and other non-text updates are skipped.
+   * transcript when `transcribe` is set. An emoji reaction the human adds arrives as `[reacted 👍]` with `reaction` set.
+   * Other chats, bots and other non-text updates are skipped.
    */
   async poll(since?: string): Promise<IncomingMessage[]> {
     await this.loadOffset();
     const updates = await this.call<TelegramUpdate[]>('getUpdates', {
       timeout: 0,
-      allowed_updates: ['message', 'callback_query'],
+      allowed_updates: ['message', 'callback_query', 'message_reaction'],
       ...(this.offset !== undefined ? { offset: this.offset } : {}),
     });
     if (!updates.length) return [];
@@ -138,6 +161,11 @@ export class TelegramChannel implements LiveChannel {
         void this.call('answerCallbackQuery', { callback_query_id: u.callback_query.id }).catch(() => undefined);
         continue;
       }
+      if (u.message_reaction) {
+        const r = this.fromReaction(u, sinceMs);
+        if (r) out.push(r);
+        continue;
+      }
       const m = u.message;
       if (!m || !this.isFromHuman(m)) continue;
       const audio = m.voice ?? m.audio;
@@ -146,7 +174,7 @@ export class TelegramChannel implements LiveChannel {
       // Telegram dates are whole seconds, so treat the second `since` falls in as still new.
       if (sinceMs !== undefined && m.date && (m.date + 1) * 1000 <= sinceMs) continue;
       const text = m.text?.trim() ? m.text : await this.transcribeAudio(audio!.file_id);
-      if (text) out.push({ id: `tg_${u.update_id}`, text, ...(at ? { at } : {}) });
+      if (text) out.push({ id: `tg_${u.update_id}`, text, messageId: String(m.message_id), ...(at ? { at } : {}) });
     }
     return out;
   }
@@ -205,6 +233,19 @@ export class TelegramChannel implements LiveChannel {
     const cb = u.callback_query!;
     if (cb.from?.is_bot || !cb.data || !this.isConfiguredChat(cb.message?.chat)) return undefined;
     return { id: `tg_${u.update_id}`, text: cb.data };
+  }
+
+  /** A reaction the human just added (not one they removed), as a readable message. */
+  private fromReaction(u: TelegramUpdate, sinceMs?: number): IncomingMessage | undefined {
+    const r = u.message_reaction!;
+    if (r.user?.is_bot || !this.isConfiguredChat(r.chat)) return undefined;
+    if (sinceMs !== undefined && r.date && (r.date + 1) * 1000 <= sinceMs) return undefined;
+    const emojis = (list?: TelegramReactionType[]): string[] => (list ?? []).map((x) => (x.type === 'emoji' && typeof x.emoji === 'string' ? x.emoji : '')).filter(Boolean);
+    const before = new Set(emojis(r.old_reaction));
+    const emoji = emojis(r.new_reaction).find((e) => !before.has(e));
+    if (!emoji) return undefined;
+    const at = r.date ? new Date(r.date * 1000).toISOString() : undefined;
+    return { id: `tg_${u.update_id}`, text: `[reacted ${emoji}]`, reaction: { emoji, targetMessageId: String(r.message_id) }, ...(at ? { at } : {}) };
   }
 
   private isFromHuman(m: TelegramMessage): boolean {

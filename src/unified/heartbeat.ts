@@ -18,6 +18,11 @@ export interface HeartbeatOptions {
   morningBrief?: boolean;
   /** The morning ends at this local time (`HH:MM`): later unlocks get no brief. Default `12:00`. */
   morningUntil?: string;
+  /**
+   * How heads-ups are worded. `code` (default, $0): a short casual line like "Chapel is in 10 min (9:30am)". `ai`: one
+   * fast-tier model call words it like a friend would (falls back to the code line if the model fails or rambles).
+   */
+  phrasing?: 'code' | 'ai';
 }
 
 export const DEFAULT_LEAD_MINUTES = 10;
@@ -55,10 +60,52 @@ export function blocksToNudge(anchor: Anchor, now: Date, nudged: readonly string
     .sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
 }
 
-/** "Heads-up: Deep work (focus) starts at 09:00, in 10 min." */
+/** "09:00" -> "9am", "14:30" -> "2:30pm", "00:15" -> "12:15am". Anything else is returned as is. */
+export function clock12(hhmm: string): string {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
+  if (!m) return hhmm;
+  const h = Number(m[1]) % 24;
+  const suffix = h < 12 ? 'am' : 'pm';
+  const h12 = h % 12 || 12;
+  return m[2] === '00' ? `${h12}${suffix}` : `${h12}:${m[2]}${suffix}`;
+}
+
+/** A block title as a person would say it: no `(focus)`-style tags, no trailing details after a dash or colon, short. */
+export function speakableTitle(title: string, max = 48): string {
+  let t = title.replace(/\s*[([][^)\]]*[)\]]\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  const head = t.split(/\s+[-–—|:]\s+|:\s+/)[0]!.trim();
+  if (head.length >= 3) t = head;
+  if (t.length > max) {
+    const cut = t.slice(0, max);
+    t = (cut.lastIndexOf(' ') > max / 2 ? cut.slice(0, cut.lastIndexOf(' ')) : cut).replace(/[\s,;.]+$/, '');
+  }
+  return t || title.trim();
+}
+
+/** "Chapel is in 10 min (9:30am)": short, casual, 12-hour time, no metadata tags. */
 export function formatNudge(block: ScheduleBlock, now: Date): string {
   const mins = toMinutes(block.start) - minutesOf(now);
-  return `Heads-up: ${block.title} (${block.kind}) starts at ${block.start}, in ${mins} min.`;
+  return `${speakableTitle(block.title)} is in ${mins} min (${clock12(block.start)})`;
+}
+
+/** The prompt for an AI-worded heads-up (fast tier). */
+export function nudgePrompt(block: ScheduleBlock, now: Date): string {
+  const mins = toMinutes(block.start) - minutesOf(now);
+  return [
+    'Write a one-line heads-up text to your human, like a friend who keeps their schedule would: casual, warm, under 12 words.',
+    'Use the 12-hour time if you mention it (like 9:30am). No tags like (focus), no emoji walls, no greeting.',
+    `Next up: ${block.title}`,
+    `Starts: ${clock12(block.start)}, in ${mins} min.`,
+    'Reply with the text only.',
+  ].join('\n');
+}
+
+/** A model-worded heads-up, if it is usable: one short line, no tags, no 24-hour clock. Otherwise undefined. */
+export function acceptNudge(raw: string): string | undefined {
+  const t = raw.trim().replace(/^["'“]|["'”]$/g, '').trim();
+  if (!t || t.length > 140 || t.includes('\n')) return undefined;
+  if (/\((focus|event|personal|admin|break|urgent|deep)\)/i.test(t) || /\b([01]\d|2[0-3]):[0-5]\d\b(?!\s*[ap]m)/i.test(t)) return undefined;
+  return t;
 }
 
 /** Records a nudge, keeping the list short. */

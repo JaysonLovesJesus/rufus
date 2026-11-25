@@ -25,6 +25,33 @@ export interface ChiefReply {
   toolsUsed?: string[];
   /** Side-effect actions queued as Master Loop Verify items (they run only after a yes). */
   queued?: string[];
+  /** 1-2 short chat bubbles to send one after the other (`text` is them joined). Unset: send `text` as one message. */
+  bubbles?: string[];
+  /** Just react to their message with this emoji instead of replying (they said "ok", "got it", "thanks"...). */
+  react?: string;
+  /** Nothing needs saying: send nothing. */
+  silent?: boolean;
+}
+
+/** The chat reply asks for no message at all. */
+export const NO_REPLY = 'NO_REPLY';
+const REACT_LINE = /^REACT\s*:\s*(\S{1,16})\s*$/i;
+const BUBBLE_SPLIT = /\n\s*-{3,}\s*\n/;
+const MAX_BUBBLES = 3;
+
+/**
+ * How a model's chat reply should be delivered: `NO_REPLY` (silence), `REACT: 👍` (just an emoji reaction), or 1-2
+ * short bubbles split on a `---` line. Anything else is one plain message.
+ */
+export function parseChatShape(raw: string): { silent: true } | { react: string } | { bubbles: string[] } {
+  const t = raw.trim();
+  if (!t || t.replace(/[.!\s]+$/g, '').toUpperCase() === NO_REPLY) return { silent: true };
+  const react = REACT_LINE.exec(t);
+  if (react && !/[A-Za-z0-9]/.test(react[1]!)) return { react: react[1]! };
+  const parts = t.split(BUBBLE_SPLIT).map((p) => p.trim()).filter(Boolean);
+  if (parts.length <= MAX_BUBBLES) return { bubbles: parts.length ? parts : [t] };
+  // More bubbles than a person would send in a row: keep the first ones, fold the rest into the last.
+  return { bubbles: [...parts.slice(0, MAX_BUBBLES - 1), parts.slice(MAX_BUBBLES - 1).join('\n')] };
 }
 
 export type ChiefCommand =
@@ -73,6 +100,12 @@ const SYSTEM_HEAD = [
   'You are given a live snapshot of their flows, open cards, lessons and recent runs. Use only that; never invent facts.',
   'Only bring up a memory or fact when it clearly relates to what they just said. Never change the subject.',
   'Read the recent conversation: if their new message corrects or adds to an earlier one, answer the corrected version once.',
+  'Write with natural human emphasis: lead with what actually matters right now. Say times the casual 12-hour way (2pm, 9:30am, never 14:00). Never paste metadata tags like (focus), (urgent) or (event), ids or field names.',
+  'You choose the shape of your reply, like a person texting:',
+  '- usually ONE short message;',
+  '- two short bubbles only when a second thought really helps: put a line with only --- between them;',
+  `- when they just acknowledged something ("ok", "got it", "thanks", "cool", 👍) and nothing needs saying, reply with ONLY: REACT: 👍 (or another fitting emoji);`,
+  `- when nothing needs to be said at all, reply with ONLY: ${NO_REPLY}.`,
 ];
 const SYSTEM_NO_TOOLS = [
   'You cannot take actions yourself. If they want something done (run a flow, save a lesson, a new flow), say what you would do and the exact command that does it:',
@@ -203,7 +236,8 @@ export class ChiefOfStaff {
   }
 
   async handleMessage(text: string): Promise<string> {
-    return (await this.handle(text)).text;
+    const r = await this.handle(text);
+    return r.silent ? '(no reply needed)' : r.text;
   }
 
   async handle(text: string): Promise<ChiefReply> {
@@ -211,10 +245,8 @@ export class ChiefOfStaff {
     if (!trimmed) return { text: 'Say "status", "flows", "lessons", or just ask me something.', cards: [], via: 'command' };
     const at = this.now().toISOString();
     const reply = await this.answer(trimmed);
-    await this.remember([
-      { role: 'user', text: trimmed, at },
-      { role: 'assistant', text: reply.text, at: this.now().toISOString() },
-    ]);
+    const said = reply.silent ? undefined : reply.react ? `[reacted ${reply.react}]` : reply.text;
+    await this.remember([{ role: 'user', text: trimmed, at }, ...(said !== undefined ? [{ role: 'assistant' as const, text: said, at: this.now().toISOString() }] : [])]);
     return reply;
   }
 
@@ -436,7 +468,7 @@ export class ChiefOfStaff {
         const call = tools ? parseToolCall(out) : undefined;
         if (!call) {
           const extra = { ...(toolsUsed.length ? { toolsUsed } : {}), ...(queued.length ? { queued } : {}) };
-          return reply(clip(concise(out || "I don't have anything to add.", text)), extra);
+          return { ...this.shaped(out, text), ...extra };
         }
         if (step >= this.maxToolSteps) {
           const before = out.slice(0, TOOL_CALL.exec(out)?.index ?? 0).trim();
@@ -455,6 +487,15 @@ export class ChiefOfStaff {
         { unavailable: true },
       );
     }
+  }
+
+  /** A final model reply as a ChiefReply: silence, a reaction, or 1-2 short bubbles (each kept to text-message size). */
+  private shaped(out: string, asked: string): ChiefReply {
+    const shape = parseChatShape(out || "I don't have anything to add.");
+    if ('silent' in shape) return { text: '', cards: [], via: 'chat', silent: true };
+    if ('react' in shape) return { text: shape.react, cards: [], via: 'chat', react: shape.react };
+    const bubbles = shape.bubbles.map((b) => clip(concise(b, asked)));
+    return { text: bubbles.join('\n\n'), cards: [], via: 'chat', ...(bubbles.length > 1 ? { bubbles } : {}) };
   }
 
   /** Runs a read-only tool now, or queues a side-effect one as a Verify item. Never throws: the model reads the outcome. */

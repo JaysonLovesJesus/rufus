@@ -261,6 +261,14 @@ function parseTriage(raw: string): { label?: TriageLabel; reason?: string; reply
 
 const MAX_REPLY = 600;
 
+/** The human's past verdicts closest to `text` (rejections and their notes included), one line each. Empty when none. */
+function pastDecisions(ctx: LoopStageContext, actionType: string, text: string, limit = 5): string {
+  return ctx
+    .examples({ actionType, query: text, limit })
+    .map((h) => `- ${clip(h.item.summary, 300)}`)
+    .join('\n');
+}
+
 export interface MessageTriageOptions {
   /** Handler id. Default `message.triage`. */
   id?: string;
@@ -295,6 +303,9 @@ export function messageTriageHandler(opts: MessageTriageOptions = {}): SignalHan
       const text = signal.text ?? '';
       let judged = classifyByCode(text);
       if (!judged && ctx.hasAi) {
+        // Learning from corrections, not regexes: the human's past verdicts on the most similar messages (rejections with
+        // their notes, like "2 that's just a call alert, ignore those") go straight into the triage prompt.
+        const past = pastDecisions(ctx, `reply.${surface}`, text);
         const raw = await ctx.ai(
           [
             `Triage this ${surface} message for your human. Reply with JSON only: {"label":"ignore"|"batch"|"urgent","reason":"<short>"}.`,
@@ -302,7 +313,12 @@ export function messageTriageHandler(opts: MessageTriageOptions = {}): SignalHan
             `From: ${who}`,
             `Message: ${clip(text, 1200)}`,
             ...(ctx.replan ? [`A previous attempt failed: ${ctx.replan.reason}`] : []),
-            sample(ctx, `reply.${surface}`) ? `Their past decisions:\n${sample(ctx, `reply.${surface}`)}` : '',
+            ...(past
+              ? [
+                  `Their past decisions on similar messages (closest first):\n${past}`,
+                  'If the human previously rejected a similar message (for example, telling you to ignore call alerts or automated notices), follow that and classify as "ignore". Their notes are rules for messages like it.',
+                ]
+              : []),
           ]
             .filter(Boolean)
             .join('\n'),

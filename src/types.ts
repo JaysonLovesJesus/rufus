@@ -497,7 +497,7 @@ export interface StartConfig {
    */
   webhook?: { port?: number; host?: string; token?: string };
   /** Proactive heads-ups before Anchor blocks and the good-morning brief. Default on; `false` turns it off. */
-  heartbeat?: false | { leadMinutes?: number; quietHours?: string | false; morningBrief?: boolean; morningUntil?: string };
+  heartbeat?: false | { leadMinutes?: number; quietHours?: string | false; morningBrief?: boolean; morningUntil?: string; phrasing?: 'code' | 'ai' };
 }
 
 /** Guardrails against piling up prompt rules. */

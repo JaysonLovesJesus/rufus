@@ -286,7 +286,8 @@ describe('act first, reply second (tools in chat)', () => {
     await daemon.tick();
     expect(log).toEqual([]); // nothing sent yet
     expect(chat.sent[0]).toBe('Ready to tell Sam you are running 10 min late. Reply 1 to send.');
-    expect(chat.sent[1]).toContain('[#1] (urgent)');
+    expect(chat.sent[1]).toMatch(/^Heads up: ready to beeper\.send to Sam/);
+    expect(chat.sent[1]).not.toContain('(urgent)');
     expect(chat.sent[1]).toContain('Running 10 min late');
     const pending = await loop.pending();
     expect(pending).toHaveLength(1);
@@ -385,7 +386,7 @@ describe('proactive heartbeat', () => {
     expect(chat.sent).toEqual([]); // 11 minutes out: not yet
     t = new Date(2026, 10, 25, 8, 50);
     const r = await daemon.tick();
-    expect(chat.sent).toEqual(['Heads-up: Deep work (focus) starts at 09:00, in 10 min.']);
+    expect(chat.sent).toEqual(['Deep work is in 10 min (9am)']);
     expect(r.proactive).toHaveLength(1);
     t = new Date(2026, 10, 25, 8, 55);
     await daemon.tick();

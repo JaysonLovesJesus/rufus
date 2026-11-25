@@ -606,13 +606,13 @@ What one pass does:
 
 ### Beeper-safe plain-text Verify
 
-Many chat apps (Beeper included, even when it shows your Telegram chats) do not render Telegram's inline buttons. So every paused item is short plain text, and every answer is something you can type in two keystrokes:
+Many chat apps (Beeper included, even when it shows your Telegram chats) do not render Telegram's inline buttons. So every paused item is short plain text, written like an assistant texting you (no form fields), and every answer is something you can type in two keystrokes:
 
 ```
-[#1] Sam: "Can we move lunch to Thursday?"
-Draft: Thursday works. 12:30?
-Reply: 1 = accept, 2 = reject, or type your edit
+Sam texted "Can we move lunch to Thursday?" — want me to reply "Thursday works. 12:30?"? (1 to send, 2 to skip, or type your own version)
 ```
+
+Urgent items start with "Heads up:"; when several are open each starts with its number (`#2 ...`).
 
 | You type | Means |
 | --- | --- |
@@ -623,7 +623,7 @@ Reply: 1 = accept, 2 = reject, or type your edit
 | `#2 1`, `#2 2 <reason>`, `#2 edit: ...`, `#2 <text>` | the same, for item #2 when several are open |
 | `checkin` / `now` | the one-screen summary plus everything waiting, right away |
 
-When a flow card is open too, a bare `1` answers the card; loop items then need their `#n`. Plan items read `1 = go ahead, 2 = drop it, or type a better plan`; real-life steps read `1 = done, 2 = skip`. In code: `parseLoopReply(text)`, `formatLoopItem(run, n)`, `formatCheckin(items)`. From the terminal: `rufus decide #1 accept`.
+When a flow card is open too, a bare `1` answers the card; loop items then need their `#n`. Plan items read `(1 to go ahead, 2 to drop it, or type a better plan)`; real-life steps read `(1 when it's done, 2 to skip)`. In code: `parseLoopReply(text)`, `formatLoopItem(run, n)`, `formatCheckin(items)`. From the terminal: `rufus decide #1 accept`.
 
 ### `SOUL.md`: your words in every prompt
 
@@ -706,6 +706,14 @@ It also asks a running `rufus start` for a check-in on its next pass.
 - **Silent no-ops.** `triage.ignore` (acknowledgements) completes on its own at $0; it never waits on you. A Beeper chat titled "Rufus" (or any of `sensors.beeper.ignoreChatTitles`) is never sensed, so Rufus never answers itself.
 - **Proactive heartbeat ($0).** A one-line heads-up ~10 minutes before a real (non-break) block, and a 3-line good-morning brief on the first `phone.unlocked` of the morning. Nothing during quiet hours (`22:00-07:00` by default). Tune with `"start": { "heartbeat": { "leadMinutes": 10, "quietHours": "22:00-07:00" } }` or turn it off with `"heartbeat": false`.
 - **Phone webhook.** `"start": { "webhook": { "port": 8787, "host": "0.0.0.0", "token": "<16+ chars>" } }` (or `RUFUS_WEBHOOK_TOKEN`) opens `POST /signal` (`Authorization: Bearer <token>`, body `{"kind":"phone.unlocked"}`, `{"kind":"app.opened","text":"Maps"}`, `{"kind":"location.changed","data":{...}}`). Each valid signal is appended to `inbox.jsonl`. Point a MacroDroid or Tasker HTTP action at it.
+
+### Human-feel stream (v14)
+
+- **Typing and reactions.** `LiveChannel` has optional `typing()` and `react(messageId, emoji)`. Telegram implements them (`sendChatAction` "typing", `setMessageReaction`), best effort. Rufus shows typing while a chat turn (model and tools) runs.
+- **Reactions in.** Telegram polls `message_reaction` too: your emoji on a message arrives as `[reacted 👍]` (with `reaction: { emoji, targetMessageId }`), is remembered in the chat history, and never needs a reply. Every incoming message carries `messageId`.
+- **A stream, not forced back-and-forth.** The chief picks the shape of each reply: one short message, two short bubbles (split on a `---` line, sent with a brief pause and typing in between), `REACT: 👍` (just a reaction on your "ok thanks"; apps that cannot react get the emoji), or `NO_REPLY` (silence). Replies use casual 12-hour times and no tags like `(focus)`.
+- **Natural heads-ups.** `Chapel is in 10 min (2pm)`. Set `"heartbeat": { "phrasing": "ai" }` to have one fast-tier call word it (the code line is the fallback if the model fails or rambles).
+- **Learning from rejections.** When you reject a reply item with a note (`2 that's just a call alert, ignore those`), it is saved as a feedback example; the next triage of a similar message gets your closest past decisions and the instruction to follow them, so it is classified `ignore` without a new regex.
 
 ### What is primary and what is legacy
 

@@ -1,14 +1,15 @@
 import { clip } from '../corpus/types';
 import type { LoopRun } from '../engine/loop';
 import type { Verdict } from '../engine/trust';
+import { CHIEF_ACTION_SURFACE } from '../chief/actions';
 
 /**
  * Beeper-safe plain text for Master Loop items. Many chat apps (Beeper among them) do not render Telegram's inline
  * buttons, so every paused item is short text with a dead-simple reply:
  *
- *   [#1] Reply to Sam: "can we move to 3?"
- *   Draft: Sure, 3 works.
- *   Reply: 1 = accept, 2 = reject, or type your edit
+ *   Sam texted "can we move to 3?" — want me to reply "Sure, 3 works."? (1 to send, 2 to skip, or type your own version)
+ *
+ * No metadata tags like `(urgent)`: an urgent item simply starts with "Heads up:" and arrives right away.
  */
 
 export type LoopReply =
@@ -65,44 +66,72 @@ export function draftOf(result: unknown): string | undefined {
   return undefined;
 }
 
-/** What to type, for one stage. `multi`: several items are open, so each answer needs its number. */
-export function replyHint(run: Pick<LoopRun, 'status'>, n: number, multi = false): string {
+/** What to type, for one stage, as a short parenthetical. `multi`: several items are open, so each answer needs its number. */
+export function replyHint(run: Pick<LoopRun, 'status'> & { result?: unknown }, n: number, multi = false): string {
   const p = multi ? `#${n} ` : '';
-  if (run.status === 'awaiting_human_plan') return `Reply: ${p}1 = go ahead, ${p}2 = drop it, or ${multi ? `#${n} ` : ''}type a better plan`;
-  if (run.status === 'awaiting_human_execute') return `Reply: ${p}1 = done, ${p}2 = skip`;
-  return `Reply: ${p}1 = accept, ${p}2 = reject, or ${multi ? `#${n} ` : ''}type your edit`;
+  if (run.status === 'awaiting_human_plan') return `(${p}1 to go ahead, ${p}2 to drop it, or ${multi ? `#${n} + ` : 'type '}a better plan)`;
+  if (run.status === 'awaiting_human_execute') return `(${p}1 when it's done, ${p}2 to skip)`;
+  const send = draftOf(run.result) !== undefined;
+  return `(${p}1 to ${send ? 'send' : 'go'}, ${p}2 to skip, or ${multi ? `#${n} + your` : 'type your'} own version)`;
 }
 
-/** One paused run as a few short plain-text lines. */
+const VERB: Record<string, string> = { chat: 'texted', email: 'emailed', sms: 'texted', phone: 'sent' };
+
+/** "Draft a concise reply" -> "draft a concise reply" (but "SMS Sam" stays). */
+const lowerFirst = (s: string): string => (/^[A-Z][a-z]/.test(s) ? s[0]!.toLowerCase() + s.slice(1) : s);
+const sentence = (s: string): string => (/[.!?…"]$/.test(s) ? s : `${s}.`);
+
+/**
+ * One paused run, written like a human assistant texting: who said what, what Rufus would do, and how to answer.
+ *   `Sam texted "Can we move to 3?" — want me to reply "Sure, 3 works."? (1 to send, 2 to skip, or type your own version)`
+ * With several open, each starts with its number (`#2 ...`) so the answer can too.
+ */
 export function formatLoopItem(run: LoopRun, n: number, opts: { multi?: boolean } = {}): string {
-  const urgent = run.urgency === 'urgent' ? '(urgent) ' : '';
-  const who = run.signal.actor ?? run.signal.surface;
-  const said = run.signal.text ? `${who}: "${clip(run.signal.text, 160)}"` : undefined;
-  const lines: string[] = [];
+  const lead = `${opts.multi ? `#${n} ` : ''}${run.urgency === 'urgent' ? 'Heads up: ' : ''}`;
+  const who = run.signal.actor ?? 'Someone';
+  const text = run.signal.text ? clip(run.signal.text, 160) : undefined;
+  // Something you asked for in chat is not "someone said": it is your own request, so it reads as "ready to ...".
+  const own = run.signal.surface === CHIEF_ACTION_SURFACE;
+  const said = text && !own ? `${who} ${VERB[run.signal.surface] ?? 'said'} "${text}"` : undefined;
+  const hint = replyHint(run, n, opts.multi);
+  let body: string;
   if (run.status === 'awaiting_human_plan') {
-    lines.push(`[#${n}] ${urgent}Plan: ${clip(run.goal ?? run.actionType ?? run.handlerId, 160)}`);
-    if (said) lines.push(said);
-    if (run.question) lines.push(clip(run.question, 240));
+    const goal = clip(run.goal ?? run.actionType ?? run.handlerId, 160);
+    body = `${said ? `${said}. ` : ''}Want me to ${lowerFirst(goal).replace(/[.?!]+$/, '')}?${run.question ? ` ${clip(run.question, 240)}` : ''}`;
   } else if (run.status === 'awaiting_human_execute') {
-    lines.push(`[#${n}] ${urgent}Your step: ${clip(run.humanStep ?? run.goal ?? '', 200)}`);
-    if (said && !(run.humanStep ?? '').includes(clip(run.signal.text ?? '', 40))) lines.push(said);
+    const step = clip(run.humanStep ?? run.goal ?? '', 200).replace(/[.]+$/, '');
+    const showSaid = said && !(run.humanStep ?? '').includes(clip(run.signal.text ?? '', 40));
+    body = `Your turn: ${step}${showSaid ? ` (${said})` : ''}.`;
   } else {
     const draft = draftOf(run.result);
-    lines.push(`[#${n}] ${urgent}${clip(said ?? run.goal ?? run.actionType ?? run.handlerId, 200)}`);
-    if (draft !== undefined) lines.push(`Draft: ${clip(draft, 500)}`);
-    else if (run.result !== undefined) lines.push(`Result: ${clip(show(run.result), 300)}`);
-    else if (run.goal && said) lines.push(clip(run.goal, 200));
-    if (run.verifyFailure) lines.push(`Check failed: ${clip(run.verifyFailure, 160)}`);
+    const goal = clip(run.goal ?? run.actionType ?? run.handlerId, 200);
+    const action = own ? actionOf(run.result) : undefined;
+    if (action) body = `Ready to ${action.tool}${action.to ? ` to ${action.to}` : ''}${draft !== undefined ? `: "${clip(draft, 500)}"` : ''} — good to go?`;
+    else if (draft !== undefined) body = said ? `${said} — want me to reply "${clip(draft, 500)}"?` : `${goal.replace(/[.?!]+$/, '')}: "${clip(draft, 500)}" — good to go?`;
+    else if (run.result !== undefined) body = `${said ? `${said}. ` : ''}${sentence(goal)} Here's what I've got: ${clip(show(run.result), 300)} — look right?`;
+    else body = said ? `${said}. ${sentence(goal)} OK?` : `${sentence(goal)} OK?`;
+    if (run.verifyFailure) body += ` (My own check flagged it: ${clip(run.verifyFailure, 160)}.)`;
   }
-  lines.push(replyHint(run, n, opts.multi));
+  // "Heads up: your turn ..." reads better than "Heads up: Your turn ...". Names stay capitalized.
+  if (run.urgency === 'urgent' && /^(Your|Want|Ready) /.test(body)) body = body[0]!.toLowerCase() + body.slice(1);
+  const lines = [`${lead}${body} ${hint}`];
   if (run.promotionHint) lines.push(run.promotionHint);
   return lines.join('\n');
+}
+
+/** The tool and recipient of a chat-requested action's result (`{ tool, args }`). */
+function actionOf(result: unknown): { tool: string; to?: string } | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const r = result as { tool?: unknown; args?: Record<string, unknown> };
+  if (typeof r.tool !== 'string') return undefined;
+  const to = ['to', 'chatTitle', 'recipient', 'chatId', 'command'].map((k) => r.args?.[k]).find((v): v is string => typeof v === 'string' && !!v.trim());
+  return { tool: r.tool, ...(to ? { to } : {}) };
 }
 
 /** Several items in one check-in message. */
 export function formatCheckin(items: Array<{ run: LoopRun; n: number }>): string {
   if (!items.length) return 'All clear: nothing is waiting on you.';
   if (items.length === 1) return formatLoopItem(items[0]!.run, items[0]!.n);
-  const head = `Check-in: ${items.length} waiting on you. Start each answer with its number, like "#${items[0]!.n} 1".`;
+  const head = `${items.length} things waiting on you. Start each answer with its number, like "#${items[0]!.n} 1".`;
   return [head, ...items.map(({ run, n }) => formatLoopItem(run, n, { multi: true }))].join('\n\n');
 }

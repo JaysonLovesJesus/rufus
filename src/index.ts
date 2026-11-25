@@ -8,7 +8,7 @@ export { FakeProvider, OpenAiCompatibleProvider, CommandProvider, createProvider
 export { FileStore } from './store';
 export { CaseStore, captureCase, formatExamples, type ReplayCase } from './learning/cases';
 export { compareFlow, formatCompare, type CompareOptions, type CompareReport, type CompareArm, type CompareCaseResult } from './learning/compare';
-export { ChiefOfStaff, parseToolCall, concise, type ChiefCommand, type ChiefOfStaffOptions, type ChiefReply } from './chief/chief';
+export { ChiefOfStaff, parseToolCall, parseChatShape, NO_REPLY, concise, type ChiefCommand, type ChiefOfStaffOptions, type ChiefReply } from './chief/chief';
 export { loadChatHistory, appendChatTurns, formatChatHistory, chatHistoryFile, CHAT_HISTORY_FILE, DEFAULT_CHAT_TURNS, type ChatTurn } from './chief/history';
 export { chiefActionHandler, queueChiefAction, describeAction, CHIEF_ACTION_SURFACE, CHIEF_ACTION_KIND, type ChiefAction } from './chief/actions';
 export { anchorUpdateTool, applyAnchorUpdate, ANCHOR_TOOL, type AnchorUpdateArgs, type AnchorUpdateResult } from './tools/anchor-tool';
@@ -20,7 +20,7 @@ export { at, every, onEvent, isQuiet, type Trigger, type TriggerContext, type Tr
 export { LessonStore, LessonCapError, MAX_LESSONS_PER_SCOPE, scopes, describeTension, type Lesson, type LessonEvidence, type LessonStoreOptions } from './learning/lessons';
 export { formatCardAsText, parseTextReply, PlainTextChannel, type ChannelAdapter } from './channels/text';
 export type * from './types';
-export { CardBridge, type CardBridgeOptions, type IncomingMessage, type LiveChannel, type TickReport } from './channels/bridge';
+export { CardBridge, BUBBLE_PAUSE_MS, type CardBridgeOptions, type IncomingMessage, type LiveChannel, type TickReport } from './channels/bridge';
 export { BeeperChannel, BeeperOfflineError, BeeperApiError, createBeeperChannel, resolveBeeperOptions, type BeeperOptions } from './channels/beeper';
 export { TelegramChannel, TelegramOfflineError, TelegramApiError, createTelegramChannel, resolveTelegramOptions, type TelegramOptions } from './channels/telegram';
 export { commandTranscriber, transcribeArgs, type Transcriber } from './channels/transcribe';
@@ -297,7 +297,7 @@ export {
 } from './sensors';
 export { parseLoopReply, formatLoopItem, formatCheckin, replyHint, draftOf, type LoopReply } from './unified/loop-text';
 export { UnifiedDaemon, DEFAULT_CHECKIN_MS, type UnifiedDaemonOptions, type StartTickReport } from './unified/daemon';
-export { blocksToNudge, formatNudge, formatMorningBrief, inQuietHours, isMorning, phoneSignalHandler, PHONE_KINDS, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, type HeartbeatOptions } from './unified/heartbeat';
+export { acceptNudge, blocksToNudge, clock12, formatNudge, formatMorningBrief, nudgePrompt, speakableTitle, inQuietHours, isMorning, phoneSignalHandler, PHONE_KINDS, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, type HeartbeatOptions } from './unified/heartbeat';
 export { startSignalWebhook, validateWebhookSignal, DEFAULT_WEBHOOK_PORT, MIN_WEBHOOK_TOKEN_LENGTH, type SignalWebhook, type SignalWebhookOptions } from './unified/webhook';
 export { nowSummary, type NowOptions } from './unified/now';
 export { assignNumbers, loadStartState, saveStartState, requestCheckin, takeCheckinRequest, freshStartState, START_STATE_FILE, CHECKIN_REQUEST_FILE, type StartState } from './unified/state';

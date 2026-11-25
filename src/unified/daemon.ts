@@ -10,7 +10,8 @@ import type { Engine } from '../engine/engine';
 import type { HumanDecision, LoopRun, LoopRunStatus, LoopTickReport, MasterLoop } from '../engine/loop';
 import type { Verdict } from '../engine/trust';
 import { formatCheckin, formatLoopItem, parseLoopReply, type LoopReply } from './loop-text';
-import { blocksToNudge, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, formatMorningBrief, formatNudge, inQuietHours, isMorning, markNudged, phoneSignalHandler, type HeartbeatOptions } from './heartbeat';
+import { acceptNudge, blocksToNudge, DEFAULT_LEAD_MINUTES, DEFAULT_QUIET_HOURS, formatMorningBrief, formatNudge, inQuietHours, isMorning, markNudged, nudgePrompt, phoneSignalHandler, type HeartbeatOptions } from './heartbeat';
+import type { ScheduleBlock } from '../anchor/anchor';
 import { nowSummary } from './now';
 import { assignNumbers, loadStartState, saveStartState, takeCheckinRequest, type StartState } from './state';
 
@@ -39,6 +40,8 @@ export interface UnifiedDaemonOptions {
   checkinEveryMs?: number;
   /** Proactive schedule heads-ups and the good-morning brief (code only, $0). Default on; `false` turns it off. */
   heartbeat?: HeartbeatOptions | false;
+  /** Pause between two bubbles of one chat reply. Default 350ms. */
+  bubblePauseMs?: number;
   now?: () => Date;
 }
 
@@ -75,9 +78,19 @@ const oneLine = (s: string, max = 200): string => {
 /** Hands the CardBridge only what the daemon did not consume, and sends through the daemon (so echoes are known). */
 class RelayChannel implements LiveChannel {
   inbox: IncomingMessage[] = [];
-  constructor(private readonly sendText: (text: string, relayed: boolean) => Promise<void>) {}
+  constructor(
+    private readonly sendText: (text: string, relayed: boolean) => Promise<void>,
+    private readonly real: LiveChannel,
+  ) {}
   async send(text: string): Promise<void> {
     await this.sendText(text, true);
+  }
+  async typing(): Promise<void> {
+    await this.real.typing?.().catch(() => undefined);
+  }
+  get react(): LiveChannel['react'] {
+    const real = this.real;
+    return real.react ? (id, emoji) => real.react!(id, emoji) : undefined;
   }
   async poll(): Promise<IncomingMessage[]> {
     const out = this.inbox;
@@ -134,8 +147,15 @@ export class UnifiedDaemon {
     if (!this.loop.listHandlers().some((h) => h.id === phoneSignalHandler.id)) this.loop.addHandler(phoneSignalHandler);
     if (this.chief?.hasTools && !this.loop.listSensors().some((x) => x.id === 'inbox')) this.loop.addSensor(inboxSensor(this.loop.dir));
     if (this.channel) {
-      this.relay = new RelayChannel((text, relayed) => this.say(text, relayed));
-      this.bridge = new CardBridge({ engine: this.engine, channel: this.relay, chief: this.chief ?? false, workspaceDir: this.loop.dir, now: this.now });
+      this.relay = new RelayChannel((text, relayed) => this.say(text, relayed), this.channel);
+      this.bridge = new CardBridge({
+        engine: this.engine,
+        channel: this.relay,
+        chief: this.chief ?? false,
+        workspaceDir: this.loop.dir,
+        now: this.now,
+        ...(opts.bubblePauseMs !== undefined ? { bubblePauseMs: opts.bubblePauseMs } : {}),
+      });
     }
   }
 
@@ -243,11 +263,25 @@ export class UnifiedDaemon {
 
     for (const block of blocksToNudge(anchor, now, state.nudged ?? [], hb.leadMinutes ?? DEFAULT_LEAD_MINUTES)) {
       state.nudged = markNudged(state.nudged, anchor, block);
-      const text = formatNudge(block, now);
+      const text = hb.phrasing === 'ai' ? await this.phraseNudge(block, now) : formatNudge(block, now);
       await this.say(text);
       sent.push(text);
     }
     if (sent.length) report.proactive = [...(report.proactive ?? []), ...sent];
+  }
+
+  /** One fast-tier call words the heads-up; the plain code line whenever the model is missing, fails or rambles. */
+  private async phraseNudge(block: ScheduleBlock, now: Date): Promise<string> {
+    try {
+      const raw = await this.engine.routeProvider({ tier: 'fast' }).complete({
+        system: 'You write short, natural text messages.',
+        messages: [{ role: 'user', content: nudgePrompt(block, now) }],
+        meta: { runId: 'heartbeat', flowId: 'heartbeat', step: 'nudge', attempt: 1 },
+      });
+      return acceptNudge(raw) ?? formatNudge(block, now);
+    } catch {
+      return formatNudge(block, now);
+    }
   }
 
   private async persist(): Promise<void> {
@@ -267,6 +301,8 @@ export class UnifiedDaemon {
   }
 
   private async handleIncoming(state: StartState, msg: IncomingMessage, text: string, report: StartTickReport): Promise<void> {
+    // An emoji reaction is seen and remembered by the chat side, never read as an answer or an edit.
+    if (msg.reaction) return void this.relay!.inbox.push(msg);
     const parsed: LoopReply | undefined = parseLoopReply(text);
     if (parsed?.kind === 'checkin') {
       this.chatCheckin = true;
@@ -314,6 +350,7 @@ export class UnifiedDaemon {
     };
     let result;
     try {
+      await this.channel?.typing?.().catch(() => undefined); // committing may run real tools (and a re-plan, a model)
       result = await this.loop.resolveHumanDecision(run.id, decision);
     } catch (err) {
       return this.say(`Couldn't apply that to #${n}: ${oneLine(message(err))}`);

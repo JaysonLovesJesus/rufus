@@ -12,6 +12,10 @@ export interface IncomingMessage {
   text: string;
   /** ISO timestamp, if the channel has one. Used to resume polling after a restart. */
   at?: string;
+  /** The chat app's own id for this message (Telegram's `message_id`), so Rufus can react to it. */
+  messageId?: string;
+  /** Set when this is an emoji reaction the human put on a message (`text` reads like `[reacted 👍]`). */
+  reaction?: { emoji: string; targetMessageId: string };
 }
 
 /** The smallest thing a chat app needs to be: somewhere to send text, and (optionally) to read replies. */
@@ -21,7 +25,14 @@ export interface LiveChannel {
   sendCard?(card: HumanCard, text: string): Promise<string | void>;
   /** New messages from the human, oldest first. `since` is the `at` of the last message handled. */
   poll?(since?: string): Promise<IncomingMessage[]>;
+  /** Shows a typing indicator while Rufus works. Best effort: should never throw. */
+  typing?(): Promise<void>;
+  /** Puts an emoji reaction on one of the human's messages (`messageId` from `IncomingMessage`). Best effort. */
+  react?(messageId: string, emoji: string): Promise<void>;
 }
+
+/** Pause between two chat bubbles, so they arrive like someone typing them one after the other. */
+export const BUBBLE_PAUSE_MS = 350;
 
 export interface TickReport {
   /** Card ids sent this tick. */
@@ -58,6 +69,8 @@ export interface CardBridgeOptions {
    * Defaults to a `ChiefOfStaff` on the same engine; pass `false` to keep the bridge card-only.
    */
   chief?: ChiefOfStaff | false;
+  /** Pause between two chat bubbles of one reply (with a typing indicator in between). Default 350ms. */
+  bubblePauseMs?: number;
 }
 
 const STATE_FILE = 'bridge-state.json';
@@ -85,6 +98,7 @@ export class CardBridge {
   private readonly stateFile: string;
   private readonly now: () => Date;
   private readonly chief?: ChiefOfStaff;
+  private readonly bubblePauseMs: number;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(opts: CardBridgeOptions) {
@@ -93,6 +107,7 @@ export class CardBridge {
     this.stateFile = path.join(opts.workspaceDir ?? opts.engine.store.dir, STATE_FILE);
     this.now = opts.now ?? (() => new Date());
     this.chief = opts.chief === false ? undefined : (opts.chief ?? new ChiefOfStaff({ engine: this.engine }));
+    this.bubblePauseMs = Math.max(0, opts.bubblePauseMs ?? BUBBLE_PAUSE_MS);
   }
 
   /** One pass: read replies, then send any cards the human hasn't seen. Never throws on channel errors. */
@@ -141,7 +156,7 @@ export class CardBridge {
 
   private async receive(state: BridgeState, report: TickReport): Promise<void> {
     if (!this.channel.poll) return;
-    const fresh: string[] = [];
+    const fresh: Array<{ text: string; messageId?: string }> = [];
     for (const msg of await this.channel.poll(state.since)) {
       if (state.handled.includes(msg.id)) {
         report.ignored++;
@@ -157,16 +172,22 @@ export class CardBridge {
         report.ignored++;
         continue;
       }
-      fresh.push(text);
+      if (msg.reaction) {
+        // An emoji on a message is seen (and remembered for the next chat turn), but never needs a reply of its own.
+        await this.chief?.remember([{ role: 'user', text, at: msg.at ?? this.now().toISOString() }]);
+        report.ignored++;
+        continue;
+      }
+      fresh.push({ text, ...(msg.messageId ? { messageId: msg.messageId } : {}) });
     }
     // Several chat texts in a row ("can you move my 3pm" / "actually make it 4") are one thought: ONE turn, ONE reply.
     for (let i = 0; i < fresh.length; i++) {
       const parts = [fresh[i]!];
-      if (await this.isPlainChat(state, parts[0]!)) {
-        while (i + 1 < fresh.length && (await this.isPlainChat(state, fresh[i + 1]!))) parts.push(fresh[++i]!);
+      if (await this.isPlainChat(state, parts[0]!.text)) {
+        while (i + 1 < fresh.length && (await this.isPlainChat(state, fresh[i + 1]!.text))) parts.push(fresh[++i]!);
       }
       if (parts.length > 1) report.merged = (report.merged ?? 0) + parts.length - 1;
-      await this.handleReply(state, parts.join('\n'), report);
+      await this.handleReply(state, parts.map((p) => p.text).join('\n'), report, parts.at(-1)!.messageId);
     }
   }
 
@@ -181,16 +202,35 @@ export class CardBridge {
    * A message that is not an answer to a card goes to the Chief of Staff, who can always reply.
    * `hint` is what to say instead when the chief can't think (no AI configured) and a card is waiting.
    */
-  private async chat(state: BridgeState, text: string, hint?: string): Promise<void> {
+  private async chat(state: BridgeState, text: string, hint?: string, messageId?: string): Promise<void> {
+    // Free-form chat means a model (and maybe tools) is about to work: show "typing..." meanwhile.
+    if (this.chief && !this.chief.isCommand(text)) await this.typing();
     const reply = await this.chief?.handle(text);
     if (!reply || (reply.unavailable && hint)) return void (await this.say(state, hint ?? 'Nothing is waiting on you right now.'));
     // The card is already in the reply, so mark it delivered or the next deliver pass would text it again.
     for (const card of reply.cards) if (!state.delivered.includes(card.id)) state.delivered.push(card.id);
     if (reply.cards.length) await this.save(state);
-    await this.say(state, reply.text);
+    if (reply.silent) return; // nothing needed saying
+    if (reply.react) {
+      // "ok thanks" deserves a 👍 on their message, not a robotic sentence. No way to react: the emoji itself.
+      if (messageId && this.channel.react) return void (await this.channel.react(messageId, reply.react).catch(() => undefined));
+      return void (await this.say(state, reply.react));
+    }
+    const bubbles = reply.bubbles?.length ? reply.bubbles : [reply.text];
+    for (const [i, bubble] of bubbles.entries()) {
+      if (i > 0) {
+        await this.typing();
+        if (this.bubblePauseMs) await new Promise((r) => setTimeout(r, this.bubblePauseMs));
+      }
+      await this.say(state, bubble);
+    }
   }
 
-  private async handleReply(state: BridgeState, raw: string, report: TickReport): Promise<void> {
+  private async typing(): Promise<void> {
+    await this.channel.typing?.().catch(() => undefined);
+  }
+
+  private async handleReply(state: BridgeState, raw: string, report: TickReport, messageId?: string): Promise<void> {
     const pendingIds = new Set(state.delivered);
     const open = (await this.engine.pending()).filter((c) => pendingIds.has(c.id));
 
@@ -205,20 +245,20 @@ export class CardBridge {
       card = hits[0];
       body = raw.slice(ref[0].length);
     } else if (!open.length || this.chief?.isCommand(raw)) {
-      return this.chat(state, raw);
+      return this.chat(state, raw, undefined, messageId);
     } else if (open.length === 1) {
       card = open[0];
     } else if (/^\d/.test(raw)) {
       return void (await this.say(state, `${open.length} cards are open. Start your reply with a ref, like "${open[0]!.id.slice(0, 6)} 1".`));
     } else {
-      return this.chat(state, raw, `${open.length} cards are open. Start your reply with a ref, like "${open[0]!.id.slice(0, 6)} 1".`);
+      return this.chat(state, raw, `${open.length} cards are open. Start your reply with a ref, like "${open[0]!.id.slice(0, 6)} 1".`, messageId);
     }
 
     const parsed = parseTextReply(body, card!);
     if (!parsed) {
       const options = card!.options.map((o, i) => `${i + 1} (${o.label})`).join(', ');
       // A choice-only card can't take this text. It may be a question for the chief instead.
-      return this.chat(state, raw, `Couldn't read that as an answer.${options ? ` Reply ${options}.` : ''}`);
+      return this.chat(state, raw, `Couldn't read that as an answer.${options ? ` Reply ${options}.` : ''}`, messageId);
     }
 
     let result: RunResult;

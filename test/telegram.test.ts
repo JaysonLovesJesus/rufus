@@ -83,6 +83,34 @@ describe('TelegramChannel.send', () => {
   });
 });
 
+describe('TelegramChannel typing and reactions', () => {
+  it('typing() is sendChatAction "typing"; react() is setMessageReaction with one emoji', async () => {
+    const t = fakeTelegram();
+    const ch = new TelegramChannel({ ...opts, fetch: t.fn });
+    await ch.typing();
+    await ch.react('12', '👍');
+    expect(t.calls).toEqual([
+      { method: 'sendChatAction', params: { chat_id: CHAT, action: 'typing' } },
+      { method: 'setMessageReaction', params: { chat_id: CHAT, message_id: 12, reaction: [{ type: 'emoji', emoji: '👍' }] } },
+    ]);
+  });
+
+  it('poll delivers a message_reaction from the human as "[reacted <emoji>]" with its target, and messages carry their id', async () => {
+    const t = fakeTelegram({
+      getUpdates: () => [
+        msg(1, 'hello'),
+        { update_id: 2, message_reaction: { chat: { id: Number(CHAT) }, message_id: 1, user: { id: 7 }, date: 1_800_000_000, old_reaction: [], new_reaction: [{ type: 'emoji', emoji: '❤️' }] } },
+      ],
+    });
+    const got = await new TelegramChannel({ ...opts, fetch: t.fn }).poll();
+    expect(t.of('getUpdates')[0]!.params.allowed_updates).toContain('message_reaction');
+    expect(got.map((m) => [m.text, m.messageId, m.reaction])).toEqual([
+      ['hello', '1', undefined],
+      ['[reacted ❤️]', undefined, { emoji: '❤️', targetMessageId: '1' }],
+    ]);
+  });
+});
+
 describe('TelegramChannel.poll', () => {
   it('advances the offset so an update is never delivered twice', async () => {
     const batches = [[msg(10, 'one'), msg(11, 'two')], [msg(12, 'three')], []];
@@ -125,7 +153,7 @@ describe('TelegramChannel.poll', () => {
     });
     const ch = new TelegramChannel({ ...opts, fetch: t.fn });
     const got = await ch.poll();
-    expect(got).toEqual([{ id: 'tg_5', text: 'mine', at: new Date(1_800_000_000_000).toISOString() }]);
+    expect(got).toEqual([{ id: 'tg_5', text: 'mine', messageId: '5', at: new Date(1_800_000_000_000).toISOString() }]);
     await ch.poll();
     expect(t.of('getUpdates')[1]!.params.offset).toBe(6); // strangers' updates are not re-delivered
   });
@@ -168,9 +196,9 @@ describe('TelegramChannel voice notes', () => {
     };
     const got = await new TelegramChannel({ ...opts, fetch: t.fn, transcribe }).poll();
     expect(got).toEqual([
-      { id: 'tg_1', text: 'first', at: new Date(1_800_000_000_000).toISOString() },
-      { id: 'tg_2', text: 'remind me to call the plumber tomorrow', at: new Date(1_800_000_000_000).toISOString() },
-      { id: 'tg_3', text: 'last', at: new Date(1_800_000_000_000).toISOString() },
+      { id: 'tg_1', text: 'first', messageId: '1', at: new Date(1_800_000_000_000).toISOString() },
+      { id: 'tg_2', text: 'remind me to call the plumber tomorrow', messageId: '2', at: new Date(1_800_000_000_000).toISOString() },
+      { id: 'tg_3', text: 'last', messageId: '3', at: new Date(1_800_000_000_000).toISOString() },
     ]);
     expect(t.of('getFile').map((c) => c.params)).toEqual([{ file_id: 'voice-2' }]);
     expect(t.of('file:voice/voice-2.oga')).toHaveLength(1);
