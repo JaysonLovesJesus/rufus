@@ -1,4 +1,4 @@
-// Browser adapter: a generic history export (JSON array / JSONL of { url, title, visitCount, lastVisitAt }), or, when the
+// Browser adapter: a generic history export (JSON array / JSONL of { url, title, visitCount, lastVisitAt }; also { url, title, count, last } with `last` as ISO, Unix s/ms or Apple Cocoa seconds), or, when the
 // `sqlite3` CLI is available, a Chromium-family (Chrome, Arc, Edge, Brave) or Safari history database. A database is
 // never opened in place: it is copied to a temp folder and queried read-only, so a running browser is never disturbed.
 import { execFile } from 'node:child_process';
@@ -21,7 +21,11 @@ export interface BrowserOptions extends CollectOptions {
 const CHROMIUM_EPOCH_MS = 11644473600000; // 1601-01-01 -> 1970-01-01
 const COCOA_EPOCH_S = 978307200; // 2001-01-01 -> 1970-01-01
 
-/** A visit time as epoch ms. Numbers: > 1e16 Chromium microseconds, > 1e11 milliseconds, otherwise Unix seconds. Strings: ISO or numeric. */
+/**
+ * A visit time as epoch ms. Numbers: > 1e16 Chromium microseconds, > 1e11 milliseconds, > 1.5e9 Unix seconds, and
+ * 5e8 to 1.2e9 Apple Cocoa / CoreData seconds (since 2001-01-01; that range is 2016 to 2039 as Cocoa, and nothing a
+ * real history holds as Unix seconds). Anything else small is Unix seconds. Strings: ISO or numeric.
+ */
 export function parseVisitTime(v: unknown, epoch: 'auto' | 'chromium' | 'cocoa' = 'auto'): number | undefined {
   let n: number | undefined;
   if (typeof v === 'number') n = v;
@@ -36,6 +40,8 @@ export function parseVisitTime(v: unknown, epoch: 'auto' | 'chromium' | 'cocoa' 
   if (epoch === 'cocoa') return (n + COCOA_EPOCH_S) * 1000;
   if (n > 1e16) return n / 1000 - CHROMIUM_EPOCH_MS;
   if (n > 1e11) return n;
+  if (n > 1.5e9) return n * 1000;
+  if (n >= 5e8 && n <= 1.2e9) return (n + COCOA_EPOCH_S) * 1000;
   return n * 1000;
 }
 
@@ -54,7 +60,7 @@ export function visitFromRecord(raw: unknown, epoch: 'auto' | 'chromium' | 'coco
   const r = raw as Record<string, unknown>;
   const url = first(r, ['url', 'URL', 'href']);
   if (typeof url !== 'string') return undefined;
-  const at = parseVisitTime(first(r, ['lastVisitAt', 'lastVisitTime', 'last_visit_time', 'lastVisit', 'visitedAt', 'visit_time', 'timestamp', 'date', 'time']), epoch);
+  const at = parseVisitTime(first(r, ['lastVisitAt', 'lastVisitTime', 'last_visit_time', 'lastVisit', 'visitedAt', 'visit_time', 'last', 'timestamp', 'date', 'time']), epoch);
   if (at === undefined) return undefined;
   const title = first(r, ['title', 'name']);
   const count = Number(first(r, ['visitCount', 'visit_count', 'visits', 'count']) ?? 1);

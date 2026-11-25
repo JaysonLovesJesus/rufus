@@ -2,6 +2,7 @@ export { defineFlow, isFlow } from './engine/flow';
 export { Engine, type EngineOptions } from './engine/engine';
 export { AiVerificationError } from './engine/ai';
 export { summarizeSpectrum, formatSpectrum, spectrumOf, addSpectrum, emptySpectrum } from './engine/spectrum';
+export { GeminiProvider, type GeminiConfig } from './providers/gemini';
 export { FakeProvider, OpenAiCompatibleProvider, CommandProvider, createProvider, createProviders, pickProvider, DEFAULT_PROVIDER } from './engine/providers';
 export { FileStore } from './store';
 export { CaseStore, captureCase, formatExamples, type ReplayCase } from './learning/cases';
@@ -93,6 +94,10 @@ export {
   ADAPTERS,
   CorpusStore,
   GENERIC_MAIL_DOMAINS,
+  aiPromptsAdapter,
+  cleanPromptText,
+  humanPrompts,
+  tagPrompt,
   browserAdapter,
   buildCorpusSummary,
   isAutomatedSender,
@@ -111,6 +116,8 @@ export {
   normalizeItem,
   queryCorpus,
   type AddReport,
+  type AiPromptsOptions,
+  type PromptKind,
   type BrowserOptions,
   type CalendarOptions,
   type CollectOptions,

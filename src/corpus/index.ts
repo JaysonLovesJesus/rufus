@@ -3,6 +3,7 @@
 import path from 'node:path';
 import type { HistoryPair } from '../history/types';
 import { DAY_MS, rankWeights, recencyWeight, resolveRecencyMode, toMs, type TimeLike } from '../recency';
+import { aiPromptsAdapter } from './adapters/ai-prompts';
 import { browserAdapter } from './adapters/browser';
 import { calendarAdapter } from './adapters/calendar';
 import { emailAdapter } from './adapters/email';
@@ -14,6 +15,7 @@ import { clip, stableId, type CollectOptions, type CorpusItem, type SourceAdapte
 export { CorpusStore, type AddReport } from './store';
 export { clip, normalizeItem, stableId, type CollectOptions, type CorpusItem, type SourceAdapter } from './types';
 export { filesAdapter, type FilesOptions } from './adapters/files';
+export { aiPromptsAdapter, cleanPromptText, humanPrompts, tagPrompt, type AiPromptsOptions, type PromptKind } from './adapters/ai-prompts';
 export { browserAdapter, parseVisitTime, visitFromRecord, visitsToItems, type BrowserOptions } from './adapters/browser';
 export { calendarAdapter, parseIcs, type CalendarOptions } from './adapters/calendar';
 export { emailAdapter, parseAddress, splitMbox, type EmailOptions } from './adapters/email';
@@ -27,9 +29,10 @@ export const ADAPTERS: Record<string, SourceAdapter<any>> = {
   browser: browserAdapter,
   calendar: calendarAdapter,
   email: emailAdapter,
+  'ai-prompts': aiPromptsAdapter,
 };
 
-/** `files`, `browser`, `calendar` or `email` (the singular `file` also works). */
+/** `files`, `browser`, `calendar`, `email` or `ai-prompts` (the singular `file` also works). */
 export function getAdapter(id: string): SourceAdapter<any> {
   const key = id === 'file' ? 'files' : id;
   const a = ADAPTERS[key];

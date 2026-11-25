@@ -67,6 +67,8 @@ export interface AiRequest {
   system: string;
   messages: AiMessage[];
   model?: string;
+  /** Ask the provider for a JSON object reply when it supports a native JSON mode (Gemini does). Others ignore it. */
+  json?: boolean;
   meta: { runId: string; flowId: string; step: string; attempt: number };
 }
 
@@ -105,6 +107,8 @@ export interface AiStepOptions<T = string> {
   /** Default 2 (so up to 3 attempts). */
   maxRetries?: number;
   model?: string;
+  /** Ask the provider for a JSON reply when it has a native JSON mode (e.g. Gemini). Set it when `parse` expects JSON. */
+  json?: boolean;
   /** Name of a provider in `config.providers` (or `"default"`). Beats the flow's `meta.provider`. */
   provider?: string;
   /**
@@ -125,6 +129,8 @@ export interface AiStepOptions<T = string> {
 /** Per-rung tweaks for `ctx.escalate`. */
 export interface RungOptions {
   model?: string;
+  /** Ask the provider for a JSON reply when it has a native JSON mode (e.g. Gemini). Set it when `parse` expects JSON. */
+  json?: boolean;
   /** Name of a provider in `config.providers`. Beats the rung's tier. */
   provider?: string;
   /** Retries on this rung before moving up. Default 1 for `fast`, 2 for `smart`. */
@@ -231,7 +237,21 @@ export type RunResult =
 
 export type ProviderConfig =
   | { type: 'openai-compatible'; baseUrl: string; model: string; apiKeyEnv?: string }
-  | { type: 'command'; command: string; args?: string[] };
+  | { type: 'command'; command: string; args?: string[] }
+  | {
+      type: 'gemini';
+      /** Default `gemini-2.5-flash`. */
+      model?: string;
+      /** The key itself. Prefer `apiKeyEnv`. Sent in the `x-goog-api-key` header, never in a URL. */
+      apiKey?: string;
+      /** Default `GEMINI_API_KEY`. */
+      apiKeyEnv?: string;
+      /** Default `https://generativelanguage.googleapis.com/v1beta`. */
+      baseUrl?: string;
+      temperature?: number;
+      maxOutputTokens?: number;
+      timeoutMs?: number;
+    };
 
 /** Telegram Bot API settings. Env vars (RUFUS_TELEGRAM_*) override these; prefer env for the token. */
 export interface TelegramConfig {

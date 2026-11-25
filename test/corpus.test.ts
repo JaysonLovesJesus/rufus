@@ -151,6 +151,39 @@ describe('browser adapter', () => {
     expect(visitFromRecord({ url: 'https://example.org' })).toBeUndefined();
   });
 
+  it('reads { url, title, count, last } with ISO, Unix ms, Unix s and Apple Cocoa epoch seconds', async () => {
+    const dir = await tempDir();
+    const file = path.join(dir, 'cocoa.json');
+    const when = Date.parse('2026-06-14T08:00:00Z');
+    const cocoa = when / 1000 - 978307200; // seconds since 2001-01-01, ~8.0e8
+    await writeFile(
+      file,
+      JSON.stringify([
+        { url: 'https://cocoa.example.org/a', title: 'Cocoa', count: 7, last: cocoa },
+        { url: 'https://iso.example.org/a', title: 'Iso', count: 2, last: '2026-06-13T08:00:00Z' },
+        { url: 'https://ms.example.org/a', count: 1, last: when - 2 * 86_400_000 },
+        { url: 'https://sec.example.org/a', count: 1, last: (when - 3 * 86_400_000) / 1000 },
+        { url: 'https://cocoa-str.example.org/a', count: 1, last: String(cocoa - 4 * 86_400) },
+      ]),
+    );
+    const items = await browserAdapter.collect({ path: file });
+    const at = (d: string) => items.find((i) => i.domain === d)!;
+    expect(at('cocoa.example.org')).toMatchObject({ timestamp: '2026-06-14T08:00:00.000Z', metadata: { visitCount: 7 }, title: 'Cocoa' });
+    expect(at('iso.example.org').timestamp).toBe('2026-06-13T08:00:00.000Z');
+    expect(at('ms.example.org').timestamp).toBe('2026-06-12T08:00:00.000Z');
+    expect(at('sec.example.org').timestamp).toBe('2026-06-11T08:00:00.000Z');
+    expect(at('cocoa-str.example.org').timestamp).toBe('2026-06-10T08:00:00.000Z');
+  });
+
+  it('classifies numeric times by range: Cocoa 5e8..1.2e9, Unix seconds above 1.5e9, ms above 1e11', () => {
+    const iso = (v: number) => new Date(parseVisitTime(v)!).toISOString();
+    expect(iso(5e8)).toBe(new Date((5e8 + 978307200) * 1000).toISOString());
+    expect(iso(1.2e9)).toBe(new Date((1.2e9 + 978307200) * 1000).toISOString());
+    expect(iso(1.5e9 + 1)).toBe(new Date((1.5e9 + 1) * 1000).toISOString());
+    expect(iso(1.7e12)).toBe(new Date(1.7e12).toISOString());
+    expect(visitFromRecord({ url: 'https://example.org', last: 8e8 })!.at).toBe((8e8 + 978307200) * 1000);
+  });
+
   const hasSqlite = (() => {
     try {
       execFileSync('sqlite3', ['--version']);

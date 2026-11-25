@@ -1,6 +1,39 @@
 # Rufus
 
-A small, domain-agnostic **AI + Code + Human** chief-of-staff engine.
+A small, domain-agnostic **AI + Code + Human** chief-of-staff engine, in five pieces.
+
+| # | Piece | What it is |
+| --- | --- | --- |
+| 1 | **Data** | Real-time and first-party history: chats, email, browser, calendar, files, and **human-only AI prompts** (what *you* asked and decided, never what a model answered). One local corpus, `rufus collect`. |
+| 2 | **Learning** | One unified, living-belief system backed by observations: **invariants** (true nearly every time), **conditional logic** (`if / else` with real exceptions) and **tension flags** (where your stated ideals and your habits disagree). Lessons are proposed, replay-gated and kept honest. |
+| 3 | **Flows** (Spectrum of Intelligence) | Every step runs on the cheapest rung that works: `Code → Fast Model → Smart Model → Human`. Work stays left; the human keeps vision, taste and the final say. |
+| 4 | **Providers** | Pluggable AI power: **Google Gemini** (native, zero dependencies), Claude (any CLI, e.g. `claude -p`), any OpenAI-compatible HTTP endpoint, or any local command. |
+| 5 | **Channels** | Pluggable human surfaces: CLI, Telegram, Beeper, or your own `ChannelAdapter`. |
+
+```
+ Data ──▶ Learning ──▶ Flows:  Code ─▶ Fast ─▶ Smart ─▶ Human ──▶ Channels
+              ▲                        └──── Providers power Fast and Smart ────┘
+              └────────────── every human answer teaches the next run ──────────┘
+```
+
+### Run 100% on Google Gemini
+
+No Claude needed. Put a key in your environment (`export GEMINI_API_KEY=...`; it is sent in the `x-goog-api-key` header, never in a URL) and use this `config.json` in your workspace:
+
+```json
+{
+  "version": 1,
+  "provider": { "type": "gemini", "model": "gemini-2.5-flash" },
+  "providers": {
+    "fast":  { "type": "gemini", "model": "gemini-2.5-flash" },
+    "smart": { "type": "gemini", "model": "gemini-2.5-pro" }
+  }
+}
+```
+
+Optional per-provider settings: `apiKeyEnv` (default `GEMINI_API_KEY`), `apiKey`, `baseUrl`, `temperature`, `maxOutputTokens`, `timeoutMs`. Mix freely: `fast` on Gemini and `smart` on a local CLI works too. Steps then pick a rung with `tier: 'fast'` / `tier: 'smart'` (see [the Spectrum of Intelligence](#the-spectrum-of-intelligence-code-then-fast-then-smart-then-you)).
+
+---
 
 > **Code** for exactness and for making AI think better.
 > **AI** for judgment and drafting.
@@ -284,24 +317,27 @@ A chief of staff does not only know your chats. It knows your mail, the sites yo
 1. **History is a recency-weighted baseline.** What you did last month says more about you than what you did two years ago, so every summary decays old activity (exponential half-life, counted in observations rather than calendar days) instead of averaging it in.
 2. **Ideals beat habits.** People change, and do not always live up to what they believe. Rufus helps you live up to the lessons you *stated*; it does not freeze your rushed habits. But ideals do not overpower evolution either: when your latest replies keep contradicting a saved lesson, Rufus asks you about it instead of enforcing a stale rule forever.
 
-### One corpus, four adapters (`rufus collect`)
+### One corpus, five adapters (`rufus collect`)
 
-Everything becomes a `CorpusItem`: `{ id, source, kind, title?, summary, actor?, domain?, path?, timestamp, tags?, metadata? }`, with `source` one of `chat`, `email`, `browser`, `file`, `calendar` (or your own). Items live in `<workspace>/corpus/items.jsonl`, deduplicated by `id` (collecting twice changes nothing; an edited note is updated, not duplicated) and written atomically. Only a short summary is kept, never a full document or message body. Adapters are local and dependency-free:
+Everything becomes a `CorpusItem`: `{ id, source, kind, title?, summary, actor?, domain?, path?, timestamp, tags?, metadata? }`, with `source` one of `chat`, `email`, `browser`, `file`, `calendar`, `ai-prompts` (or your own). Items live in `<workspace>/corpus/items.jsonl`, deduplicated by `id` (collecting twice changes nothing; an edited note is updated, not duplicated) and written atomically. Only a short summary is kept, never a full document or message body. Adapters are local and dependency-free:
 
 ```sh
 rufus collect files ./notes ./docs [--ignore drafts,tmp]   # markdown / text / CSV / JSON
 rufus collect calendar ./cal.ics                            # or a JSON list of events
 rufus collect browser ./history.json                        # or a Chrome / Arc / Safari history database
 rufus collect email ./mail.mbox --me me@example.org         # .mbox, .eml (or a folder of them), or JSONL
+rufus collect ai-prompts ./chats.jsonl ./exports/            # AI chat transcripts: ONLY your own messages are kept
 # any of them: --limit N (keep the newest N)  --dry-run (read and report, write nothing)
 ```
 
 | Adapter | Reads | Indexes |
 | --- | --- | --- |
 | `files` | `.md .markdown .txt .csv .tsv .json .jsonl` under one or more roots; skips `node_modules`, `.git`, hidden files, symlinks and binaries | title (front matter, first heading or file name), headings, tags (`tags:` and `#hashtags`), modified time, a 300-character snippet. Reads at most the first 16 KB of a file; tables and JSON contribute column names and keys, never values |
-| `browser` | JSON / JSONL rows `{ url, title, visitCount, lastVisitAt }`, or (with the `sqlite3` CLI installed) a Chromium-family (Chrome, Arc, Edge, Brave) or Safari history database | **domain**, title, visit frequency, last visit. The database is copied to a temp folder and queried read-only, so a running browser is never touched. Query strings and fragments are dropped from stored URLs (the library option `keepQuery` keeps them) because they often carry tokens |
+| `browser` | JSON / JSONL rows `{ url, title, visitCount, lastVisitAt }` or `{ url, title, count, last }` (`last` may be an ISO date, Unix milliseconds or seconds, or Apple Cocoa / CoreData epoch seconds, i.e. macOS Cocoa JSON history exports), or (with the `sqlite3` CLI installed) a Chromium-family (Chrome, Arc, Edge, Brave) or Safari history database | **domain**, title, visit frequency, last visit. The database is copied to a temp folder and queried read-only, so a running browser is never touched. Query strings and fragments are dropped from stored URLs (the library option `keepQuery` keeps them) because they often carry tokens |
 | `calendar` | `.ics` (folded lines, escapes, attendees, all-day events, `RRULE`, cancellations skipped, alarms ignored), or JSON events `{ summary, start, end, location, attendees, recurring }` | start, end, location, attendees, organizer, whether and how it recurs. There is no time zone database: floating and `TZID` times are read as UTC |
 | `email` | `.mbox`, `.eml` (or a folder), or normalized JSONL `{ id, from, to, subject, snippet, date, isFromMe }` | subject, a 240-character snippet (quoted replies and signatures dropped), counterpart, **sender domain**, sent vs. received. `--me` lists your own addresses so `.mbox` / `.eml` messages can be marked sent; without it nothing is guessed |
+
+**`ai-prompts` is human-only on purpose.** It reads JSON / JSONL transcripts in common shapes (`{ role, content | text, timestamp, threadId }` lines, `{ type: "user_message", text }`, `{ createdBy: "user", text }`, or `{ messages: [...] }` conversations) and keeps only messages the human wrote. Assistant, model, system and tool messages are never imported, so model prose cannot colour Rufus's view of you; a message with no clear human signal is dropped rather than guessed, and empty messages and injected wrapper boilerplate are skipped. Each prompt is stored in your own words with a `kind` and `tags` set by plain rules (no AI): `pushback` (also tagged `correction`: "no,", "actually,", "don't", "stop", "instead of", "too complicated", "wrong idea", "not what I..."), `decision` ("let's", "go with", "we should", "I want to"), `question` (contains `?`), else `prompt`. The same prompt in the same thread is stored once.
 
 Write your own: a `SourceAdapter` is `{ id, source, collect(options) => Promise<CorpusItem[]> }`, and `collectInto(store, adapter, options)` merges what it returns.
 
@@ -442,7 +478,7 @@ Rufus keeps **all state outside the repo**, in a workspace directory: `--dir <pa
   scheduler.json  lastRunAt per flow (created by the first tick)
   cases/          saved human reviews, one file per flow (replay + prompt examples)
   history/        pairs.jsonl from `rufus seed`, mine-report.json from `rufus mine --save`
-  corpus/         items.jsonl from `rufus collect` (email, browser, files, calendar)
+  corpus/         items.jsonl from `rufus collect` (email, browser, files, calendar, ai-prompts)
   runs/           one readable JSON file per run
   flows/          your *.flow.ts files, loaded by the CLI
 ```
@@ -464,6 +500,7 @@ if (r.status === 'waiting_human') await engine.answer(r.card.id, { choice: 'send
 - `FakeProvider`: scripted, for tests and demos.
 - `OpenAiCompatibleProvider`: any `/chat/completions` endpoint (OpenAI, OpenRouter, Ollama, vLLM...).
 - `CommandProvider`: pipes the conversation to a CLI on stdin (for example `claude -p`).
+- `GeminiProvider`: Google Gemini over plain `fetch` (`type: "gemini"`), no SDK. Defaults: model `gemini-2.5-flash`, key from `GEMINI_API_KEY`, base URL `https://generativelanguage.googleapis.com/v1beta`. The key goes in the `x-goog-api-key` header only, and error messages never echo it. `ctx.ai(..., { json: true })` switches on Gemini's native JSON mode.
 
 Set one in `config.json`:
 
@@ -472,6 +509,9 @@ Set one in `config.json`:
 ```
 ```json
 { "version": 1, "provider": { "type": "command", "command": "claude", "args": ["-p"] } }
+```
+```json
+{ "version": 1, "provider": { "type": "gemini", "model": "gemini-2.5-flash" } }
 ```
 
 ### Named providers (a different model per flow or step)
@@ -502,11 +542,12 @@ defineFlow({ id: 'inbox', name: 'Inbox', description: '...', provider: 'claude' 
 ## Layout
 
 ```
+src/providers/  native providers (Google Gemini over fetch)
 src/engine/     defineFlow, Engine, step runner, AI verify loop, providers, spectrum (code / fast / smart / human)
 src/store/      atomic JSON file store (no native deps)
 src/learning/   lessons (cap, consolidate, prune, layers, regression gate); cases (auto-captured reviews, prompt examples); replay; compare (plain vs. assisted)
 src/history/    HistoryPair, message extraction, `seed` (pairs -> replay cases), `profiles` (closeness tiers, situational slices, `buildSituationalContext`), `contrast` (invariants vs. conditional logic), `eval` (holdout check), `ideals` (explicit lessons as constraints, drift), `mine` (voice, invariants, intents, recency, optional AI blueprints)
-src/corpus/     `CorpusItem`, `CorpusStore`, `SourceAdapter`s (files, browser, calendar, email), recurrence, `buildCorpusSummary` / `queryCorpus`
+src/corpus/     `CorpusItem`, `CorpusStore`, `SourceAdapter`s (files, browser, calendar, email, ai-prompts), recurrence, `buildCorpusSummary` / `queryCorpus`
 src/recency.ts  exponential and rank-based recency weights, shared by history and the corpus
 src/scheduler/  at/every/onEvent triggers, quiet hours, tick/startLoop
 src/channels/   ChannelAdapter, text formatter + reply parser, CardBridge, Telegram and Beeper adapters

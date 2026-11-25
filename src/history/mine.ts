@@ -761,7 +761,7 @@ export async function synthesizeHistory(
     provider,
     system: SYSTEM,
     step: 'mine',
-    opts: { prompt, context: { stats, sample }, parse: parseSynthesis, maxRetries: 2 },
+    opts: { prompt, context: { stats, sample }, parse: parseSynthesis, json: true, maxRetries: 2 },
     meta: { runId: 'mine', flowId: 'mine' },
   });
   return { provider: providerName, attempts, ...value };

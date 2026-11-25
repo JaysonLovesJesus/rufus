@@ -52,6 +52,7 @@ export async function runAiStep<T>(args: {
       system,
       messages: messages.map((m) => ({ ...m })),
       model: opts.model,
+      ...(opts.json ? { json: true } : {}),
       meta: { ...meta, step, attempt },
     });
 

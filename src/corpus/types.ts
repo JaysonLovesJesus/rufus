@@ -7,8 +7,8 @@ import { createHash } from 'node:crypto';
 export interface CorpusItem {
   /** Stable identity. Collecting the same source twice never duplicates an item with the same id. */
   id: string;
-  /** Where it came from: `chat`, `email`, `browser`, `file`, `calendar`, or your own. */
-  source: 'chat' | 'email' | 'browser' | 'file' | 'calendar' | (string & {});
+  /** Where it came from: `chat`, `email`, `browser`, `file`, `calendar`, `ai-prompts` (only what the human wrote), or your own. */
+  source: 'chat' | 'email' | 'browser' | 'file' | 'calendar' | 'ai-prompts' | (string & {});
   /** What it is within the source: `note`, `visit`, `event`, `received`, `sent`, `exchange`, ... */
   kind: string;
   title?: string;

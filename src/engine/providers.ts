@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { GeminiProvider } from '../providers/gemini';
 import type { AiProvider, AiRequest, ProviderConfig, RufusConfig, Tier } from '../types';
 
 type Scripted = string | ((req: AiRequest) => string | Promise<string>);
@@ -72,6 +73,7 @@ export class CommandProvider implements AiProvider {
 export function createProvider(cfg: ProviderConfig | undefined): AiProvider | undefined {
   if (!cfg) return undefined;
   if (cfg.type === 'command') return new CommandProvider(cfg);
+  if (cfg.type === 'gemini') return new GeminiProvider(cfg);
   const apiKey = process.env[cfg.apiKeyEnv ?? 'RUFUS_API_KEY'];
   return new OpenAiCompatibleProvider({ baseUrl: cfg.baseUrl, model: cfg.model, apiKey });
 }

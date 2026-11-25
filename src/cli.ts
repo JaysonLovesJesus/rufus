@@ -57,7 +57,8 @@ Usage: rufus [--dir <workspace>] <command>
   collect <source> <path...> [--limit N] [--dry-run] [--ignore a,b] [--me addr,addr]
                                add local activity to your life corpus. <source> is files (notes/markdown/CSV/JSON
                                folders), calendar (.ics or JSON), browser (history JSON/JSONL or a Chrome/Arc/Safari
-                               history database) or email (.mbox, .eml, or JSONL). Deduplicated; --dry-run writes nothing
+                               history database), email (.mbox, .eml, or JSONL) or ai-prompts (JSON/JSONL AI chat
+                               transcripts; ONLY your own messages are kept, never the assistant's). Deduplicated; --dry-run writes nothing
   context [query] [--source a,b] [--since <days>] [--limit N] [--half-life <days>] [--json]
                                your Life Context Snapshot (recency-weighted), or a $0 keyword lookup across chats, email,
                                browsing, files and calendar
@@ -436,13 +437,14 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
 
     case 'collect': {
       const [source, ...paths] = rest;
-      if (!source || !paths.length) throw new Error('Usage: rufus collect <files|browser|calendar|email> <path> [--limit N] [--dry-run]');
+      if (!source || !paths.length) throw new Error('Usage: rufus collect <files|browser|calendar|email|ai-prompts> <path> [--limit N] [--dry-run]');
       const adapter = getAdapter(source);
-      if (adapter.id !== 'files' && paths.length > 1) throw new Error(`rufus collect ${adapter.id} takes one path (a file or a folder of exports).`);
+      if (adapter.id !== 'files' && adapter.id !== 'ai-prompts' && paths.length > 1) throw new Error(`rufus collect ${adapter.id} takes one path (a file or a folder of exports).`);
       const options = {
         path: paths[0]!,
         limit: positive('--limit'),
         ...(adapter.id === 'files' ? { roots: paths.slice(1), ignore: list(flags['--ignore']) } : {}),
+        ...(adapter.id === 'ai-prompts' ? { extraPaths: paths.slice(1) } : {}),
         ...(adapter.id === 'email' ? { me: list(flags['--me']) } : {}),
       };
       const { items, report } = await collectInto(new CorpusStore(store.corpusFile), adapter, options, { dryRun });
