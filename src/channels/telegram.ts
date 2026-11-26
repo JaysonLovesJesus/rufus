@@ -37,6 +37,14 @@ export class TelegramChannel implements MessageSink {
     if (!res.ok) throw new Error(`Telegram editMessageText failed (${res.status}): ${await res.text()}`);
   }
 
+  async typing(): Promise<void> {
+    await fetch(`${this.base}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: this.chatId, action: 'typing' }),
+    }).catch(() => undefined);
+  }
+
   async poll(): Promise<LosslessEvent[]> {
     const url = `${this.base}/getUpdates?timeout=0&allowed_updates=${encodeURIComponent(JSON.stringify(['message']))}${this.offset ? `&offset=${this.offset}` : ''}`;
     const res = await fetch(url);

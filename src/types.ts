@@ -139,6 +139,7 @@ export interface RpgWakeReport {
 export interface MessageSink {
   send(text: string): Promise<{ messageId?: string } | void>;
   edit?(messageId: string, text: string): Promise<void>;
+  typing?(): Promise<void>;
 }
 
 export interface CoreConfig {

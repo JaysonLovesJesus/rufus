@@ -117,17 +117,30 @@ export class RufusCore {
     }
 
     this.wakeReceipts = [];
-    const wake = await runRpgWake({
-      workspaceDir: this.workspaceDir,
-      trigger: event,
-      reasoningProvider: this.reasoningProvider,
-      ...(this.reasoningModel ? { reasoningModel: this.reasoningModel } : {}),
-      registry: this.registry,
-      events: this.events,
-      maxTurns: this.maxTurnsPerWake,
-      now: this.now,
-      onReceipt: (r) => this.wakeReceipts.push(r),
-    });
+    // Show continuous "typing..." status indicator while awake (not idle)
+    let typingTimer: NodeJS.Timeout | undefined;
+    if (!this.shadow && this.realSink.typing) {
+      const pulse = () => void this.realSink.typing?.().catch(() => undefined);
+      pulse();
+      typingTimer = setInterval(pulse, 4000);
+      typingTimer.unref?.();
+    }
+    let wake: RpgWakeReport;
+    try {
+      wake = await runRpgWake({
+        workspaceDir: this.workspaceDir,
+        trigger: event,
+        reasoningProvider: this.reasoningProvider,
+        ...(this.reasoningModel ? { reasoningModel: this.reasoningModel } : {}),
+        registry: this.registry,
+        events: this.events,
+        maxTurns: this.maxTurnsPerWake,
+        now: this.now,
+        onReceipt: (r) => this.wakeReceipts.push(r),
+      });
+    } finally {
+      if (typingTimer) clearInterval(typingTimer);
+    }
 
     // Automatic teacher->student label logging for SetFit (skip system startup events)
     if (event.source !== 'system' && event.kind !== 'owner_direct') {
