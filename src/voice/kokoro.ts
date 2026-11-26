@@ -4,6 +4,9 @@ import { existsSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 export interface SynthesizeResult {
   ok: boolean;
@@ -39,14 +42,14 @@ export class KokoroTts {
   }
 
   get available(): boolean {
-    const sidecar = path.resolve(__dirname, 'kokoro_sidecar.py');
+    const sidecar = path.resolve(HERE, 'kokoro_sidecar.py');
     return existsSync(this.pythonPath) && existsSync(path.join(this.ttsDir, 'kokoro-v1.0.int8.onnx')) && existsSync(sidecar);
   }
 
   private async ensureReady(): Promise<boolean> {
     if (!this.available) return false;
     if (this.readyPromise) return this.readyPromise;
-    const sidecar = path.resolve(__dirname, 'kokoro_sidecar.py');
+    const sidecar = path.resolve(HERE, 'kokoro_sidecar.py');
     this.readyPromise = new Promise<boolean>((resolve) => {
       try {
         const child = spawn(this.pythonPath, [sidecar], {

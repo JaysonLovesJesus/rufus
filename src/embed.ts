@@ -2,6 +2,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Local vector embeddings:
@@ -84,7 +87,7 @@ export function createSemanticEmbedder(opts: { pythonPath?: string; modelName?: 
   const modelName = opts.modelName ?? process.env.RUFUS_EMBED_MODEL ?? 'sentence-transformers/paraphrase-MiniLM-L3-v2';
   const fallback = createLocalEmbedder(opts.fallbackDim ?? DEFAULT_DIM);
   const pythonPath = opts.pythonPath;
-  const sidecarPath = path.resolve(__dirname, 'events', 'embed_sidecar.py');
+  const sidecarPath = path.resolve(HERE, 'events', 'embed_sidecar.py');
 
   let proc: ChildProcessWithoutNullStreams | undefined;
   let readyPromise: Promise<boolean> | undefined;
