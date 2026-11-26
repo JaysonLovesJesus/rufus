@@ -58,7 +58,14 @@ export class TelegramChannel implements MessageSink {
       ok?: boolean;
       result?: Array<{
         update_id: number;
-        message?: { message_id: number; date: number; text?: string; chat: { id: number }; from?: { first_name?: string; username?: string } };
+        message?: {
+          message_id: number;
+          date: number;
+          text?: string;
+          chat: { id: number };
+          from?: { first_name?: string; username?: string };
+          reply_to_message?: { message_id: number; text?: string; from?: { first_name?: string; username?: string } };
+        };
       }>;
     };
     if (!data.ok || !data.result?.length) return [];
@@ -73,7 +80,12 @@ export class TelegramChannel implements MessageSink {
         actor: m.from?.first_name || m.from?.username || 'owner',
         text: m.text,
         timestamp: new Date(m.date * 1000).toISOString(),
-        metadata: { messageId: m.message_id, chatId: m.chat.id },
+        ...(m.reply_to_message ? { replyTo: `tg_${m.reply_to_message.message_id}` } : {}),
+        metadata: {
+          messageId: m.message_id,
+          chatId: m.chat.id,
+          ...(m.reply_to_message?.text ? { replyToText: m.reply_to_message.text } : {}),
+        },
       });
       ev.kind = 'owner_direct';
       out.push(ev);

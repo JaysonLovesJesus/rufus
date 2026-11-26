@@ -186,17 +186,19 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
           .map((e) => `- [${e.timestamp}] (${e.source}${e.actor ? ` / ${e.actor}` : ''}): ${e.text}`)
           .join('\n')}`
       : '';
-    const query = [opts.trigger.text, ...arrivals.map((a) => a.text), ...receipts.slice(-2).map((r) => `${r.summary} ${r.error ?? ''} ${(r.nextHints ?? []).join(' ')}`)].join(' ');
+    const replyToText = typeof opts.trigger.metadata?.replyToText === 'string' ? opts.trigger.metadata.replyToText : '';
+    const query = [opts.trigger.text, replyToText, ...arrivals.map((a) => a.text), ...receipts.slice(-2).map((r) => `${r.summary} ${r.error ?? ''} ${(r.nextHints ?? []).join(' ')}`)].join(' ');
     const tools = await opts.registry.selectForPrompt(query, topKTools);
     const skillsBlock = await selectRelevantSkills(opts.workspaceDir, query, { topK: 2 });
 
     const triggerMsgId = opts.trigger.metadata?.messageId !== undefined ? ` | messageId:${opts.trigger.metadata.messageId}` : '';
+    const replyLine = replyToText ? `\n  (in reply to: "${replyToText}")` : '';
     const prompt = [
       `Current local time: ${formatLocalTime(now())}`,
       `Workspace path: ${opts.workspaceDir}`,
       `Live Context (schedule, todos, projects):\n${liveContext}`,
       ...(skillsBlock ? [`Relevant Judgment Skills:\n${skillsBlock}`] : []),
-      `Trigger Event:\n[${formatLocalTime(opts.trigger.timestamp)}] (${opts.trigger.source}${opts.trigger.actor ? ` / ${opts.trigger.actor}` : ''}${triggerMsgId}${opts.trigger.deleted ? ' / DELETED' : ''}): ${opts.trigger.text}`,
+      `Trigger Event:\n[${formatLocalTime(opts.trigger.timestamp)}] (${opts.trigger.source}${opts.trigger.actor ? ` / ${opts.trigger.actor}` : ''}${triggerMsgId}${opts.trigger.deleted ? ' / DELETED' : ''}): ${opts.trigger.text}${replyLine}`,
       ...(arrivalBlock ? [arrivalBlock] : []),
       `Recent Conversation (including what YOU already said — do not repeat yourself):\n${recentChatBlock}`,
       `Relevant Past Events (embedded retrieval):\n${relatedBlock}`,
