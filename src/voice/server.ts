@@ -52,11 +52,11 @@ const VOICE_HTML = `<!doctype html>
     <span class="pill" id="voiceBadge">Daniel (Kokoro)</span>
   </header>
   <div class="orb-wrap">
-    <button class="orb" id="orb">Tap to Talk</button>
-    <div class="status" id="status">Ready — tap orb to talk or barge in</div>
+    <button class="orb" id="orb">Start Call</button>
+    <div class="status" id="status">Tap Start Call for hands-free voice with Daniel</div>
   </div>
   <form class="bar" id="textForm">
-    <input id="textInput" placeholder="Or type to speak with Daniel..." autocomplete="off" />
+    <input id="textInput" placeholder="Or type anytime..." autocomplete="off" />
     <button type="submit">Send</button>
   </form>
   <div class="log" id="log"></div>
@@ -68,9 +68,16 @@ const VOICE_HTML = `<!doctype html>
   const textInput = document.getElementById('textInput');
   const audioQueue = [];
   let currentAudio = null;
+  let inCall = false;
+  let stream = null;
+  let audioCtx = null;
+  let analyser = null;
+  let vadRaf = null;
   let recorder = null;
   let chunks = [];
-  let isRecording = false;
+  let speakingNow = false;
+  let silenceStart = 0;
+  let speechStart = 0;
 
   function addMsg(role, text) {
     const div = document.createElement('div');
@@ -95,13 +102,13 @@ const VOICE_HTML = `<!doctype html>
     const audio = new Audio(item.url);
     currentAudio = audio;
     orb.classList.add('speaking');
-    statusEl.textContent = 'Speaking... (tap orb to interrupt)';
+    statusEl.textContent = 'Daniel is speaking... (just talk to interrupt)';
     audio.onended = audio.onerror = () => {
       currentAudio = null;
       if (audioQueue.length) playNext();
       else {
         orb.classList.remove('speaking');
-        statusEl.textContent = 'Ready';
+        statusEl.textContent = inCall ? 'On call — listening...' : 'Ready';
       }
     };
     audio.play().catch(() => { currentAudio = null; orb.classList.remove('speaking'); });
@@ -115,7 +122,7 @@ const VOICE_HTML = `<!doctype html>
       audioQueue.push(msg);
       playNext();
     } else if (msg.type === 'status') {
-      if (!isRecording && !currentAudio) statusEl.textContent = msg.text;
+      if (!speakingNow && !currentAudio) statusEl.textContent = msg.text;
     }
   };
 
@@ -138,44 +145,108 @@ const VOICE_HTML = `<!doctype html>
     sendText(val);
   };
 
-  orb.onclick = async () => {
-    if (currentAudio) {
-      stopPlayback();
-    }
-    if (isRecording && recorder) {
-      isRecording = false;
-      orb.classList.remove('listening');
-      orb.textContent = 'Tap to Talk';
-      statusEl.textContent = 'Transcribing...';
+  function startUtterance() {
+    if (!stream || recorder) return;
+    chunks = [];
+    const rec = new MediaRecorder(stream);
+    recorder = rec;
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    rec.onstop = async () => {
+      const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+      recorder = null;
+      if (blob.size < 1800) return;
+      statusEl.textContent = 'Hearing you...';
+      const buf = await blob.arrayBuffer();
+      const res = await fetch('/voice/audio', {
+        method: 'POST',
+        headers: { 'content-type': blob.type || 'audio/webm' },
+        body: buf,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.transcript) addMsg('you', data.transcript);
+      else statusEl.textContent = data.error || 'Could not catch that';
+    };
+    rec.start();
+  }
+
+  function stopUtterance() {
+    if (recorder && recorder.state === 'recording') {
       recorder.stop();
-      return;
     }
+  }
+
+  function runVadLoop() {
+    if (!inCall || !analyser) return;
+    const data = new Uint8Array(analyser.fftSize);
+    analyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      const v = (data[i] - 128) / 128;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / data.length);
+    const now = performance.now();
+    // Higher threshold while Daniel is playing to prevent speaker echo from self-interrupting
+    const threshold = currentAudio ? 0.065 : 0.025;
+
+    if (rms > threshold) {
+      silenceStart = 0;
+      if (!speakingNow) {
+        speakingNow = true;
+        speechStart = now;
+        if (currentAudio) stopPlayback(); // Hands-free barge-in!
+        orb.classList.add('listening');
+        statusEl.textContent = 'Listening...';
+        startUtterance();
+      }
+    } else if (speakingNow) {
+      if (!silenceStart) silenceStart = now;
+      if (now - silenceStart > 750 && now - speechStart > 350) {
+        speakingNow = false;
+        silenceStart = 0;
+        orb.classList.remove('listening');
+        stopUtterance();
+      }
+    }
+    vadRaf = requestAnimationFrame(runVadLoop);
+  }
+
+  async function startCall() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      chunks = [];
-      recorder = new MediaRecorder(stream);
-      recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-        const buf = await blob.arrayBuffer();
-        const res = await fetch('/voice/audio', {
-          method: 'POST',
-          headers: { 'content-type': blob.type || 'audio/webm' },
-          body: buf,
-        });
-        const data = await res.json().catch(() => ({}));
-        if (data.transcript) addMsg('you', data.transcript);
-        else statusEl.textContent = data.error || 'Could not transcribe audio';
-      };
-      recorder.start();
-      isRecording = true;
-      orb.classList.add('listening');
-      orb.textContent = 'Listening...';
-      statusEl.textContent = 'Tap again when done speaking';
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      src.connect(analyser);
+      inCall = true;
+      orb.textContent = 'End Call';
+      statusEl.textContent = 'On call — just start talking';
+      runVadLoop();
     } catch (err) {
-      statusEl.textContent = 'Mic unavailable (use HTTPS/localhost or type below)';
+      statusEl.textContent = 'Mic unavailable (allow mic permission or use HTTPS)';
     }
+  }
+
+  function endCall() {
+    inCall = false;
+    speakingNow = false;
+    if (vadRaf) cancelAnimationFrame(vadRaf);
+    stopUtterance();
+    stopPlayback();
+    if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+    if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
+    analyser = null;
+    orb.classList.remove('listening', 'speaking');
+    orb.textContent = 'Start Call';
+    statusEl.textContent = 'Call ended';
+  }
+
+  orb.onclick = () => {
+    if (inCall) endCall();
+    else startCall();
   };
 </script>
 </body>
@@ -229,7 +300,7 @@ export function createVoiceHttpHandler(deps: VoiceHandlerDeps) {
     const tmp = path.join(os.tmpdir(), `rufus-in-${randomUUID().slice(0, 8)}${ext}`);
     try {
       await fs.writeFile(tmp, buf);
-      const args = deps.stt.args.map((a) => a.replace(/\{path\}/g, tmp));
+      const args = deps.stt.args.map((a) => a.replace(/\{(?:path|file)\}/g, tmp));
       const { stdout } = await execFileAsync(deps.stt.command, args, { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 });
       return stdout.trim() || undefined;
     } finally {

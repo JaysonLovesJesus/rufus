@@ -123,16 +123,15 @@ export async function renderWithSpeaker(opts: {
         .join('\n')
     : '(none — no tools ran before this message)';
 
-  const triggerLine =
-    opts.trigger && opts.trigger.source !== 'system' && opts.trigger.kind !== 'owner_direct'
-      ? `\n\nWhat triggered this wake:\n[${opts.trigger.source}/${opts.trigger.kind}${opts.trigger.actor ? ` from ${opts.trigger.actor}` : ''}]: ${opts.trigger.text.slice(0, 260)}`
-      : '';
+  const triggerFact = opts.trigger
+    ? `0. [trigger | ${opts.trigger.source}/${opts.trigger.kind}${opts.trigger.actor ? ` | ${opts.trigger.actor}` : ''}] ${opts.trigger.text.slice(0, 260)}`
+    : '';
+  const allFacts = [triggerFact, ...(selected.length ? [receiptBlock] : [])].filter(Boolean).join('\n') || '(none)';
 
   const system = [
     'You are the Speaker. Voice the Purpose below using ONLY the verified Facts from Code.',
     'Hard Rules:',
     '- Honor the Purpose directly (never drop the main point, e.g., that you restarted or answered the question).',
-    '- If an external trigger is shown (like someone messaging or an email arriving), briefly connect the dots so the user knows why you are reaching out.',
     '- Use ONLY the Facts below — never invent or claim any change not in `changes`.',
     '- Keep it tight: 1-2 short, natural sentences (unless listing 3+ items, in which case use a clean numbered list, one item per line).',
     '- First person only ("I"). Never quote UTC times. Never open with "Done" unless a write succeeded.',
@@ -142,7 +141,7 @@ export async function renderWithSpeaker(opts: {
     voice,
   ].join('\n');
 
-  const prompt = `Purpose of this message:\n${opts.purpose}${triggerLine}\n\nVerified Facts from Code:\n${receiptBlock}\n\nWrite ONLY the final message.`;
+  const prompt = `Purpose of this message:\n${opts.purpose}\n\nVerified Facts from Code:\n${allFacts}\n\nWrite ONLY the final message.`;
 
   let text = normalizeMultiline(await opts.provider.complete({ system, prompt, ...(opts.model ? { model: opts.model } : {}) }));
   let violations = verifySpokenReply(text, opts.receipts);
