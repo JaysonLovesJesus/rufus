@@ -554,5 +554,22 @@ describe('v26 UnifiedDaemon with brain: "continuous"', () => {
     multiBrain.push(brainEvent('owner_message', 'list them', { at: NOW }));
     await multiBrain.runUntilRest();
     expect(sent).toEqual(['Your projects:\n1. alpha\n2. beta']);
+
+    // Claim verifier blocks claiming "Down to five projects" when no files.write ran
+    const liarSent: string[] = [];
+    const liarBrain = new ContinuousBrain({
+      dir,
+      provider: new FakeProvider((req) =>
+        req.meta.attempt === 1
+          ? actions(say('Got it. Down to five projects now.'), rest)
+          : actions(say('Those 3 project files are still on disk; say the word and I will archive them.'), rest),
+      ),
+      outlet: { say: async (t) => void liarSent.push(t) },
+      now: () => NOW,
+    });
+    liarBrain.push(brainEvent('owner_message', 'drop 3 projects', { at: NOW }));
+    const liarRep = await liarBrain.runUntilRest();
+    expect(liarRep.verifier?.violations).toContain('claimed_files_without_tool');
+    expect(liarSent).toEqual(['Those 3 project files are still on disk; say the word and I will archive them.']);
   });
 });

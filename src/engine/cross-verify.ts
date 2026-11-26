@@ -25,7 +25,7 @@ export interface VerifiedToolCall {
 }
 
 /** What kind of state change a reply claims it made. */
-export type ActionClaimKind = 'clear' | 'send' | 'react' | 'schedule' | 'autonomy' | 'mission' | 'remember';
+export type ActionClaimKind = 'clear' | 'send' | 'react' | 'schedule' | 'autonomy' | 'mission' | 'remember' | 'files';
 
 /** `claimed_<kind>_without_tool`, e.g. `claimed_clear_without_tool`. */
 export type ActionClaimViolation = `claimed_${ActionClaimKind}_without_tool`;
@@ -84,7 +84,14 @@ const CLAIM_RULES: readonly ClaimRule[] = [
     kind: 'remember',
     verbs: "saved (?:that|it|this|your)|noted (?:that|it|this)|made a note|remembered (?:that|it)|stored (?:that|it)|added (?:that|it|this) to (?:my|your) (?:notes|memory)",
     passive: false,
-    backedBy: (t) => t === 'remember',
+    backedBy: (t) => t === 'remember' || t === 'memory.write',
+  },
+  {
+    kind: 'files',
+    verbs:
+      "down to (?:\\d+|one|two|three|four|five|six|seven|eight|nine|ten) projects?|archived (?:those|them|the \\w+|\\d+) (?:projects?|files?)|dropped (?:those|them|the \\w+|\\d+) (?:projects?|files?)|removed (?:those|them|the \\w+|\\d+) (?:projects?|files?)|deleted (?:those|them|the \\w+|\\d+) (?:projects?|files?)|updated (?:the )?(?:project files?|files?)|wrote (?:the )?file",
+    passive: true,
+    backedBy: (t) => t === 'files.write' || t === 'shell.run',
   },
 ];
 
@@ -152,6 +159,7 @@ const HONEST: Record<ActionClaimKind, string> = {
   autonomy: "autonomy settings haven't actually changed (say \"pause\" or \"resume\" to do it)",
   mission: "no background mission is actually running yet",
   remember: "I haven't actually saved that yet",
+  files: "no project or workspace files were actually changed yet",
 };
 
 /** A plain correction appended by code when the reply still claims an action no tool performed. */
