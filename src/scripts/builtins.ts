@@ -46,13 +46,54 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
         intent,
         receipts: deps.getWakeReceipts(),
       });
-      await deps.sink.send(rendered.text);
+      const sent = await deps.sink.send(rendered.text);
+      const messageId = sent && typeof sent === 'object' ? sent.messageId : undefined;
       deps.onSent(rendered.text);
       return {
         ok: true,
-        summary: `Sent message to user (${rendered.text.length} chars${rendered.rewritten ? ', rewritten by truth gate' : ''}).`,
+        summary: `Sent message to user (${rendered.text.length} chars${messageId ? `, messageId=${messageId}` : ''}${rendered.rewritten ? ', rewritten by truth gate' : ''}).`,
         changes: ['sent_message_to_user'],
-        data: { text: rendered.text, rewritten: rendered.rewritten, remainingViolations: rendered.violations },
+        data: { ...(messageId ? { messageId } : {}), text: rendered.text, rewritten: rendered.rewritten, remainingViolations: rendered.violations },
+      };
+    },
+    { alwaysVisible: true },
+  );
+
+  await registry.registerInline(
+    {
+      id: 'edit_message',
+      version: 1,
+      description: 'Edits a previously sent message in place (instead of sending a duplicate correction message).',
+      whenToUse: ['You noticed an omission or typo in a message you just sent and have its messageId from the receipt'],
+      effect: 'write',
+      requiresApproval: false,
+      timeoutMs: 30_000,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          messageId: { type: 'string', description: 'The messageId returned by send_message' },
+          intent: { type: 'string', description: 'The complete corrected information to render into the edited message' },
+        },
+        required: ['messageId', 'intent'],
+        additionalProperties: false,
+      },
+    },
+    async (input, ctx) => {
+      if (!deps.sink.edit) return { ok: false, summary: 'This channel does not support editing messages.', error: 'edit not supported' };
+      const messageId = String(input.messageId).trim();
+      const rendered = await renderWithSpeaker({
+        workspaceDir: ctx.workspaceDir,
+        provider: deps.speakerProvider,
+        ...(deps.speakerModel ? { model: deps.speakerModel } : {}),
+        intent: String(input.intent ?? '').trim(),
+        receipts: deps.getWakeReceipts(),
+      });
+      await deps.sink.edit(messageId, rendered.text);
+      return {
+        ok: true,
+        summary: `Edited message ${messageId} in place.`,
+        changes: [`edited_message:${messageId}`],
+        data: { messageId, text: rendered.text },
       };
     },
     { alwaysVisible: true },

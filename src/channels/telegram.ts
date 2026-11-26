@@ -17,13 +17,24 @@ export class TelegramChannel implements MessageSink {
     this.chatId = String(cfg.chatId);
   }
 
-  async send(text: string): Promise<void> {
+  async send(text: string): Promise<{ messageId?: string }> {
     const res = await fetch(`${this.base}/sendMessage`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ chat_id: this.chatId, text }),
     });
     if (!res.ok) throw new Error(`Telegram sendMessage failed (${res.status}): ${await res.text()}`);
+    const body = (await res.json().catch(() => ({}))) as { result?: { message_id?: number } };
+    return body.result?.message_id !== undefined ? { messageId: String(body.result.message_id) } : {};
+  }
+
+  async edit(messageId: string, text: string): Promise<void> {
+    const res = await fetch(`${this.base}/editMessageText`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: this.chatId, message_id: Number(messageId), text }),
+    });
+    if (!res.ok) throw new Error(`Telegram editMessageText failed (${res.status}): ${await res.text()}`);
   }
 
   async poll(): Promise<LosslessEvent[]> {
