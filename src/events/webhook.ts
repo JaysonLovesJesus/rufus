@@ -7,6 +7,8 @@ export interface WebhookOptions {
   host?: string;
   token?: string;
   onEvent: (event: LosslessEvent) => void | Promise<void>;
+  /** Optional extra HTTP handler (e.g. Live Voice Call UI on /voice*) sharing the same server & port. */
+  extraHandler?: (req: http.IncomingMessage, res: http.ServerResponse, pathname: string) => Promise<boolean>;
 }
 
 /**
@@ -16,13 +18,18 @@ export interface WebhookOptions {
  */
 export async function startEventWebhook(opts: WebhookOptions): Promise<{ url: string; close: () => Promise<void> }> {
   const host = opts.host ?? '127.0.0.1';
-  const server = http.createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/health') {
+  const server = http.createServer(async (req, res) => {
+    const pathname = new URL(req.url || '/', `http://${host}`).pathname;
+    if (req.method === 'GET' && pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
       return;
     }
-    if (req.method !== 'POST' || !req.url?.startsWith('/event') && !req.url?.startsWith('/webhook')) {
+    if (opts.extraHandler) {
+      const handled = await opts.extraHandler(req, res, pathname).catch(() => false);
+      if (handled) return;
+    }
+    if (req.method !== 'POST' || (!pathname.startsWith('/event') && !pathname.startsWith('/webhook'))) {
       res.writeHead(404, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
       return;

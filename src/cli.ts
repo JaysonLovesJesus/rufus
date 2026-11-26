@@ -8,8 +8,11 @@ import { RufusCore } from './daemon';
 import { computeScorecard, formatScorecard, runJudgmentEval } from './eval/flight-recorder';
 import { buildDefaultConnectors, HeartbeatHub } from './events/connectors';
 import { messageEvent } from './events/ingest';
+import { startEventWebhook } from './events/webhook';
 import { ClaudeCliProvider } from './providers/claude';
 import type { MessageSink } from './types';
+import { KokoroTts } from './voice/kokoro';
+import { createVoiceHttpHandler } from './voice/server';
 
 function defaultWorkspace(): string {
   return process.env.RUFUS_DIR || path.join(os.homedir(), '.rufus-v2');
@@ -111,8 +114,33 @@ async function main(argv: string[]): Promise<void> {
     const initInfo = await core.init();
     const hub = new HeartbeatHub();
     for (const c of await buildDefaultConnectors(dir)) hub.add(c);
+    const tts = new KokoroTts({ workspaceDir: dir });
+    const httpPort = Number(process.env.RUFUS_HTTP_PORT || 8787);
+    const httpHost = process.env.RUFUS_HTTP_HOST || '0.0.0.0';
+    const voiceHandler = createVoiceHttpHandler({
+      tts,
+      ...(stt ? { stt } : {}),
+      onVoiceTurn: async (ev, voiceSink) => {
+        const res = await core.processEvent(ev, { sinkOverride: voiceSink });
+        console.log(`[voice:${ev.id}] turns=${res.wake?.turns ?? 0}`);
+      },
+    });
+    const httpServer = await startEventWebhook({
+      port: httpPort,
+      host: httpHost,
+      ...(process.env.RUFUS_WEBHOOK_TOKEN ? { token: process.env.RUFUS_WEBHOOK_TOKEN } : {}),
+      extraHandler: voiceHandler,
+      onEvent: async (ev) => {
+        if (await core.events.has(ev.id)) return;
+        const res = await core.processEvent(ev);
+        console.log(`[webhook:${ev.source}:${ev.id}] bouncer=${res.decision.label} turns=${res.wake?.turns ?? 0}`);
+      },
+    }).catch((err) => {
+      console.error(`HTTP server warning: ${(err as Error).message}`);
+      return undefined;
+    });
     console.log(
-      `Rufus v2 Core running (heartbeat ${intervalMs}ms, shadow=${shadow}, tools=${core.registry.list().length}, custom=${initInfo.loadedTools.length}, sources=${hub.list().map((c) => c.id).join(',') || 'none'}). Ctrl+C to stop.`,
+      `Rufus v2 Core running (heartbeat ${intervalMs}ms, shadow=${shadow}, tools=${core.registry.list().length}, custom=${initInfo.loadedTools.length}, sources=${hub.list().map((c) => c.id).join(',') || 'none'}${httpServer ? `, http=${httpServer.url}, voice=${httpServer.url}/voice (${tts.voice})` : ''}). Ctrl+C to stop.`,
     );
     await core.announceStartup().catch((err) => console.error(`startup error: ${(err as Error).message}`));
     const stop = new AbortController();
@@ -162,6 +190,8 @@ async function main(argv: string[]): Promise<void> {
       }
     } finally {
       clearInterval(sensorTimer);
+      await httpServer?.close();
+      tts.close();
       await core.close();
     }
     return;

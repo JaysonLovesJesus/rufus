@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import type { MessageSink, ModelProvider, Receipt, ToolManifest } from '../types';
+import type { LosslessEvent, MessageSink, ModelProvider, Receipt, ToolManifest } from '../types';
 import { renderWithSpeaker } from '../speaker/speaker';
 import type { ToolRegistry } from './registry';
 
@@ -13,7 +13,9 @@ export interface BuiltinDeps {
   speakerProvider: ModelProvider;
   speakerModel?: string;
   sink: MessageSink;
+  getActiveSink?: () => MessageSink;
   getWakeReceipts: () => readonly Receipt[];
+  getWakeTrigger?: () => LosslessEvent | undefined;
   getRecentSent?: () => Promise<string[]>;
   onSent: (text: string) => void;
   searchMemory?: (query: string, opts?: { source?: string; limit?: number }) => Promise<Array<{ event: { id: string; timestamp: string; source: string; kind: string; actor?: string; text: string; deleted?: boolean; reactions?: Array<{ emoji: string; actor?: string }> }; score: number }>>;
@@ -51,6 +53,7 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
     async (input, ctx) => {
       const purpose = String(input.purpose ?? '').trim();
       const receiptTurns = Array.isArray(input.receiptTurns) ? input.receiptTurns.map(Number).filter((n) => Number.isInteger(n) && n > 0) : undefined;
+      const trigger = deps.getWakeTrigger?.();
       const rendered = await renderWithSpeaker({
         workspaceDir: ctx.workspaceDir,
         provider: deps.speakerProvider,
@@ -58,8 +61,10 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
         purpose,
         receipts: deps.getWakeReceipts(),
         ...(receiptTurns?.length ? { receiptTurns } : {}),
+        ...(trigger ? { trigger } : {}),
       });
-      const sent = await deps.sink.send(rendered.text);
+      const activeSink = deps.getActiveSink ? deps.getActiveSink() : deps.sink;
+      const sent = await activeSink.send(rendered.text);
       const messageId = sent && typeof sent === 'object' ? sent.messageId : undefined;
       deps.onSent(rendered.text);
       return {

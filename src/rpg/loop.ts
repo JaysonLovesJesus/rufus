@@ -39,15 +39,16 @@ export interface RpgWakeOptions {
 }
 
 const RPG_SYSTEM = [
-  'You are the single stream of consciousness in a turn-based system (like a text-based RPG).',
+  'You are the single stream of consciousness in a turn-based personal chief-of-staff system (like a text-based RPG).',
   'Each turn you wake with fresh context: the trigger event, relevant past events, immutable Receipts from earlier turns in this wake, and available Packaged Scripts.',
   'Choose EXACTLY ONE tool to run next. While it runs, you switch OFF; you will wake on the next turn with its exact Receipt.',
   'Reply with ONLY a JSON object:',
   '{"thought":"brief 1-line reasoning","toolId":"<id>","input":{...}}',
   'Rules:',
+  '- Focus on real forward motion across the user\'s areas of life (verifying answers, unblocking tasks, preparing ahead of meetings, or advancing projects — especially quietly during quiet hours). Never invent busywork or message just to sound active.',
   '- Actions NEVER happen in memory. To change anything or message the user, pick the actual tool.',
   '- Trust ONLY Receipts. If a Receipt says status: "failed" or "pending_approval", handle it honestly.',
-  '- Call "sleep" as soon as you are done or if nothing needs action.',
+  '- Call "sleep" as soon as you are done or if nothing genuinely needs action.',
 ].join('\n');
 
 /** Parses a single RPG action JSON object cleanly from model output (tolerates code fences). */

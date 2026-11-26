@@ -77,12 +77,14 @@ export function beeperConnector(opts: { baseUrl?: string; token: string; interva
       for (const c of data.items ?? []) {
         const text = c.preview?.text?.trim();
         if (!text || !(c.unreadCount && c.unreadCount > 0)) continue;
+        const sender = c.preview?.senderName || c.title || c.name || 'unknown';
+        if (/^rufus$/i.test(sender.trim())) continue; // never wake on Rufus's own echo
         const ts = c.preview?.timestamp || c.lastActivity || new Date().toISOString();
         out.push(
           messageEvent({
             id: `beeper_${c.id}_${c.preview?.id || ts}`,
             channel: c.network || 'beeper',
-            actor: c.preview?.senderName || c.title || c.name || 'unknown',
+            actor: sender,
             text,
             timestamp: ts,
             threadId: c.id,
@@ -122,28 +124,93 @@ export function gmailConnector(opts: { command: string; args: string[]; interval
   };
 }
 
-/** Local Calendar anchor connector (emits an event when today's schedule changes). */
+/** Local Calendar anchor connector (emits schedule updates + 20-minute upcoming block alerts). */
 export function calendarConnector(opts: { anchorPath: string; intervalMs?: number }): EventConnector {
   let lastHash = '';
+  const alerted = new Set<string>();
   return {
     id: 'calendar',
-    intervalMs: opts.intervalMs ?? 5 * 60_000,
+    intervalMs: opts.intervalMs ?? 3 * 60_000,
     async poll() {
       const raw = await fs.readFile(opts.anchorPath, 'utf8').catch(() => '');
-      if (!raw || raw === lastHash) return [];
-      const firstRun = !lastHash;
-      lastHash = raw;
-      if (firstRun) return []; // baseline on boot
-      const data = JSON.parse(raw) as { schedule?: { date?: string; blocks?: Array<{ title: string; start: string; end: string }> } };
-      const blocks = data.schedule?.blocks ?? [];
-      return [
-        genericEvent({
-          source: 'calendar',
-          kind: 'schedule_updated',
-          text: `Calendar updated (${data.schedule?.date ?? 'today'}): ${blocks.map((b) => `${b.title} ${b.start}-${b.end}`).join(', ')}`,
-          timestamp: new Date().toISOString(),
-        }),
-      ];
+      if (!raw) return [];
+      const out: LosslessEvent[] = [];
+      let data: { schedule?: { date?: string; blocks?: Array<{ title: string; start: string; end: string; status?: string }> } };
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        return [];
+      }
+      const blocks = (data.schedule?.blocks ?? []).filter((b) => b.status !== 'skipped');
+
+      if (raw !== lastHash) {
+        const firstRun = !lastHash;
+        lastHash = raw;
+        if (!firstRun) {
+          out.push(
+            genericEvent({
+              source: 'calendar',
+              kind: 'schedule_updated',
+              text: `Calendar updated (${data.schedule?.date ?? 'today'}): ${blocks.map((b) => `${b.title} ${b.start}-${b.end}`).join(', ')}`,
+              timestamp: new Date().toISOString(),
+            }),
+          );
+        }
+      }
+
+      // Upcoming block alert (10-25 min before start)
+      const now = new Date();
+      const todayStr = now.toISOString().slice(0, 10);
+      if (!data.schedule?.date || data.schedule.date === todayStr) {
+        const nowMins = now.getHours() * 60 + now.getMinutes();
+        for (const b of blocks) {
+          const m = /^(\d{1,2}):(\d{2})/.exec(b.start || '');
+          if (!m) continue;
+          const startMins = Number(m[1]) * 60 + Number(m[2]);
+          const diff = startMins - nowMins;
+          const key = `cal_upcoming_${todayStr}_${b.start}_${b.title.replace(/\W+/g, '_').slice(0, 24)}`;
+          if (diff >= 10 && diff <= 25 && !alerted.has(key)) {
+            alerted.add(key);
+            out.push(
+              genericEvent({
+                id: key,
+                source: 'calendar',
+                kind: 'upcoming',
+                text: `Upcoming in ~${diff} min: ${b.title} (${b.start}-${b.end})`,
+                timestamp: now.toISOString(),
+              }),
+            );
+          }
+        }
+      }
+      return out;
+    },
+  };
+}
+
+/** Ambient quiet-hours signal (once per night at 23:30 local time) so Rufus can quietly advance real work while the user sleeps. */
+export function ambientQuietHoursConnector(opts: { hour?: number; intervalMs?: number } = {}): EventConnector {
+  const targetHour = opts.hour ?? 23;
+  const firedDates = new Set<string>();
+  return {
+    id: 'ambient',
+    intervalMs: opts.intervalMs ?? 15 * 60_000,
+    async poll() {
+      const now = new Date();
+      const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      if (now.getHours() === targetHour && now.getMinutes() >= 30 && !firedDates.has(dateKey)) {
+        firedDates.add(dateKey);
+        return [
+          genericEvent({
+            id: `ambient_night_${dateKey}`,
+            source: 'ambient',
+            kind: 'quiet_hours',
+            text: 'Quiet hours started. Do not ping the user unless urgent; check if any real work across their active areas/projects can be quietly prepared or advanced overnight.',
+            timestamp: now.toISOString(),
+          }),
+        ];
+      }
+      return [];
     },
   };
 }
@@ -206,6 +273,7 @@ export async function buildDefaultConnectors(workspaceDir: string): Promise<Even
     .then(() => path.join(workspaceDir, 'anchor.json'))
     .catch(() => path.join(os.homedir(), '.rufus', 'anchor.json'));
   out.push(calendarConnector({ anchorPath }));
+  out.push(ambientQuietHoursConnector());
   out.push(...(await loadCustomConnectors(workspaceDir)));
   return out;
 }

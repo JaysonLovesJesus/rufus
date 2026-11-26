@@ -49,6 +49,8 @@ export class RufusCore {
   private readonly maxTurnsPerWake: number;
   private readonly now: () => Date;
   private wakeReceipts: Receipt[] = [];
+  private wakeTrigger?: LosslessEvent;
+  private activeSink?: MessageSink;
   private initialized = false;
 
   constructor(opts: DaemonOptions) {
@@ -94,7 +96,9 @@ export class RufusCore {
       speakerProvider: this.speakerProvider,
       ...(this.speakerModel ? { speakerModel: this.speakerModel } : {}),
       sink,
+      getActiveSink: () => this.activeSink ?? sink,
       getWakeReceipts: () => this.wakeReceipts,
+      getWakeTrigger: () => this.wakeTrigger,
       getRecentSent: async () =>
         (await this.events.recent(25))
           .filter((e) => e.source === 'message' && e.kind === 'assistant_sent')
@@ -118,7 +122,7 @@ export class RufusCore {
   /** Processes one incoming event (plus any simultaneous batch/mid-wake arrivals) through the $0 Bouncer and RPG loop. */
   async processEvent(
     event: LosslessEvent,
-    opts: { pollIncoming?: () => Promise<LosslessEvent[]>; additionalEvents?: LosslessEvent[] } = {},
+    opts: { pollIncoming?: () => Promise<LosslessEvent[]>; additionalEvents?: LosslessEvent[]; sinkOverride?: MessageSink } = {},
   ): Promise<ProcessEventResult> {
     await this.init();
     await this.events.append(event);
@@ -137,8 +141,10 @@ export class RufusCore {
     }
 
     this.wakeReceipts = [];
+    this.wakeTrigger = event;
+    this.activeSink = opts.sinkOverride;
     // Instant $0 status reaction: ⚡ while awake & working, cleared when back to sleep (unless Rufus chose his own reaction)
-    const msgId = !this.shadow && event.metadata?.messageId !== undefined ? String(event.metadata.messageId) : undefined;
+    const msgId = !this.shadow && !opts.sinkOverride && event.metadata?.messageId !== undefined ? String(event.metadata.messageId) : undefined;
     if (msgId && this.realSink.react) {
       await this.realSink.react(msgId, '⚡').catch(() => undefined);
     }
@@ -158,6 +164,8 @@ export class RufusCore {
         ...(opts.additionalEvents?.length ? { additionalEvents: opts.additionalEvents } : {}),
       });
     } finally {
+      this.activeSink = undefined;
+      this.wakeTrigger = undefined;
       const rufusReacted = this.wakeReceipts.some((r) => r.toolId === 'react_message' && r.status === 'ok');
       if (msgId && this.realSink.react && !rufusReacted) {
         await this.realSink.react(msgId, null).catch(() => undefined);
