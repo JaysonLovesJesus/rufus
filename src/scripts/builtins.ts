@@ -163,6 +163,8 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
         effect: m.effect,
         requiresApproval: m.requiresApproval,
         description: m.description,
+        inputs: Object.keys(m.inputSchema.properties ?? {}),
+        required: m.inputSchema.required ?? [],
       }));
       return {
         ok: true,

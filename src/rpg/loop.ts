@@ -137,7 +137,7 @@ async function gatherLiveContext(workspaceDir: string): Promise<string> {
 export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
   const wakeId = `wake_${randomUUID().slice(0, 8)}`;
   const started = Date.now();
-  const maxTurns = Math.max(1, Math.min(12, opts.maxTurns ?? 8));
+  const maxTurns = Math.max(1, Math.min(50, opts.maxTurns ?? 25));
   const topKTools = opts.topKTools ?? 6;
   const topKContext = opts.topKContext ?? 6;
   const now = opts.now ?? (() => new Date());

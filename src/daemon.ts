@@ -64,7 +64,7 @@ export class RufusCore {
     if (opts.reasoningModel) this.reasoningModel = opts.reasoningModel;
     if (opts.speakerModel) this.speakerModel = opts.speakerModel;
     this.realSink = opts.sink;
-    this.maxTurnsPerWake = opts.maxTurnsPerWake ?? 8;
+    this.maxTurnsPerWake = opts.maxTurnsPerWake ?? 25;
     this.now = opts.now ?? (() => new Date());
   }
 
