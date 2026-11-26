@@ -169,6 +169,14 @@ export class RufusCore {
     this.activeSink = opts.sinkOverride;
     // Instant $0 status reaction: ⚡ while awake & working, cleared when back to sleep (unless Rufus chose his own reaction)
     const msgId = !this.shadow && !opts.sinkOverride && event.metadata?.messageId !== undefined ? String(event.metadata.messageId) : undefined;
+    // Best-effort, non-blocking read receipt for the owner's own incoming message (never delays or fails the wake)
+    if (msgId && event.kind === 'owner_direct' && this.realSink.markRead) {
+      const chatId = event.metadata?.chatId !== undefined ? String(event.metadata.chatId) : '';
+      const sink = this.realSink;
+      void Promise.resolve()
+        .then(() => sink.markRead!(chatId, msgId))
+        .catch((err) => console.error(`markRead failed for message ${msgId}: ${err instanceof Error ? err.message : String(err)}`));
+    }
     if (msgId && this.realSink.react) {
       await this.realSink.react(msgId, '⚡').catch(() => undefined);
     }

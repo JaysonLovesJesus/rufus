@@ -151,6 +151,10 @@ export interface MessageSink {
   send(text: string): Promise<{ messageId?: string } | void>;
   edit?(messageId: string, text: string): Promise<void>;
   react?(messageId: string, emoji: string | null): Promise<void>;
+  /** Optional: mark an incoming message as read (best-effort; callers must tolerate failure). */
+  markRead?(chatId: string, messageId: string): Promise<void>;
+  /** Optional: show a typing indicator in a chat (defaults to the sink's own chat when chatId is omitted). */
+  sendTyping?(chatId?: string): Promise<void>;
 }
 
 export interface CoreConfig {

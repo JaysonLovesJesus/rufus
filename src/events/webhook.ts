@@ -36,7 +36,7 @@ export async function startEventWebhook(opts: WebhookOptions): Promise<{ url: st
     }
     if (opts.token) {
       const auth = req.headers.authorization ?? '';
-      const qToken = new URL(req.url, `http://${host}`).searchParams.get('token');
+      const qToken = new URL(req.url || '/', `http://${host}`).searchParams.get('token');
       if (auth !== `Bearer ${opts.token}` && qToken !== opts.token) {
         res.writeHead(401, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: 'unauthorized' }));

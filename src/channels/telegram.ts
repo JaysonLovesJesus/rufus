@@ -14,7 +14,7 @@ export interface TelegramConfig {
   stt?: { command: string; args: string[] };
 }
 
-/** Minimal zero-dependency Telegram Bot API channel (lossless text + voice + media poll, send, edit, react). */
+/** Minimal zero-dependency Telegram Bot API channel (lossless text + voice + media poll, send, edit, react, typing). */
 export class TelegramChannel implements MessageSink {
   private readonly base: string;
   private readonly fileBase: string;
@@ -83,6 +83,18 @@ export class TelegramChannel implements MessageSink {
       }),
     }).catch(() => undefined);
   }
+
+  /** Shows "typing…" for ~5s (Telegram clears it on the next sent message). Callers refresh it every ~4s. */
+  async sendTyping(chatId?: string): Promise<void> {
+    const res = await fetch(`${this.base}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId || this.chatId, action: 'typing' }),
+    });
+    if (!res.ok) throw new Error(`Telegram sendChatAction failed (${res.status}): ${await res.text()}`);
+  }
+
+  // No markRead: the Bot API has no read method for ordinary bot chats (readBusinessMessage only works for business connections).
 
   async poll(timeoutSec = 0): Promise<LosslessEvent[]> {
     const t = Math.max(0, Math.min(50, Math.floor(timeoutSec)));

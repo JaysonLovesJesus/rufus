@@ -23,6 +23,22 @@ export interface BuiltinDeps {
   onApprovalDecision?: (decision: 'approved' | 'denied', toolId: string) => Promise<void>;
   searchMemory?: (query: string, opts?: { source?: string; limit?: number }) => Promise<Array<{ event: { id: string; timestamp: string; source: string; kind: string; actor?: string; text: string; deleted?: boolean; reactions?: Array<{ emoji: string; actor?: string }> }; score: number }>>;
   onSleep: (reason: string) => void;
+  /** How often send_message refreshes the channel typing indicator while the Speaker writes (default 4000ms). */
+  typingRefreshMs?: number;
+}
+
+/** Starts a best-effort typing indicator on the sink, refreshed on an interval. Returns a stop function. */
+function startTyping(sink: MessageSink, refreshMs: number): () => void {
+  if (!sink.sendTyping) return () => undefined;
+  const ping = () => {
+    Promise.resolve()
+      .then(() => sink.sendTyping!())
+      .catch((err) => console.error(`typing indicator failed: ${err instanceof Error ? err.message : String(err)}`));
+  };
+  ping();
+  const timer = setInterval(ping, refreshMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 /** Registers the minimal core built-in scripts: send_message, tools.list_all, tools.create, tools.repair, sleep, system.startup_snapshot. */
@@ -51,16 +67,23 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
     async (input, ctx) => {
       const purpose = String(input.purpose ?? '').trim();
       const wakeContext = deps.getWakeContext?.();
-      const rendered = await renderWithSpeaker({
-        workspaceDir: ctx.workspaceDir,
-        provider: deps.speakerProvider,
-        ...(deps.speakerModel ? { model: deps.speakerModel } : {}),
-        purpose,
-        receipts: deps.getWakeReceipts(),
-        ...(wakeContext ? { wakeContext } : {}),
-      });
       const activeSink = deps.getActiveSink ? deps.getActiveSink() : deps.sink;
-      const sent = await activeSink.send(rendered.text);
+      const stopTyping = startTyping(activeSink, deps.typingRefreshMs ?? 4000);
+      let rendered: Awaited<ReturnType<typeof renderWithSpeaker>>;
+      let sent: Awaited<ReturnType<MessageSink['send']>>;
+      try {
+        rendered = await renderWithSpeaker({
+          workspaceDir: ctx.workspaceDir,
+          provider: deps.speakerProvider,
+          ...(deps.speakerModel ? { model: deps.speakerModel } : {}),
+          purpose,
+          receipts: deps.getWakeReceipts(),
+          ...(wakeContext ? { wakeContext } : {}),
+        });
+        sent = await activeSink.send(rendered.text);
+      } finally {
+        stopTyping();
+      }
       const messageId = sent && typeof sent === 'object' ? sent.messageId : undefined;
       deps.onSent(rendered.text);
       return {
