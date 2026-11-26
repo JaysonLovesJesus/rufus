@@ -131,10 +131,10 @@ export class RufusCore {
     }
 
     this.wakeReceipts = [];
-    // Instant $0 status reaction: 👀 while awake & working, cleared when back to sleep (unless Rufus chose his own reaction)
+    // Instant $0 status reaction: ⚡ while awake & working, cleared when back to sleep (unless Rufus chose his own reaction)
     const msgId = !this.shadow && event.metadata?.messageId !== undefined ? String(event.metadata.messageId) : undefined;
     if (msgId && this.realSink.react) {
-      await this.realSink.react(msgId, '👀').catch(() => undefined);
+      await this.realSink.react(msgId, '⚡').catch(() => undefined);
     }
     let wake: RpgWakeReport;
     try {

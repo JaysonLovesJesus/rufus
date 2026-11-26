@@ -1,8 +1,12 @@
+import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import type { MessageSink, ModelProvider, Receipt, ToolManifest } from '../types';
 import { renderWithSpeaker } from '../speaker/speaker';
 import type { ToolRegistry } from './registry';
+
+const execFileAsync = promisify(execFile);
 
 export interface BuiltinDeps {
   registry: ToolRegistry;
@@ -23,35 +27,36 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
     {
       id: 'send_message',
       version: 1,
-      description: 'Voices an exact list of verified facts into a concise natural message via the fast speaker model and sends it to the user.',
-      whenToUse: ['You have 1-3 verified facts or a question to send to the user'],
+      description: 'Sends a concise natural message voiced by the fast Speaker from your Purpose + the verified Code Receipts.',
+      whenToUse: ['You have a verified answer, update, or approval request to send to the user'],
       effect: 'write',
       requiresApproval: false,
       timeoutMs: 30_000,
       inputSchema: {
         type: 'object',
         properties: {
-          facts: {
+          purpose: { type: 'string', description: '1 short line: why you are sending this message (what the user should know).' },
+          receiptTurns: {
             type: 'array',
-            items: { type: 'string' },
-            description: 'Exact verified facts to communicate (1-3 tight bullets; never include internal retries or already-sent info).',
+            items: { type: 'number' },
+            description: 'Optional 1-based turn numbers of the Receipts containing the facts to voice (defaults to all successful Receipts from this wake).',
           },
         },
-        required: ['facts'],
+        required: ['purpose'],
         additionalProperties: false,
       },
-      exampleInput: { facts: ['Chapel is at 7:45 AM.', 'Study is at 12:00 PM.'] },
+      exampleInput: { purpose: 'Notify user I restarted and share the latest update.', receiptTurns: [1] },
     },
     async (input, ctx) => {
-      const facts = Array.isArray(input.facts) ? input.facts.map((x) => String(x).trim()).filter(Boolean) : [];
-      const recentSent = deps.getRecentSent ? await deps.getRecentSent().catch(() => []) : [];
+      const purpose = String(input.purpose ?? '').trim();
+      const receiptTurns = Array.isArray(input.receiptTurns) ? input.receiptTurns.map(Number).filter((n) => Number.isInteger(n) && n > 0) : undefined;
       const rendered = await renderWithSpeaker({
         workspaceDir: ctx.workspaceDir,
         provider: deps.speakerProvider,
         ...(deps.speakerModel ? { model: deps.speakerModel } : {}),
-        facts,
+        purpose,
         receipts: deps.getWakeReceipts(),
-        ...(recentSent.length ? { recentSent } : {}),
+        ...(receiptTurns?.length ? { receiptTurns } : {}),
       });
       const sent = await deps.sink.send(rendered.text);
       const messageId = sent && typeof sent === 'object' ? sent.messageId : undefined;
@@ -70,7 +75,7 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
     {
       id: 'edit_message',
       version: 1,
-      description: 'Edits a previously sent message in place using an exact updated list of facts.',
+      description: 'Edits a previously sent message in place using a Purpose + verified Code Receipts.',
       whenToUse: ['You noticed an omission or typo in a message you just sent and have its messageId from the receipt'],
       effect: 'write',
       requiresApproval: false,
@@ -79,22 +84,25 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
         type: 'object',
         properties: {
           messageId: { type: 'string', description: 'The messageId returned by send_message' },
-          facts: { type: 'array', items: { type: 'string' }, description: 'The complete corrected facts to voice into the edited message' },
+          purpose: { type: 'string', description: 'The corrected purpose for this message' },
+          receiptTurns: { type: 'array', items: { type: 'number' }, description: 'Optional 1-based Receipt turn numbers' },
         },
-        required: ['messageId', 'facts'],
+        required: ['messageId', 'purpose'],
         additionalProperties: false,
       },
     },
     async (input, ctx) => {
       if (!deps.sink.edit) return { ok: false, summary: 'This channel does not support editing messages.', error: 'edit not supported' };
       const messageId = String(input.messageId).trim();
-      const facts = Array.isArray(input.facts) ? input.facts.map((x) => String(x).trim()).filter(Boolean) : [];
+      const purpose = String(input.purpose ?? '').trim();
+      const receiptTurns = Array.isArray(input.receiptTurns) ? input.receiptTurns.map(Number).filter((n) => Number.isInteger(n) && n > 0) : undefined;
       const rendered = await renderWithSpeaker({
         workspaceDir: ctx.workspaceDir,
         provider: deps.speakerProvider,
         ...(deps.speakerModel ? { model: deps.speakerModel } : {}),
-        facts,
+        purpose,
         receipts: deps.getWakeReceipts(),
+        ...(receiptTurns?.length ? { receiptTurns } : {}),
       });
       await deps.sink.edit(messageId, rendered.text);
       return {
@@ -282,14 +290,17 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
         .readdir(projDir)
         .then((xs) => xs.filter((f) => f.endsWith('.md') && !f.startsWith('.')).map((f) => f.replace(/\.md$/, '')).sort())
         .catch(() => [] as string[]);
+      const lastChange = await execFileAsync('git', ['log', '-1', '--pretty=%s'], { cwd: process.cwd(), timeout: 1500 })
+        .then((r) => r.stdout.trim())
+        .catch(() => undefined);
       return {
         ok: true,
-        summary: `Startup snapshot ready: ${tools.length} tools, ${projects.length} projects.`,
+        summary: `Restarted with ${tools.length} tools and ${projects.length} projects.${lastChange ? ` Latest update: ${lastChange}` : ''}`,
         data: {
-          startedAt: ctx.now.toISOString(),
+          startedAt: ctx.now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
           toolCount: tools.length,
-          customTools: tools.filter((t) => t.effect !== 'meta' && t.id !== 'send_message').map((t) => t.id),
           projects,
+          ...(lastChange ? { latestUpdate: lastChange } : {}),
         },
         nextHints: ['send_message'],
       };

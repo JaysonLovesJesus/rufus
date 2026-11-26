@@ -17,7 +17,7 @@ describe('Milestone 4: Unified Startup Orientation & Shadow Mode', () => {
     const realSent: string[] = [];
     const reasoning = new FakeProvider((_req, idx) => {
       if (idx === 0) return JSON.stringify({ toolId: 'system.startup_snapshot', input: {} });
-      if (idx === 1) return JSON.stringify({ toolId: 'send_message', input: { facts: ['Online and ready.', 'Active projects: alpha, beta.'] } });
+      if (idx === 1) return JSON.stringify({ toolId: 'send_message', input: { purpose: 'Notify user I restarted and share active projects.' } });
       return JSON.stringify({ toolId: 'sleep', input: { reason: 'Startup announced' } });
     });
     const speaker = new FakeProvider(() => 'Online and ready. Active projects:\n1. alpha\n2. beta');

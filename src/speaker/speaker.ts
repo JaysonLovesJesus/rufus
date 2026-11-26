@@ -75,39 +75,61 @@ async function loadVoiceGuide(workspaceDir: string): Promise<string> {
   }
 }
 
+export function selectReceiptsForSpeaker(receipts: readonly Receipt[], receiptTurns?: readonly number[]): Receipt[] {
+  if (receiptTurns?.length) {
+    const picked = receiptTurns
+      .map((n) => receipts[n - 1])
+      .filter((r): r is Receipt => !!r && r.toolId !== 'send_message' && r.toolId !== 'edit_message' && r.toolId !== 'sleep');
+    if (picked.length) return picked;
+  }
+  const meaningful = receipts.filter((r) => r.toolId !== 'send_message' && r.toolId !== 'edit_message' && r.toolId !== 'sleep');
+  const okOnes = meaningful.filter((r) => r.status === 'ok' || r.status === 'pending_approval');
+  if (okOnes.length) return okOnes;
+  return meaningful.length ? [meaningful[meaningful.length - 1]!] : [];
+}
+
 /**
- * Fresh-context fast model (Haiku) speaker.
- * Receives ONLY the voice guide, the intended message, and the immutable Receipts from this wake.
- * Runs the $0 universal truth & formatting gate, with one automatic rewrite on violation.
+ * Pure fresh-context fast model (Haiku) speaker.
+ * Code owns the Facts (clean, final Receipts — never failed retries or stale old messages).
+ * Opus owns the Purpose (1 short line: why to send this message).
+ * Haiku owns the Voice (VOICE.md) + $0 universal truth & formatting gate.
  */
 export async function renderWithSpeaker(opts: {
   workspaceDir: string;
   provider: ModelProvider;
   model?: string;
-  facts: readonly string[];
+  purpose: string;
   receipts: readonly Receipt[];
-  recentSent?: readonly string[];
+  receiptTurns?: readonly number[];
 }): Promise<{ text: string; violations: string[]; rewritten: boolean }> {
   const voice = await loadVoiceGuide(opts.workspaceDir);
-  const factsBlock = opts.facts.map((f, i) => `${i + 1}. ${f}`).join('\n');
+  const selected = selectReceiptsForSpeaker(opts.receipts, opts.receiptTurns);
+  const receiptBlock = selected.length
+    ? selected
+        .map(
+          (r, i) =>
+            `${i + 1}. [${r.toolId} | ${r.status}] ${r.summary}` +
+            (r.changes.length ? ` | changes: ${r.changes.join('; ')}` : '') +
+            (r.data !== undefined ? ` | data: ${typeof r.data === 'string' ? r.data : JSON.stringify(r.data)}` : '') +
+            (r.error ? ` | error: ${r.error}` : ''),
+        )
+        .join('\n')
+    : '(none — no tools ran before this message)';
 
   const system = [
-    'You are the Speaker. Your ONLY job is to phrase the exact Facts below in the Voice Guide.',
+    'You are the Speaker. Voice the Purpose below using ONLY the verified Facts from Code.',
     'Hard Rules:',
-    '- Phrase ONLY the Facts listed below. NEVER invent, add, or embellish any claim not in the Facts.',
-    '- Keep it tight: 1-2 short, natural sentences (unless the Facts contain a 3+ item list, in which case use a clean numbered list, one item per line).',
-    '- Never repeat information already covered in Recent Messages Below.',
-    '- Always speak in first person ("I"). Never quote UTC times. Never open with "Done" unless a Fact explicitly says an action completed.',
+    '- Honor the Purpose directly (never drop the main point, e.g., that you restarted or answered the question).',
+    '- Use ONLY the Facts below — never invent or claim any change not in `changes`.',
+    '- Keep it tight: 1-2 short, natural sentences (unless listing 3+ items, in which case use a clean numbered list, one item per line).',
+    '- First person only ("I"). Never quote UTC times. Never open with "Done" unless a write succeeded.',
     '- No em-dashes, no "Hi <name>", no generic closers ("Want me to...?"), no raw JSON.',
     '',
     'Voice Guide:',
     voice,
   ].join('\n');
 
-  const recentBlock = opts.recentSent?.length
-    ? `\n\nMessages you ALREADY sent recently (do not repeat these facts):\n${opts.recentSent.map((m, i) => `${i + 1}. ${m}`).join('\n')}`
-    : '';
-  const prompt = `Exact Facts to voice (say ONLY these — nothing extra):\n${factsBlock}${recentBlock}\n\nWrite ONLY the final message.`;
+  const prompt = `Purpose of this message:\n${opts.purpose}\n\nVerified Facts from Code:\n${receiptBlock}\n\nWrite ONLY the final message.`;
 
   let text = normalizeMultiline(await opts.provider.complete({ system, prompt, ...(opts.model ? { model: opts.model } : {}) }));
   let violations = verifySpokenReply(text, opts.receipts);
