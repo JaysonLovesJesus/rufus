@@ -70,7 +70,7 @@ async function main(argv: string[]): Promise<void> {
     const core = makeCore();
     try {
       const res = await core.announceStartup();
-      console.log(`Startup complete (${res.wake?.turns ?? 0} turn(s), shadow=${shadow}).`);
+      console.log(`Startup complete (${res?.wake?.turns ?? 0} turn(s), shadow=${shadow}).`);
     } finally {
       await core.close();
     }

@@ -133,6 +133,13 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
 
   const liveContext = await gatherLiveContext(opts.workspaceDir);
   const arrivals: LosslessEvent[] = [...(opts.additionalEvents ?? [])];
+  // Recent conversation (both user & Rufus's own sent messages) so he never repeats himself
+  const recentChat = (await opts.events.recent(20))
+    .filter((e) => e.source === 'message' && e.id !== opts.trigger.id)
+    .slice(-6);
+  const recentChatBlock = recentChat.length
+    ? recentChat.map((e) => `- [${e.timestamp}] ${e.kind === 'assistant_sent' ? 'You (Rufus)' : e.actor || 'User'}: ${e.text}`).join('\n')
+    : '(none)';
   // Retrieve semantically relevant past events once for this wake
   const related = await opts.events.search(opts.trigger.text, topKContext, { excludeIds: [opts.trigger.id] });
   const relatedBlock = related.length
@@ -169,6 +176,7 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
       `Live Context (schedule, todos, projects):\n${liveContext}`,
       `Trigger Event:\n[${opts.trigger.timestamp}] (${opts.trigger.source}${opts.trigger.actor ? ` / ${opts.trigger.actor}` : ''}${opts.trigger.deleted ? ' / DELETED' : ''}): ${opts.trigger.text}`,
       ...(arrivalBlock ? [arrivalBlock] : []),
+      `Recent Conversation (including what YOU already said — do not repeat yourself):\n${recentChatBlock}`,
       `Relevant Past Events (embedded retrieval):\n${relatedBlock}`,
       `Receipts So Far (exact ground truth):\n${formatReceiptsForPrompt(receipts)}`,
       `Available Packaged Scripts (top ${topKTools} embedded + core):\n${formatToolsForPrompt(tools)}`,

@@ -92,7 +92,11 @@ export class RufusCore {
       ...(this.speakerModel ? { speakerModel: this.speakerModel } : {}),
       sink,
       getWakeReceipts: () => this.wakeReceipts,
-      onSent: () => undefined,
+      onSent: (text) => {
+        void this.events.append(
+          genericEvent({ source: 'message', kind: 'assistant_sent', actor: 'rufus', text, timestamp: this.now().toISOString() }),
+        );
+      },
       onSleep: () => undefined,
     });
     const disk = await this.registry.loadFromDisk();
@@ -181,8 +185,14 @@ export class RufusCore {
     });
   }
 
-  /** Runs startup orientation through the exact same RPG + Haiku Speaker pipeline (never hardcoded). */
-  async announceStartup(): Promise<ProcessEventResult> {
+  /** Runs startup orientation through the exact same RPG + Haiku Speaker pipeline (with 10m cooldown to avoid restart spam). */
+  async announceStartup(cooldownMs = 10 * 60_000): Promise<ProcessEventResult | undefined> {
+    await this.init();
+    const recent = await this.events.recent(30);
+    const lastStartup = [...recent].reverse().find((e) => e.source === 'system' && e.kind === 'startup');
+    if (lastStartup && this.now().getTime() - Date.parse(lastStartup.timestamp) < cooldownMs) {
+      return undefined;
+    }
     const ev = genericEvent({
       source: 'system',
       kind: 'startup',

@@ -32,9 +32,9 @@ describe('Milestone 4: Unified Startup Orientation & Shadow Mode', () => {
     });
 
     const res = await core.announceStartup();
-    expect(res.wake?.turns).toBe(3);
-    expect(res.wake?.slept).toBe(true);
-    expect(res.shadowLogged).toBe(true);
+    expect(res?.wake?.turns).toBe(3);
+    expect(res?.wake?.slept).toBe(true);
+    expect(res?.shadowLogged).toBe(true);
     // Shadow mode NEVER writes to the real sink
     expect(realSent).toEqual([]);
 
