@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { BouncerDecision, LosslessEvent, MessageSink, ModelProvider, Receipt, RpgWakeReport } from './types';
 import { Bouncer } from './bouncer/bouncer';
+import { recordWake } from './eval/flight-recorder';
 import { genericEvent } from './events/ingest';
 import { EventStore } from './events/store';
 import { runRpgWake } from './rpg/loop';
@@ -152,6 +153,21 @@ export class RufusCore {
       }
     }
 
+    // Record full RPG Flight Recorder transcript (`wakes.jsonl`)
+    await recordWake(this.workspaceDir, {
+      wakeId: wake.wakeId,
+      at: this.now().toISOString(),
+      trigger: { id: event.id, source: event.source, kind: event.kind, ...(event.actor ? { actor: event.actor } : {}), text: event.text },
+      decision,
+      turns: wake.turns,
+      durationMs: wake.durationMs,
+      acted: wake.acted,
+      slept: wake.slept,
+      ...(wake.sleepReason ? { sleepReason: wake.sleepReason } : {}),
+      sentMessages: wake.sentMessages,
+      trace: wake.trace,
+    }).catch(() => undefined);
+
     // Automatic teacher->student label logging for SetFit (skip system startup events)
     if (event.source !== 'system' && event.kind !== 'owner_direct') {
       const featureText = Bouncer.eventToFeatureText(event);
@@ -185,18 +201,18 @@ export class RufusCore {
     });
   }
 
-  /** Runs startup orientation through the exact same RPG + Haiku Speaker pipeline (with 10m cooldown to avoid restart spam). */
-  async announceStartup(cooldownMs = 10 * 60_000): Promise<ProcessEventResult | undefined> {
+  /** Runs startup orientation through the exact same RPG + Haiku Speaker pipeline. Short delta if restarted recently! */
+  async announceStartup(recentWindowMs = 15 * 60_000): Promise<ProcessEventResult> {
     await this.init();
     const recent = await this.events.recent(30);
     const lastStartup = [...recent].reverse().find((e) => e.source === 'system' && e.kind === 'startup');
-    if (lastStartup && this.now().getTime() - Date.parse(lastStartup.timestamp) < cooldownMs) {
-      return undefined;
-    }
+    const recentlyBriefed = !!lastStartup && this.now().getTime() - Date.parse(lastStartup.timestamp) < recentWindowMs;
     const ev = genericEvent({
       source: 'system',
       kind: 'startup',
-      text: 'System just started. Run system.startup_snapshot and send a concise, natural orientation message via send_message, then sleep.',
+      text: recentlyBriefed
+        ? 'System just restarted after a brief update. You already gave a full orientation recently — just send a crisp 1-line check-in (e.g. "Back online, sir.") via send_message without repeating the schedule/projects, then sleep.'
+        : 'System just started. Run system.startup_snapshot and send a concise, natural orientation message via send_message, then sleep.',
       timestamp: this.now().toISOString(),
     });
     return this.processEvent(ev);

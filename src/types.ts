@@ -125,9 +125,20 @@ export interface RpgAction {
   thought?: string;
 }
 
+export interface RpgTurnTrace {
+  turn: number;
+  thought?: string;
+  toolId: string;
+  input: Record<string, unknown>;
+  receipt: Receipt;
+}
+
 export interface RpgWakeReport {
+  wakeId: string;
   triggerEventId?: string;
   turns: number;
+  durationMs: number;
+  trace: RpgTurnTrace[];
   receipts: Receipt[];
   sentMessages: string[];
   pendingApprovals: Array<{ toolId: string; input: Record<string, unknown>; receipt: Receipt }>;

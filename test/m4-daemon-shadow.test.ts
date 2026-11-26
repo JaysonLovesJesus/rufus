@@ -2,7 +2,7 @@ import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { FakeProvider, RufusCore } from '../src';
+import { FakeProvider, RufusCore, computeScorecard, loadWakes, messageEvent, runJudgmentEval } from '../src';
 
 const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'rufus-v2-m4-'));
 const NOW = new Date('2026-11-26T14:00:00Z');
@@ -41,6 +41,31 @@ describe('Milestone 4: Unified Startup Orientation & Shadow Mode', () => {
     const shadowLog = await readFile(path.join(dir, 'shadow.jsonl'), 'utf8');
     expect(shadowLog).toContain('Online and ready.');
     expect(shadowLog).toContain('1. alpha');
+
+    // Flight Recorder (wakes.jsonl) + Outcome Scorecard + Golden Judgment Eval
+    const wakes = await loadWakes(dir);
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]?.trace).toHaveLength(3);
+    const sc = await computeScorecard(dir);
+    expect(sc.totalWakes).toBe(1);
+    expect(sc.toolSuccessRate).toBe(1);
+
+    const evalRes = await runJudgmentEval({
+      workspaceDir: dir,
+      cases: [
+        {
+          id: 'list-tools-check',
+          trigger: messageEvent({ channel: 'cli', actor: 'owner', text: 'What tools do you have?', timestamp: NOW.toISOString() }),
+          expectedFirstTool: 'tools.list_all',
+        },
+      ],
+      provider: new FakeProvider(() => JSON.stringify({ thought: 'List tools', toolId: 'tools.list_all', input: {} })),
+      registry: core.registry,
+      now: () => NOW,
+    });
+    expect(evalRes.ok).toBe(true);
+    expect(evalRes.passed).toBe(1);
+
     await core.close();
   });
 });

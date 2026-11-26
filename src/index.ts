@@ -22,3 +22,14 @@ export { Bouncer } from './bouncer/bouncer';
 export { ClaudeCliProvider, FakeProvider } from './providers/claude';
 export { RufusCore, type DaemonOptions, type ProcessEventResult } from './daemon';
 export { TelegramChannel, type TelegramConfig } from './channels/telegram';
+export {
+  recordWake,
+  loadWakes,
+  computeScorecard,
+  formatScorecard,
+  runJudgmentEval,
+  type WakeRecord,
+  type OutcomeScorecard,
+  type JudgmentEvalCase,
+  type JudgmentEvalReport,
+} from './eval/flight-recorder';

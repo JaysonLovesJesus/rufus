@@ -5,6 +5,7 @@ import path from 'node:path';
 import { Bouncer } from './bouncer/bouncer';
 import { TelegramChannel } from './channels/telegram';
 import { RufusCore } from './daemon';
+import { computeScorecard, formatScorecard, runJudgmentEval } from './eval/flight-recorder';
 import { messageEvent } from './events/ingest';
 import { ClaudeCliProvider } from './providers/claude';
 import type { MessageSink } from './types';
@@ -128,6 +129,30 @@ async function main(argv: string[]): Promise<void> {
           stop.signal.addEventListener('abort', () => (clearTimeout(t), resolve()), { once: true });
         });
       }
+    } finally {
+      await core.close();
+    }
+    return;
+  }
+
+  if (cmd === 'stats') {
+    const sc = await computeScorecard(dir);
+    for (const line of formatScorecard(sc)) console.log(line);
+    return;
+  }
+
+  if (cmd === 'eval') {
+    const core = makeCore();
+    await core.init();
+    try {
+      const report = await runJudgmentEval({
+        workspaceDir: dir,
+        provider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus' }),
+        registry: core.registry,
+      });
+      console.log(`Judgment Eval: ${report.passed}/${report.total} passed.`);
+      for (const r of report.results) console.log(`  ${r.passed ? 'PASS' : 'FAIL'} ${r.id}${r.reason ? ` (${r.reason})` : ''}`);
+      if (!report.ok) process.exitCode = 1;
     } finally {
       await core.close();
     }

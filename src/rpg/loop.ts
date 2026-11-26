@@ -1,7 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { LosslessEvent, ModelProvider, Receipt, RpgAction, RpgWakeReport, ToolManifest } from '../types';
+import type { LosslessEvent, ModelProvider, Receipt, RpgAction, RpgTurnTrace, RpgWakeReport, ToolManifest } from '../types';
 import type { EventStore } from '../events/store';
 import type { ToolRegistry } from '../scripts/registry';
 
@@ -120,11 +121,14 @@ async function gatherLiveContext(workspaceDir: string): Promise<string> {
  * Fresh context -> Opus chooses 1 tool -> Opus OFF -> Tool executes -> immutable Receipt -> repeat until `sleep` or turn cap.
  */
 export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
+  const wakeId = `wake_${randomUUID().slice(0, 8)}`;
+  const started = Date.now();
   const maxTurns = Math.max(1, Math.min(12, opts.maxTurns ?? 8));
   const topKTools = opts.topKTools ?? 6;
   const topKContext = opts.topKContext ?? 6;
   const now = opts.now ?? (() => new Date());
 
+  const trace: RpgTurnTrace[] = [];
   const receipts: Receipt[] = [];
   const sentMessages: string[] = [];
   const pendingApprovals: RpgWakeReport['pendingApprovals'] = [];
@@ -196,6 +200,7 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
       now: now(),
     });
     receipts.push(receipt);
+    trace.push({ turn: turns, ...(action.thought ? { thought: action.thought } : {}), toolId: action.toolId, input: action.input, receipt });
     opts.onReceipt?.(receipt);
 
     if (receipt.status === 'pending_approval') {
@@ -214,8 +219,11 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
 
   const acted = receipts.some((r) => r.toolId !== 'sleep' && r.status === 'ok');
   return {
+    wakeId,
     triggerEventId: opts.trigger.id,
     turns,
+    durationMs: Date.now() - started,
+    trace,
     receipts,
     sentMessages,
     pendingApprovals,
