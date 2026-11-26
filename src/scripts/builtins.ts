@@ -10,6 +10,7 @@ export interface BuiltinDeps {
   speakerModel?: string;
   sink: MessageSink;
   getWakeReceipts: () => readonly Receipt[];
+  getRecentSent?: () => Promise<string[]>;
   onSent: (text: string) => void;
   onSleep: (reason: string) => void;
 }
@@ -39,12 +40,14 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
     },
     async (input, ctx) => {
       const intent = String(input.intent ?? '').trim();
+      const recentSent = deps.getRecentSent ? await deps.getRecentSent().catch(() => []) : [];
       const rendered = await renderWithSpeaker({
         workspaceDir: ctx.workspaceDir,
         provider: deps.speakerProvider,
         ...(deps.speakerModel ? { model: deps.speakerModel } : {}),
         intent,
         receipts: deps.getWakeReceipts(),
+        ...(recentSent.length ? { recentSent } : {}),
       });
       const sent = await deps.sink.send(rendered.text);
       const messageId = sent && typeof sent === 'object' ? sent.messageId : undefined;

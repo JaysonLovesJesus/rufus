@@ -79,6 +79,7 @@ export async function renderWithSpeaker(opts: {
   model?: string;
   intent: string;
   receipts: readonly Receipt[];
+  recentSent?: readonly string[];
 }): Promise<{ text: string; violations: string[]; rewritten: boolean }> {
   const voice = await loadVoiceGuide(opts.workspaceDir);
   const receiptBlock = opts.receipts.length
@@ -96,6 +97,7 @@ export async function renderWithSpeaker(opts: {
     'You are the Speaker. Turn the Intent into one crisp, natural message in the voice below.',
     'Rules:',
     '- Communicate ONLY what the user actually cares about (guided by the Intent).',
+    '- Never repeat information you already sent in Recent Messages Below — only share what is new or give a brief, naturally varied acknowledgment.',
     '- Use the Receipts strictly as a fact-check so you never invent or lie — NEVER narrate internal retries, earlier failed attempts, manifest/schema hiccups, or implementation details unless the final outcome actually failed or the user asked.',
     '- Always speak in first person ("I", never third-person "Rufus is...").',
     '- When listing 3+ items (or when the user asked "what are the N ...?"), output a clean numbered list with each item on its own line.',
@@ -105,7 +107,10 @@ export async function renderWithSpeaker(opts: {
     voice,
   ].join('\n');
 
-  const prompt = `Intent to communicate:\n${opts.intent}\n\nImmutable Receipts from this wake:\n${receiptBlock}\n\nWrite ONLY the final message to send.`;
+  const recentBlock = opts.recentSent?.length
+    ? `\n\nMessages you ALREADY sent recently (do not repeat facts already covered here):\n${opts.recentSent.map((m, i) => `${i + 1}. ${m}`).join('\n')}`
+    : '';
+  const prompt = `Intent to communicate:\n${opts.intent}\n\nImmutable Receipts from this wake:\n${receiptBlock}${recentBlock}\n\nWrite ONLY the final message to send.`;
 
   let text = normalizeMultiline(await opts.provider.complete({ system, prompt, ...(opts.model ? { model: opts.model } : {}) }));
   let violations = verifySpokenReply(text, opts.receipts);

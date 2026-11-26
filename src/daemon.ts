@@ -93,6 +93,11 @@ export class RufusCore {
       ...(this.speakerModel ? { speakerModel: this.speakerModel } : {}),
       sink,
       getWakeReceipts: () => this.wakeReceipts,
+      getRecentSent: async () =>
+        (await this.events.recent(25))
+          .filter((e) => e.source === 'message' && e.kind === 'assistant_sent')
+          .slice(-4)
+          .map((e) => e.text),
       onSent: (text) => {
         void this.events.append(
           genericEvent({ source: 'message', kind: 'assistant_sent', actor: 'rufus', text, timestamp: this.now().toISOString() }),
@@ -201,18 +206,12 @@ export class RufusCore {
     });
   }
 
-  /** Runs startup orientation through the exact same RPG + Haiku Speaker pipeline. Short delta if restarted recently! */
-  async announceStartup(recentWindowMs = 15 * 60_000): Promise<ProcessEventResult> {
-    await this.init();
-    const recent = await this.events.recent(30);
-    const lastStartup = [...recent].reverse().find((e) => e.source === 'system' && e.kind === 'startup');
-    const recentlyBriefed = !!lastStartup && this.now().getTime() - Date.parse(lastStartup.timestamp) < recentWindowMs;
+  /** Runs startup orientation through the exact same RPG + Haiku Speaker pipeline (no special-case hardcoding). */
+  async announceStartup(): Promise<ProcessEventResult> {
     const ev = genericEvent({
       source: 'system',
       kind: 'startup',
-      text: recentlyBriefed
-        ? 'System just restarted after a brief update. You already gave a full orientation recently — just send a crisp 1-line check-in (e.g. "Back online, sir.") via send_message without repeating the schedule/projects, then sleep.'
-        : 'System just started. Run system.startup_snapshot and send a concise, natural orientation message via send_message, then sleep.',
+      text: 'System just started. Run system.startup_snapshot and send a concise, natural orientation message via send_message, then sleep.',
       timestamp: this.now().toISOString(),
     });
     return this.processEvent(ev);
