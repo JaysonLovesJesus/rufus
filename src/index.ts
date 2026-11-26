@@ -18,6 +18,15 @@ export { verifySpokenReply, normalizeMultiline, renderWithSpeaker } from './spea
 export { parseRpgAction, runRpgWake, type RpgWakeOptions } from './rpg/loop';
 export { EventStore } from './events/store';
 export { messageEvent, genericEvent } from './events/ingest';
+export {
+  HeartbeatHub,
+  beeperConnector,
+  gmailConnector,
+  calendarConnector,
+  loadCustomConnectors,
+  buildDefaultConnectors,
+  type EventConnector,
+} from './events/connectors';
 export { Bouncer } from './bouncer/bouncer';
 export { ClaudeCliProvider, FakeProvider } from './providers/claude';
 export { selectRelevantSkills, type SkillDoc } from './skills/skills';

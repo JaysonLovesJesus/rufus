@@ -6,6 +6,7 @@ import { Bouncer } from './bouncer/bouncer';
 import { TelegramChannel } from './channels/telegram';
 import { RufusCore } from './daemon';
 import { computeScorecard, formatScorecard, runJudgmentEval } from './eval/flight-recorder';
+import { buildDefaultConnectors, HeartbeatHub } from './events/connectors';
 import { messageEvent } from './events/ingest';
 import { ClaudeCliProvider } from './providers/claude';
 import type { MessageSink } from './types';
@@ -108,15 +109,41 @@ async function main(argv: string[]): Promise<void> {
       shadow,
     });
     const initInfo = await core.init();
-    console.log(`Rufus v2 Core running (heartbeat ${intervalMs}ms, shadow=${shadow}, tools=${core.registry.list().length}, custom=${initInfo.loadedTools.length}). Ctrl+C to stop.`);
+    const hub = new HeartbeatHub();
+    for (const c of await buildDefaultConnectors(dir)) hub.add(c);
+    console.log(
+      `Rufus v2 Core running (heartbeat ${intervalMs}ms, shadow=${shadow}, tools=${core.registry.list().length}, custom=${initInfo.loadedTools.length}, sources=${hub.list().map((c) => c.id).join(',') || 'none'}). Ctrl+C to stop.`,
+    );
     await core.announceStartup().catch((err) => console.error(`startup error: ${(err as Error).message}`));
     const stop = new AbortController();
     process.once('SIGINT', () => stop.abort());
     process.once('SIGTERM', () => stop.abort());
+
+    // Run data connectors on ONE continuous background heartbeat feeding the SetFit Bouncer
+    let sensorBusy = false;
+    const sensorTimer = setInterval(async () => {
+      if (stop.signal.aborted || sensorBusy) return;
+      sensorBusy = true;
+      try {
+        const { events } = await hub.tick();
+        for (const ev of events) {
+          // Only process brand-new unseen events (EventStore deduplicates by id)
+          if (await core.events.has(ev.id)) continue;
+          const res = await core.processEvent(ev, ...(tg ? [{ pollIncoming: () => tg.poll(0).catch(() => []) }] : []));
+          console.log(`[${ev.source}:${ev.id}] bouncer=${res.decision.label} (${res.decision.backend}, ${res.decision.durationMs}ms) turns=${res.wake?.turns ?? 0}`);
+        }
+      } catch (err) {
+        console.error(`heartbeat error: ${(err as Error).message}`);
+      } finally {
+        sensorBusy = false;
+      }
+    }, Math.max(5000, intervalMs));
+    sensorTimer.unref?.();
+
     try {
       while (!stop.signal.aborted) {
         if (tg) {
-          // Native Telegram long-polling (~150ms instant delivery, $0, zero 5s sleep lag)
+          // Native Telegram long-polling (~150ms instant delivery, zero 5s sleep lag)
           const incoming = await tg.poll(25).catch(() => []);
           if (incoming.length) {
             const [first, ...extras] = incoming;
@@ -134,6 +161,7 @@ async function main(argv: string[]): Promise<void> {
         });
       }
     } finally {
+      clearInterval(sensorTimer);
       await core.close();
     }
     return;

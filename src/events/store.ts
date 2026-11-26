@@ -95,6 +95,11 @@ export class EventStore {
     return this.records.length;
   }
 
+  async has(id: string): Promise<boolean> {
+    await this.load();
+    return this.seenIds.has(id);
+  }
+
   async recent(limit = 20): Promise<LosslessEvent[]> {
     await this.load();
     return this.records.slice(-limit).map((r) => r.event);

@@ -2,7 +2,7 @@ import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { EventStore, genericEvent, messageEvent } from '../src';
+import { EventStore, HeartbeatHub, genericEvent, messageEvent } from '../src';
 
 const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'rufus-v2-m2-'));
 
@@ -54,5 +54,38 @@ describe('Milestone 2: Lossless Event Store & Embedded Retrieval', () => {
     const deletedMsg = recent.find((e) => e.id === 'msg_2');
     expect(deletedMsg?.deleted).toBe(true);
     expect(deletedMsg?.reactions?.[0]?.emoji).toBe('🙏');
+  });
+
+  it('HeartbeatHub polls pluggable data connectors on their own intervals', async () => {
+    let callsA = 0;
+    let callsB = 0;
+    const hub = new HeartbeatHub();
+    hub.add({
+      id: 'fast-source',
+      intervalMs: 1000,
+      poll: async () => {
+        callsA++;
+        return [genericEvent({ id: `a_${callsA}`, source: 'message', kind: 'chat', text: 'ping' })];
+      },
+    });
+    hub.add({
+      id: 'slow-source',
+      intervalMs: 60_000,
+      poll: async () => {
+        callsB++;
+        return [genericEvent({ id: `b_${callsB}`, source: 'email', kind: 'unread', text: 'invoice' })];
+      },
+    });
+
+    const t1 = await hub.tick(10_000);
+    expect(t1.events).toHaveLength(2);
+    expect(callsA).toBe(1);
+    expect(callsB).toBe(1);
+
+    // 2 seconds later: only fast-source runs
+    const t2 = await hub.tick(12_000);
+    expect(t2.events).toHaveLength(1);
+    expect(callsA).toBe(2);
+    expect(callsB).toBe(1);
   });
 });
