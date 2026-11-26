@@ -88,4 +88,30 @@ describe('Milestone 2: Lossless Event Store & Embedded Retrieval', () => {
     expect(callsA).toBe(2);
     expect(callsB).toBe(1);
   });
+
+  it('caches embeddings on disk per modelId so reloads skip re-embedding', async () => {
+    const dir = await tempDir();
+    let embedCalls = 0;
+    const makeEmbedder = () => ({
+      modelId: 'test-semantic-v1',
+      embed: (text: string) => {
+        embedCalls++;
+        return [text.includes('ticket') ? 1 : 0, text.includes('bus') ? 1 : 0];
+      },
+      embedBatch: (texts: string[]) => {
+        embedCalls += texts.length;
+        return texts.map((t) => [t.includes('ticket') ? 1 : 0, t.includes('bus') ? 1 : 0]);
+      },
+    });
+
+    const s1 = new EventStore({ workspaceDir: dir, embedder: makeEmbedder() });
+    await s1.append(genericEvent({ id: 'e1', source: 'email', kind: 'unread', text: 'train ticket confirmed' }));
+    expect(embedCalls).toBe(1);
+
+    // Reload with same modelId: 0 new embed calls thanks to events.vectors.jsonl
+    const s2 = new EventStore({ workspaceDir: dir, embedder: makeEmbedder() });
+    await s2.load();
+    expect(embedCalls).toBe(1);
+    expect(await s2.count()).toBe(1);
+  });
 });

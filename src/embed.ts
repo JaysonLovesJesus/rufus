@@ -1,13 +1,21 @@
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import readline from 'node:readline';
+
 /**
- * Fast, zero-dependency local vector embeddings (signed feature hashing over words + char 3-grams)
- * with pluggable external/sentence-transformer embedder support.
+ * Local vector embeddings:
+ * - Semantic neural embedder via persistent Python sidecar (paraphrase-MiniLM-L3-v2, ~60MB, ~5ms/query)
+ * - Fast zero-dependency fallback (hashEmbed) when Python/sentence-transformers isn't installed or in unit tests.
  */
 
 export type Vector = number[];
 
 export interface Embedder {
+  readonly modelId?: string;
   embed(text: string): Promise<Vector> | Vector;
   embedBatch?(texts: string[]): Promise<Vector[]> | Vector[];
+  close?(): Promise<void> | void;
 }
 
 const DEFAULT_DIM = 256;
@@ -62,8 +70,135 @@ export function cosineSimilarity(a: Vector, b: Vector): number {
 
 export function createLocalEmbedder(dim = DEFAULT_DIM): Embedder {
   return {
+    modelId: `hash-${dim}`,
     embed: (text) => hashEmbed(text, dim),
     embedBatch: (texts) => texts.map((t) => hashEmbed(t, dim)),
+  };
+}
+
+/**
+ * Neural semantic embedder backed by the persistent local Python sidecar (paraphrase-MiniLM-L3-v2).
+ * Automatically falls back to hashEmbed if Python or sentence-transformers is unavailable.
+ */
+export function createSemanticEmbedder(opts: { pythonPath?: string; modelName?: string; fallbackDim?: number } = {}): Embedder {
+  const modelName = opts.modelName ?? process.env.RUFUS_EMBED_MODEL ?? 'sentence-transformers/paraphrase-MiniLM-L3-v2';
+  const fallback = createLocalEmbedder(opts.fallbackDim ?? DEFAULT_DIM);
+  const pythonPath = opts.pythonPath;
+  const sidecarPath = path.resolve(__dirname, 'events', 'embed_sidecar.py');
+
+  let proc: ChildProcessWithoutNullStreams | undefined;
+  let readyPromise: Promise<boolean> | undefined;
+  let disabled = !pythonPath || !existsSync(pythonPath) || !existsSync(sidecarPath);
+  const waiters: Array<(line: string) => void> = [];
+  let queue: Promise<unknown> = Promise.resolve();
+
+  async function ensureReady(): Promise<boolean> {
+    if (disabled) return false;
+    if (readyPromise) return readyPromise;
+    readyPromise = new Promise<boolean>((resolve) => {
+      try {
+        const child = spawn(pythonPath!, [sidecarPath], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, RUFUS_EMBED_MODEL: modelName },
+        });
+        proc = child;
+        const rl = readline.createInterface({ input: child.stdout });
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            disabled = true;
+            child.kill();
+            resolve(false);
+          }
+        }, 30_000);
+        rl.on('line', (line) => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            try {
+              const msg = JSON.parse(line) as { ready?: boolean };
+              if (msg.ready) return resolve(true);
+            } catch {
+              /* fall through */
+            }
+            disabled = true;
+            return resolve(false);
+          }
+          const w = waiters.shift();
+          if (w) w(line);
+        });
+        child.on('exit', () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(false);
+          }
+          proc = undefined;
+          readyPromise = undefined;
+          while (waiters.length) waiters.shift()?.('{"error":"sidecar exited"}');
+        });
+        child.on('error', () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            disabled = true;
+            resolve(false);
+          }
+        });
+      } catch {
+        disabled = true;
+        resolve(false);
+      }
+    });
+    return readyPromise;
+  }
+
+  async function requestBatch(texts: string[]): Promise<Vector[] | undefined> {
+    if (!texts.length) return [];
+    const ok = await ensureReady();
+    if (!ok || !proc) return undefined;
+    const run = async (): Promise<Vector[] | undefined> => {
+      if (!proc) return undefined;
+      const response = new Promise<string>((resolve) => waiters.push(resolve));
+      proc.stdin.write(`${JSON.stringify({ texts })}\n`);
+      const line = await response;
+      try {
+        const parsed = JSON.parse(line) as { vectors?: Vector[]; error?: string };
+        if (Array.isArray(parsed.vectors) && parsed.vectors.length === texts.length) return parsed.vectors;
+      } catch {
+        /* fall through */
+      }
+      return undefined;
+    };
+    const next = queue.then(run, run);
+    queue = next.then(() => undefined, () => undefined);
+    return next;
+  }
+
+  return {
+    modelId: disabled ? fallback.modelId! : modelName,
+    async embed(text: string): Promise<Vector> {
+      const vecs = await requestBatch([text]);
+      if (vecs?.[0]) return vecs[0];
+      return fallback.embed(text);
+    },
+    async embedBatch(texts: string[]): Promise<Vector[]> {
+      const vecs = await requestBatch(texts);
+      if (vecs) return vecs;
+      return Promise.all(texts.map((t) => fallback.embed(t)));
+    },
+    close(): void {
+      if (proc) {
+        try {
+          proc.kill();
+        } catch {
+          /* ignore */
+        }
+        proc = undefined;
+        readyPromise = undefined;
+      }
+    },
   };
 }
 

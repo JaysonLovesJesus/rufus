@@ -15,6 +15,7 @@ interface StoredRecord {
  */
 export class EventStore {
   readonly filePath: string;
+  readonly vectorCachePath: string;
   private readonly embedder: Embedder;
   private records: StoredRecord[] = [];
   private seenIds = new Set<string>();
@@ -22,7 +23,12 @@ export class EventStore {
 
   constructor(opts: { workspaceDir: string; embedder?: Embedder }) {
     this.filePath = path.join(opts.workspaceDir, 'events.jsonl');
+    this.vectorCachePath = path.join(opts.workspaceDir, 'events.vectors.jsonl');
     this.embedder = opts.embedder ?? createLocalEmbedder();
+  }
+
+  private get modelId(): string {
+    return this.embedder.modelId ?? 'default';
   }
 
   private eventText(e: LosslessEvent): string {
@@ -39,9 +45,42 @@ export class EventStore {
       .join(' ');
   }
 
+  private async loadVectorCache(): Promise<Map<string, Vector>> {
+    const map = new Map<string, Vector>();
+    try {
+      const raw = await fs.readFile(this.vectorCachePath, 'utf8');
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line) as { id?: string; model?: string; vector?: Vector };
+          if (entry.id && entry.model === this.modelId && Array.isArray(entry.vector)) {
+            map.set(entry.id, entry.vector);
+          }
+        } catch {
+          /* skip corrupt line */
+        }
+      }
+    } catch {
+      /* no cache yet */
+    }
+    return map;
+  }
+
+  private async appendVectorCache(id: string, vector: Vector): Promise<void> {
+    await fs.mkdir(path.dirname(this.vectorCachePath), { recursive: true });
+    await fs.appendFile(this.vectorCachePath, `${JSON.stringify({ id, model: this.modelId, vector })}\n`, 'utf8');
+  }
+
+  private async rewriteVectorCache(): Promise<void> {
+    await fs.mkdir(path.dirname(this.vectorCachePath), { recursive: true });
+    const content = this.records.map((r) => JSON.stringify({ id: r.event.id, model: this.modelId, vector: r.vector })).join('\n');
+    await fs.writeFile(this.vectorCachePath, content ? `${content}\n` : '', 'utf8');
+  }
+
   async load(): Promise<void> {
     if (this.loaded) return;
     this.loaded = true;
+    const events: LosslessEvent[] = [];
     try {
       const raw = await fs.readFile(this.filePath, 'utf8');
       for (const line of raw.split('\n')) {
@@ -50,8 +89,7 @@ export class EventStore {
           const event = JSON.parse(line) as LosslessEvent;
           if (!event.id || this.seenIds.has(event.id)) continue;
           this.seenIds.add(event.id);
-          const vector = await this.embedder.embed(this.eventText(event));
-          this.records.push({ event, vector });
+          events.push(event);
         } catch {
           /* skip corrupt line */
         }
@@ -59,6 +97,30 @@ export class EventStore {
     } catch {
       /* new store */
     }
+    if (!events.length) return;
+
+    const cached = await this.loadVectorCache();
+    const missing: Array<{ idx: number; event: LosslessEvent }> = [];
+    const vectors: Array<Vector | undefined> = events.map((event, idx) => {
+      const hit = cached.get(event.id);
+      if (!hit) missing.push({ idx, event });
+      return hit;
+    });
+
+    if (missing.length) {
+      const texts = missing.map((m) => this.eventText(m.event));
+      const computed = this.embedder.embedBatch
+        ? await this.embedder.embedBatch(texts)
+        : await Promise.all(texts.map((t) => this.embedder.embed(t)));
+      for (let i = 0; i < missing.length; i++) {
+        vectors[missing[i]!.idx] = computed[i]!;
+      }
+    }
+
+    for (let i = 0; i < events.length; i++) {
+      this.records.push({ event: events[i]!, vector: vectors[i]! });
+    }
+    if (missing.length) await this.rewriteVectorCache().catch(() => undefined);
   }
 
   /** Appends a lossless event (deduplicating by id). Returns true if newly added. */
@@ -70,6 +132,7 @@ export class EventStore {
     this.records.push({ event, vector });
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     await fs.appendFile(this.filePath, `${JSON.stringify(event)}\n`, 'utf8');
+    await this.appendVectorCache(event.id, vector).catch(() => undefined);
     return true;
   }
 
@@ -87,7 +150,12 @@ export class EventStore {
     rec.vector = await this.embedder.embed(this.eventText(rec.event));
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     await fs.writeFile(this.filePath, `${this.records.map((r) => JSON.stringify(r.event)).join('\n')}\n`, 'utf8');
+    await this.rewriteVectorCache().catch(() => undefined);
     return true;
+  }
+
+  async close(): Promise<void> {
+    await this.embedder.close?.();
   }
 
   async count(): Promise<number> {

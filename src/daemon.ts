@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { BouncerDecision, LosslessEvent, MessageSink, ModelProvider, Receipt, RpgWakeReport } from './types';
 import { Bouncer } from './bouncer/bouncer';
+import { createSemanticEmbedder } from './embed';
 import { recordWake } from './eval/flight-recorder';
 import { genericEvent } from './events/ingest';
 import { EventStore } from './events/store';
@@ -52,7 +53,8 @@ export class RufusCore {
 
   constructor(opts: DaemonOptions) {
     this.workspaceDir = opts.workspaceDir;
-    this.events = new EventStore({ workspaceDir: opts.workspaceDir });
+    const embedder = opts.pythonPath ? createSemanticEmbedder({ pythonPath: opts.pythonPath }) : undefined;
+    this.events = new EventStore({ workspaceDir: opts.workspaceDir, ...(embedder ? { embedder } : {}) });
     this.registry = new ToolRegistry({ toolsDir: path.join(opts.workspaceDir, 'tools') });
     this.bouncer = new Bouncer({
       workspaceDir: opts.workspaceDir,
@@ -103,11 +105,10 @@ export class RufusCore {
           genericEvent({ source: 'message', kind: 'assistant_sent', actor: 'rufus', text, timestamp: this.now().toISOString() }),
         );
       },
-      onFact: async ({ topic, text }) => {
-        await this.events.append(
-          genericEvent({ source: 'fact', kind: topic, actor: 'rufus', text, timestamp: this.now().toISOString() }),
-        );
-      },
+      searchMemory: (query, searchOpts) =>
+        this.events.search(query, searchOpts?.limit ?? 8, {
+          ...(searchOpts?.source ? { source: searchOpts.source } : {}),
+        }),
       onSleep: () => undefined,
     });
     const disk = await this.registry.loadFromDisk();
@@ -223,6 +224,7 @@ export class RufusCore {
   }
 
   async close(): Promise<void> {
+    await this.events.close();
     await this.bouncer.close();
     (this.reasoningProvider as { close?: () => void }).close?.();
     (this.speakerProvider as { close?: () => void }).close?.();

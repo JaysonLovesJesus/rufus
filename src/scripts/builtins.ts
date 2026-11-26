@@ -16,7 +16,7 @@ export interface BuiltinDeps {
   getWakeReceipts: () => readonly Receipt[];
   getRecentSent?: () => Promise<string[]>;
   onSent: (text: string) => void;
-  onFact?: (fact: { topic: string; text: string }) => Promise<void>;
+  searchMemory?: (query: string, opts?: { source?: string; limit?: number }) => Promise<Array<{ event: { id: string; timestamp: string; source: string; kind: string; actor?: string; text: string; deleted?: boolean; reactions?: Array<{ emoji: string; actor?: string }> }; score: number }>>;
   onSleep: (reason: string) => void;
 }
 
@@ -252,28 +252,44 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
 
   await registry.registerInline(
     {
-      id: 'facts.save',
+      id: 'memory.search',
       version: 1,
-      description: 'Saves a factual note about the user, people, contacts, dates, or projects into the embedded knowledge store (NOT a skill).',
-      whenToUse: ['User shares a fact, nickname, contact detail, date, or personal context to remember (e.g. "Alex is my brother", "flight is Dec 10")'],
-      effect: 'write',
+      description: 'Semantically searches Rufus\'s automatic real-world event memory (past messages, emails, calendar, screen/browser activity, and actions). Read-only — memory is recorded automatically by code.',
+      whenToUse: ['You want to recall something from earlier conversations, messages, emails, or activity that is not already in the top wake context'],
+      effect: 'read',
       requiresApproval: false,
       inputSchema: {
         type: 'object',
         properties: {
-          topic: { type: 'string', description: 'Short topic tag (e.g. "contact", "travel", "project")' },
-          fact: { type: 'string', description: 'Clear 1-2 sentence factual statement' },
+          query: { type: 'string', description: 'Natural-language search query (semantic meaning, not just exact keywords)' },
+          source: { type: 'string', description: 'Optional source filter (e.g. "message", "email", "calendar", "screen", "browser", "download", "webhook")' },
+          limit: { type: 'number', description: 'Max events to return (default 8, max 20)' },
         },
-        required: ['topic', 'fact'],
+        required: ['query'],
         additionalProperties: false,
       },
-      exampleInput: { topic: 'contact', fact: 'Alex is my brother.' },
+      exampleInput: { query: 'Alex chat handle', limit: 6 },
     },
     async (input) => {
-      const topic = String(input.topic).trim();
-      const text = String(input.fact).trim();
-      if (deps.onFact) await deps.onFact({ topic, text });
-      return { ok: true, summary: `Saved fact (${topic}): ${text}`, changes: [`fact_saved:${topic}`] };
+      if (!deps.searchMemory) return { ok: false, summary: 'Memory search is not configured.', error: 'searchMemory missing' };
+      const query = String(input.query ?? '').trim();
+      const source = typeof input.source === 'string' && input.source.trim() ? input.source.trim() : undefined;
+      const limit = Math.max(1, Math.min(20, Number(input.limit ?? 8) || 8));
+      const hits = await deps.searchMemory(query, { ...(source ? { source } : {}), limit });
+      const rows = hits.map((h) => ({
+        timestamp: h.event.timestamp,
+        source: h.event.source,
+        kind: h.event.kind,
+        ...(h.event.actor ? { actor: h.event.actor } : {}),
+        text: h.event.text,
+        ...(h.event.deleted ? { deleted: true } : {}),
+        score: Number(h.score.toFixed(3)),
+      }));
+      return {
+        ok: true,
+        summary: `Found ${rows.length} memory event(s) matching "${query}".`,
+        data: rows,
+      };
     },
     { alwaysVisible: true },
   );
