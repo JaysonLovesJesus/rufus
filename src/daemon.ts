@@ -1,0 +1,179 @@
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import type { BouncerDecision, LosslessEvent, MessageSink, ModelProvider, Receipt, RpgWakeReport } from './types';
+import { Bouncer } from './bouncer/bouncer';
+import { genericEvent } from './events/ingest';
+import { EventStore } from './events/store';
+import { runRpgWake } from './rpg/loop';
+import { registerBuiltins } from './scripts/builtins';
+import { ToolRegistry } from './scripts/registry';
+
+export interface DaemonOptions {
+  workspaceDir: string;
+  reasoningProvider: ModelProvider;
+  speakerProvider: ModelProvider;
+  reasoningModel?: string;
+  speakerModel?: string;
+  sink: MessageSink;
+  pythonPath?: string;
+  /** Shadow mode: runs Bouncer + RPG loop and logs decisions to shadow.jsonl without sending to the real sink. */
+  shadow?: boolean;
+  maxTurnsPerWake?: number;
+  now?: () => Date;
+}
+
+export interface ProcessEventResult {
+  event: LosslessEvent;
+  decision: BouncerDecision;
+  wake?: RpgWakeReport;
+  shadowLogged?: boolean;
+}
+
+/**
+ * Unified 24/7 Heartbeat Engine:
+ * Waiting Mode ($0 Bouncer) <-> Awake Mode (Text-Based RPG Loop) + automatic SetFit training feedback.
+ */
+export class RufusCore {
+  readonly workspaceDir: string;
+  readonly events: EventStore;
+  readonly registry: ToolRegistry;
+  readonly bouncer: Bouncer;
+  readonly shadow: boolean;
+  private readonly reasoningProvider: ModelProvider;
+  private readonly speakerProvider: ModelProvider;
+  private readonly reasoningModel?: string;
+  private readonly speakerModel?: string;
+  private readonly realSink: MessageSink;
+  private readonly maxTurnsPerWake: number;
+  private readonly now: () => Date;
+  private wakeReceipts: Receipt[] = [];
+  private initialized = false;
+
+  constructor(opts: DaemonOptions) {
+    this.workspaceDir = opts.workspaceDir;
+    this.events = new EventStore({ workspaceDir: opts.workspaceDir });
+    this.registry = new ToolRegistry({ toolsDir: path.join(opts.workspaceDir, 'tools') });
+    this.bouncer = new Bouncer({
+      workspaceDir: opts.workspaceDir,
+      ...(opts.pythonPath ? { pythonPath: opts.pythonPath } : {}),
+    });
+    this.shadow = opts.shadow === true;
+    this.reasoningProvider = opts.reasoningProvider;
+    this.speakerProvider = opts.speakerProvider;
+    if (opts.reasoningModel) this.reasoningModel = opts.reasoningModel;
+    if (opts.speakerModel) this.speakerModel = opts.speakerModel;
+    this.realSink = opts.sink;
+    this.maxTurnsPerWake = opts.maxTurnsPerWake ?? 8;
+    this.now = opts.now ?? (() => new Date());
+  }
+
+  async init(): Promise<{ loadedTools: string[]; toolErrors: string[] }> {
+    if (this.initialized) return { loadedTools: [], toolErrors: [] };
+    this.initialized = true;
+    await fs.mkdir(this.workspaceDir, { recursive: true });
+    await this.events.load();
+    await this.bouncer.load();
+
+    const sink: MessageSink = this.shadow
+      ? {
+          send: async (text) => {
+            await fs.appendFile(
+              path.join(this.workspaceDir, 'shadow.jsonl'),
+              `${JSON.stringify({ at: this.now().toISOString(), kind: 'shadow_send', text })}\n`,
+              'utf8',
+            );
+          },
+        }
+      : this.realSink;
+
+    await registerBuiltins({
+      registry: this.registry,
+      speakerProvider: this.speakerProvider,
+      ...(this.speakerModel ? { speakerModel: this.speakerModel } : {}),
+      sink,
+      getWakeReceipts: () => this.wakeReceipts,
+      onSent: () => undefined,
+      onSleep: () => undefined,
+    });
+    const disk = await this.registry.loadFromDisk();
+    return { loadedTools: disk.loaded, toolErrors: disk.errors };
+  }
+
+  /** Processes one incoming event through the $0 Bouncer and (if WAKE) the RPG loop. */
+  async processEvent(event: LosslessEvent): Promise<ProcessEventResult> {
+    await this.init();
+    await this.events.append(event);
+    const decision = await this.bouncer.decide(event);
+
+    if (decision.label === 'SLEEP') {
+      if (this.shadow) {
+        await fs.appendFile(
+          path.join(this.workspaceDir, 'shadow.jsonl'),
+          `${JSON.stringify({ at: this.now().toISOString(), eventId: event.id, decision })}\n`,
+          'utf8',
+        );
+      }
+      return { event, decision, ...(this.shadow ? { shadowLogged: true } : {}) };
+    }
+
+    this.wakeReceipts = [];
+    const wake = await runRpgWake({
+      workspaceDir: this.workspaceDir,
+      trigger: event,
+      reasoningProvider: this.reasoningProvider,
+      ...(this.reasoningModel ? { reasoningModel: this.reasoningModel } : {}),
+      registry: this.registry,
+      events: this.events,
+      maxTurns: this.maxTurnsPerWake,
+      now: this.now,
+      onReceipt: (r) => this.wakeReceipts.push(r),
+    });
+
+    // Automatic teacher->student label logging for SetFit (skip system startup events)
+    if (event.source !== 'system' && event.kind !== 'owner_direct') {
+      const featureText = Bouncer.eventToFeatureText(event);
+      await this.bouncer.recordExample({
+        text: featureText,
+        label: wake.acted ? 'WAKE' : 'SLEEP',
+        source: wake.acted ? 'opus_acted' : 'opus_sleep',
+        at: this.now().toISOString(),
+      });
+    }
+
+    if (this.shadow) {
+      await fs.appendFile(
+        path.join(this.workspaceDir, 'shadow.jsonl'),
+        `${JSON.stringify({ at: this.now().toISOString(), eventId: event.id, decision, turns: wake.turns, acted: wake.acted, sent: wake.sentMessages })}\n`,
+        'utf8',
+      );
+    }
+
+    return { event, decision, wake, ...(this.shadow ? { shadowLogged: true } : {}) };
+  }
+
+  /** Records explicit human feedback (pushback/skip -> SLEEP, approval -> WAKE) for SetFit retraining. */
+  async recordFeedback(event: LosslessEvent, feedback: 'pushback' | 'skip' | 'approval'): Promise<void> {
+    await this.init();
+    await this.bouncer.recordExample({
+      text: Bouncer.eventToFeatureText(event),
+      label: feedback === 'approval' ? 'WAKE' : 'SLEEP',
+      source: feedback,
+      at: this.now().toISOString(),
+    });
+  }
+
+  /** Runs startup orientation through the exact same RPG + Haiku Speaker pipeline (never hardcoded). */
+  async announceStartup(): Promise<ProcessEventResult> {
+    const ev = genericEvent({
+      source: 'system',
+      kind: 'startup',
+      text: 'System just started. Run system.startup_snapshot and send a concise, natural orientation message via send_message, then sleep.',
+      timestamp: this.now().toISOString(),
+    });
+    return this.processEvent(ev);
+  }
+
+  async close(): Promise<void> {
+    await this.bouncer.close();
+  }
+}

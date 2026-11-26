@@ -1,665 +1,153 @@
-/** Shared types for flows, runs, human cards and AI providers. */
+/** Core types for Rufus v2 Core. */
 
-import type { QuietHours, Trigger } from './scheduler/triggers';
+export type ToolEffect = 'read' | 'write' | 'meta';
 
-// ---------- Human ----------
-
-export interface HumanOption {
-  id: string;
-  label: string;
+export interface JsonSchema {
+  type: 'object' | 'string' | 'number' | 'boolean' | 'array';
   description?: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  items?: JsonSchema;
+  enum?: unknown[];
+  additionalProperties?: boolean;
 }
 
-export interface HumanStepSpec {
-  title: string;
-  summary: string;
-  details?: string;
-  /** Strings, or objects. Ids default to a slug of the label. */
-  options?: Array<string | { id?: string; label: string; description?: string }>;
-  /** Default true. If false, `options` is required and only a choice is accepted. */
-  allowFreeText?: boolean;
-}
-
-/** Structured, channel-agnostic "your turn" card. Text/HUD/etc. are renderings of this. */
-export interface HumanCard {
+export interface ToolManifest {
   id: string;
-  runId: string;
-  flowId: string;
-  step: string;
-  title: string;
-  summary: string;
-  details?: string;
-  options: HumanOption[];
-  allowFreeText: boolean;
-  createdAt: string;
-}
-
-export interface HumanLessonInput {
-  rule: string;
-  /** Defaults to `flow:<flowId>`. See `scopes` in src/learning. */
-  scope?: string;
-}
-
-/** What a human sends back. `choice` is an option id, label, or 1-based number. */
-export interface HumanReply {
-  choice?: string;
-  text?: string;
-  lesson?: string | HumanLessonInput;
-}
-
-/** What `ctx.human()` returns to the flow once answered. */
-export interface HumanAnswer {
-  /** Option id, if a choice was made. */
-  choice?: string;
-  choiceLabel?: string;
-  text?: string;
-  answeredAt: string;
-}
-
-// ---------- AI ----------
-
-export interface AiMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-export interface AiRequest {
-  system: string;
-  messages: AiMessage[];
-  model?: string;
-  /** Ask the provider for a JSON object reply when it supports a native JSON mode (Gemini does). Others ignore it. */
-  json?: boolean;
-  meta: { runId: string; flowId: string; step: string; attempt: number };
-}
-
-/** Pluggable model adapter. Return the model's text. */
-export interface AiProvider {
-  complete(req: AiRequest): Promise<string>;
-}
-
-/** The two model tiers. Name them under `config.providers` (`fast`, `smart`); an unconfigured tier falls back to the default provider. */
-export type Tier = 'fast' | 'smart';
-
-/**
- * The Spectrum of Intelligence, cheapest and most exact first: `code`, then a `fast` model, then a `smart` model, then a
- * `human`. Work should stay as far left as it can.
- */
-export type Rung = 'code' | Tier | 'human';
-
-/** How many steps of a run each rung handled. Stored on the run as `run.spectrum`. */
-export interface Spectrum {
-  code: number;
-  fast: number;
-  smart: number;
-  human: number;
-  /** Steps where `fast` could not pass `verify`, so they moved up a rung. Only present when it happened. */
-  escalated?: number;
-}
-
-export type VerifyResult = { ok: true } | { ok: false; reason: string };
-
-export interface AiStepOptions<T = string> {
-  prompt: string;
-  /** Exact, structured data gathered by code before the AI thinks. */
-  context?: unknown;
-  /** Deterministic check. On failure the exact `reason` is fed back and the AI retries. */
-  verify?: (output: T) => VerifyResult | Promise<VerifyResult>;
-  /** Default 2 (so up to 3 attempts). */
-  maxRetries?: number;
-  model?: string;
-  /** Ask the provider for a JSON reply when it has a native JSON mode (e.g. Gemini). Set it when `parse` expects JSON. */
-  json?: boolean;
-  /** Name of a provider in `config.providers` (or `"default"`). Beats the flow's `meta.provider`. */
-  provider?: string;
-  /**
-   * Which rung of the spectrum this step needs: `fast` for wording and light classification, `smart` for judgment.
-   * Resolves to `config.providers.fast` / `.smart`; if that tier is not configured, the flow's (or the default) provider is used.
-   * `provider` (by name) beats `tier`. A step with neither counts as `smart` in `run.spectrum`.
-   */
-  tier?: Tier;
-  /** Turn raw model text into `T`. A throw counts as a failed verification. */
-  parse?: (raw: string) => T;
-  /**
-   * How many recent human-reviewed examples of this step to show the model. Default 3.
-   * `false` (or 0) turns them off.
-   */
-  includeExamples?: number | false;
-}
-
-/** Per-rung tweaks for `ctx.escalate`. */
-export interface RungOptions {
-  model?: string;
-  /** Ask the provider for a JSON reply when it has a native JSON mode (e.g. Gemini). Set it when `parse` expects JSON. */
-  json?: boolean;
-  /** Name of a provider in `config.providers`. Beats the rung's tier. */
-  provider?: string;
-  /** Retries on this rung before moving up. Default 1 for `fast`, 2 for `smart`. */
-  maxRetries?: number;
-}
-
-/** What a human sees when both models failed `verify`. A function gets the last failure so the card can show it. */
-export type EscalateHumanSpec = HumanStepSpec | ((failure: { reason: string; lastOutput: string }) => HumanStepSpec);
-
-export interface EscalateOptions<T = string> extends Omit<AiStepOptions<T>, 'tier' | 'provider' | 'model' | 'maxRetries'> {
-  /** The cheap first try. */
-  fast?: RungOptions;
-  /** Used only if `fast` cannot pass `verify`. */
-  smart?: RungOptions;
-  /** Last rung: if `smart` also fails `verify`, ask a human. Without it, the step fails like a normal ai step. */
-  human?: EscalateHumanSpec;
-}
-
-/** Which rung handled an escalated step, and what it produced. */
-export type EscalateResult<T> =
-  | { rung: Tier; value: T; attempts: number }
-  | { rung: 'human'; answer: HumanAnswer; reason: string };
-
-// ---------- Flows ----------
-
-export interface FlowMeta {
-  id: string;
-  name: string;
+  version: number;
   description: string;
-  /** Lessons scoped to this role are injected into every `ai` step. */
-  role?: string;
-  /** Named provider (a key of `config.providers`) for this flow's ai steps. A step's own `provider` beats it. */
-  provider?: string;
-  /** How this flow starts. See `at()`, `every()` and `onEvent()` in src/scheduler. Default: manual. */
-  trigger?: Trigger;
+  whenToUse: string[];
+  notWhen?: string[];
+  effect: ToolEffect;
+  requiresApproval: boolean;
+  timeoutMs?: number;
+  inputSchema: JsonSchema;
+  exampleInput?: Record<string, unknown>;
 }
 
-/** Options for `ctx.code`. */
-export interface CodeStepOptions {
-  /** Bookkeeping only: the step is saved and replayed like any other, but not counted in `run.spectrum` (used inside staged flows, whose stages are counted once). */
-  bookkeeping?: boolean;
-}
-
-// ---------- Three-stage flows: plan -> execute -> verify ----------
-
-/** Where a staged flow does the work, cheapest first: `code`, a `fast` model, a `smart` model, then a `human`. Same order as the Spectrum. */
-export type Route = Rung;
-
-export type StageName = 'plan' | 'execute' | 'verify';
-
-/**
- * What `plan` returns: a concrete goal, and which rung should do the work. It is saved with the run, so keep it JSON.
- * Add your own fields (a prompt, gathered context, retrieved examples, ...); `execute` and `verify` get the whole plan back.
- */
-export interface StagePlan {
-  /** One explicit, concrete sentence: what "done" means. `verify` checks the result against it. */
-  goal: string;
-  /** Chosen upfront, in code. Prefer `code`, then `fast`, then `smart`; `human` skips straight to a person. */
-  route: Route;
-  /** Optional objective acceptance criteria (also for a model-based `verify` to read). */
-  criteria?: string[];
-  /** Why this route (shows on the human card and in the trail). */
-  reason?: string;
-  [extra: string]: unknown;
-}
-
-/** One pass of the plan -> execute -> verify loop, as recorded in `StagedResult.trail`. */
-export interface StageTrailEntry {
-  /** 0 for the first pass, 1 for the first re-plan, ... */
-  attempt: number;
-  route: Route;
-  goal: string;
-  outcome: 'passed' | 'failed' | 'human';
-  /** Why it failed verification, or why it went to a human. */
-  reason?: string;
-}
-
-/** Fed back into `plan` after `verify` fails, so the re-plan can fix the cause instead of retrying blindly. */
-export interface ReplanFeedback {
-  /** 1 for the first re-plan. */
-  attempt: number;
-  /** The exact reason `verify` (or the model's own check) gave. */
-  reason: string;
-  previousRoute: Route;
-  previousGoal: string;
-  previousPlan: StagePlan;
-  /** What `execute` produced (absent when `execute` itself failed its model check). */
-  lastResult?: unknown;
-  /** One rung above `previousRoute` (`smart` stays `smart`): the cheapest sensible upgrade. A re-plan never goes below `previousRoute`. */
-  nextRoute: Route;
-  trail: StageTrailEntry[];
-}
-
-/**
- * The context every stage function gets: the normal flow steps (`code`, `ai`, `human`, ...), plus where we are.
- * Inside a stage, `ai` defaults `tier` to the plan's route (execute) or `fast` (plan, verify): pass `tier` to override.
- * Stage functions re-run on resume like any flow body, so keep what is outside `ctx.*` steps deterministic.
- */
-export interface StageContext<I = unknown> extends FlowContext<I> {
-  readonly stage: StageName;
-  /** 0 on the first pass. */
-  readonly attempt: number;
-  /** The route of the plan being executed or verified. Undefined while planning. */
-  readonly route?: Route;
-  /** Set when this pass is a re-plan after a failed verification. */
-  readonly replan?: ReplanFeedback;
-}
-
-export interface HumanHandoff<P extends StagePlan = StagePlan> {
-  /** Why a person is needed: the plan said so, or verification kept failing. */
-  reason: string;
-  goal: string;
-  plan: P;
-  lastResult?: unknown;
-  trail: StageTrailEntry[];
-}
-
-export interface StagedSpec<I = unknown, R = unknown, P extends StagePlan = StagePlan> {
-  /** Stage 1. Gather context (code, hybrid retrieval of real examples, ...), define the goal, and pick the route upfront. */
-  plan(input: I, ctx: StageContext<I>): P | Promise<P>;
-  /** Stage 2. Do the work on `plan.route` only: no cheap-then-medium-then-expensive cascade. Return JSON. */
-  execute(plan: P, ctx: StageContext<I>): R | Promise<R>;
-  /** Stage 3. Cross-check the result against the Stage 1 goal. Code is the first choice; `ctx.ai` may review complex output. */
-  verify(result: R, plan: P, ctx: StageContext<I>): VerifyResult | Promise<VerifyResult>;
-  /** Re-plans allowed after a failed verification before a human is asked (0-5). Default 1. */
-  maxReplans?: number;
-  /** The card a person sees when the plan routes to `human` or verification keeps failing. A default card is used without it. */
-  human?: HumanStepSpec | ((handoff: HumanHandoff<P>) => HumanStepSpec);
-}
-
-export type StagedResult<R = unknown, P extends StagePlan = StagePlan> =
-  | { status: 'passed'; route: Route; goal: string; plan: P; result: R; replans: number; trail: StageTrailEntry[] }
-  | { status: 'human'; route: 'human'; goal: string; plan: P; answer: HumanAnswer; reason: string; replans: number; trail: StageTrailEntry[]; lastResult?: unknown };
-
-export interface FlowContext<I = unknown> {
-  readonly runId: string;
-  readonly input: I;
-  /** Deterministic step. Runs once; the JSON result is replayed on resume. */
-  code<T>(name: string, fn: () => T | Promise<T>, opts?: CodeStepOptions): Promise<T>;
-  /** Code-assisted AI step. */
-  ai(name: string, opts: AiStepOptions<string> & { parse?: undefined }): Promise<string>;
-  ai<T>(name: string, opts: AiStepOptions<T> & { parse: (raw: string) => T }): Promise<T>;
-  /**
-   * Climb the spectrum: try a `fast` model, check it with the deterministic `verify`, and only if it cannot pass move to
-   * a `smart` model, then (if `human` is given) to a person. Records the rung that handled it in `run.spectrum`.
-   */
-  escalate(name: string, opts: EscalateOptions<string> & { parse?: undefined }): Promise<EscalateResult<string>>;
-  escalate<T>(name: string, opts: EscalateOptions<T> & { parse: (raw: string) => T }): Promise<EscalateResult<T>>;
-  /** Pause for a human. Resolves with their answer after `engine.answer()`. */
-  human(name: string, spec: HumanStepSpec): Promise<HumanAnswer>;
-  /**
-   * Run a three-stage unit: `plan` (context, goal, route chosen upfront) -> `execute` (on that route only) -> `verify`
-   * (against the goal). If `verify` fails, the reason goes back into `plan` for a better plan and a higher route, up to
-   * `maxReplans` times; after that, or when a plan routes to `human`, a person decides.
-   */
-  staged<R, P extends StagePlan = StagePlan>(name: string, spec: StagedSpec<I, R, P>): Promise<StagedResult<R, P>>;
-}
-
-export interface Flow<I = any, O = any> {
-  readonly meta: FlowMeta;
-  readonly run: (ctx: FlowContext<I>) => Promise<O>;
-}
-
-// ---------- Runs ----------
-
-export interface StepRecord {
-  kind: 'code' | 'ai' | 'human';
-  name: string;
-  done: boolean;
-  /** code only: saved and replayed, but not counted in the spectrum (see `CodeStepOptions`). */
-  bookkeeping?: boolean;
-  /** JSON result, present once `done`. */
-  result?: unknown;
-  /** ai only: how many attempts it took. */
-  attempts?: number;
-  /** ai only: the rung that handled it (`fast` or `smart`). Absent on older runs, which count as `smart`. */
-  rung?: Tier;
-  /** ai only: `fast` could not pass `verify`, so the step moved up (to `smart`, or to a human). */
-  escalated?: boolean;
-  /** ai only: every model rung failed `verify` and a human step (same name) took over. */
-  handoff?: { reason: string; lastOutput: string };
-  /** human only: the card shown to the human. */
-  card?: HumanCard;
-}
-
-export type RunStatus = 'running' | 'waiting_human' | 'completed' | 'failed';
-
-export interface RunRecord {
-  id: string;
-  flowId: string;
-  status: RunStatus;
-  input: unknown;
-  steps: Record<string, StepRecord>;
-  pendingCardId?: string;
-  /** Which rung of the spectrum handled each step so far. */
-  spectrum?: Spectrum;
-  output?: unknown;
+export interface ScriptOutput {
+  ok: boolean;
+  summary: string;
+  changes?: string[];
+  data?: unknown;
+  nextHints?: string[];
   error?: string;
-  createdAt: string;
-  updatedAt: string;
 }
 
-export type RunResult =
-  | { status: 'completed'; runId: string; output: unknown }
-  | { status: 'waiting_human'; runId: string; card: HumanCard }
-  | { status: 'failed'; runId: string; error: string };
+export type ReceiptStatus = 'ok' | 'failed' | 'pending_approval' | 'invalid_input' | 'timed_out';
 
-// ---------- Config ----------
-
-export type ProviderConfig =
-  | { type: 'openai-compatible'; baseUrl: string; model: string; apiKeyEnv?: string }
-  | { type: 'command'; command: string; args?: string[] }
-  | {
-      type: 'gemini';
-      /** Default `gemini-2.5-flash`. */
-      model?: string;
-      /** The key itself. Prefer `apiKeyEnv`. Sent in the `x-goog-api-key` header, never in a URL. */
-      apiKey?: string;
-      /** Default `GEMINI_API_KEY`. */
-      apiKeyEnv?: string;
-      /** Default `https://generativelanguage.googleapis.com/v1beta`. */
-      baseUrl?: string;
-      temperature?: number;
-      maxOutputTokens?: number;
-      timeoutMs?: number;
-    };
-
-/**
- * Where vectors for retrieval come from (`rufus embed`, and automatically on `rufus collect`). Default `local`: offline, $0.
- * `ollama` is local neural ($0); `gemini` and `http` send the embedded text to that service, so choose them on purpose.
- */
-export interface EmbeddingConfig {
-  type?: 'local' | 'ollama' | 'gemini' | 'http';
-  /** Model name (ollama: `nomic-embed-text`; gemini: `gemini-embedding-001`; http: required). */
-  model?: string;
-  /** Ollama default `http://127.0.0.1:11434`; Gemini default the Generative Language API; http: required (e.g. `https://api.example.com/v1`). */
-  baseUrl?: string;
-  /** Vector length: local default 256, gemini default 768. */
-  dimensions?: number;
-  /** The key itself. Prefer `apiKeyEnv`. Sent in a header, never in a URL. */
-  apiKey?: string;
-  /** Environment variable holding the key (gemini default `GEMINI_API_KEY`, http default `RUFUS_API_KEY`). */
-  apiKeyEnv?: string;
-  /** Abort a request after this many milliseconds (default 60000). */
-  timeoutMs?: number;
+export interface Receipt {
+  toolId: string;
+  effect: ToolEffect;
+  status: ReceiptStatus;
+  durationMs: number;
+  summary: string;
+  changes: string[];
+  data?: unknown;
+  truncated?: boolean;
+  error?: string;
+  nextHints?: string[];
+  brokenWarning?: string;
+  at: string;
 }
 
-/** Telegram Bot API settings. Env vars (RUFUS_TELEGRAM_*) override these; prefer env for the token. */
-export interface TelegramConfig {
-  /** Bot token from @BotFather. */
-  token?: string;
-  /** The only chat Rufus reads from and writes to. A number or string (negative for groups). */
-  chatId?: string | number;
-  /** Bot API base URL, for a self-hosted Bot API server. Default https://api.telegram.org */
-  apiUrl?: string;
-  /** Turns voice notes and audio into text with a local command. Unset: voice notes are skipped. */
-  transcribe?: TranscribeCommand;
+export interface ToolStats {
+  runs: number;
+  successes: number;
+  failures: number;
+  consecutiveFailures: number;
+  avgMs: number;
+  lastUsedAt?: string;
+  lastError?: string;
 }
 
-/**
- * A local speech-to-text command. `"{file}"` in `args` is replaced with the downloaded
- * audio path; without it, the path is appended as the last arg. Trimmed stdout is the transcript.
- */
-export interface TranscribeCommand {
-  command: string;
-  args?: string[];
-  /** Default 120000 (2 minutes). */
-  timeoutMs?: number;
+export interface ScriptContext {
+  workspaceDir: string;
+  now: Date;
+  callTool: (readOnlyId: string, input?: Record<string, unknown>) => Promise<Receipt>;
+  env: Record<string, string | undefined>;
 }
 
-/**
- * v20: a local text-to-speech command ($0, nothing leaves the machine). In `args`, `{text}` becomes the text to speak
- * and `{out}` a temp file the command writes audio to. Without `{text}` the text is piped on stdin; without `{out}` the
- * audio is read from stdout. Examples: `piper` + `ffmpeg` to ogg/opus, or macOS `say -o {out}` with `outputFormat: "wav"`.
- */
-export interface TtsCommandConfig {
-  command: string;
-  args: string[];
-  /** The audio the command produces. Default `ogg` (what Telegram voice notes want: OGG/Opus). */
-  outputFormat?: 'ogg' | 'wav' | 'mp3';
-  /** Default 60000. */
-  timeoutMs?: number;
-  /** Longest text spoken; longer replies are cut at a sentence. Default 1200 characters. */
-  maxChars?: number;
+export type EventSource = 'message' | 'email' | 'calendar' | 'browser' | 'file' | 'system' | (string & {});
+
+export interface EventReaction {
+  emoji: string;
+  actor?: string;
+  at?: string;
 }
 
-/** v20: when a chat reply is a voice note. `match` (the default once `tts` is set): when you sent a voice note. */
-export type VoiceReplyMode = 'never' | 'match' | 'always';
-
-/** v20: voice settings (local speech-to-text and text-to-speech, $0). */
-export interface VoiceConfig {
-  /** Text-to-speech command. Unset: Rufus never speaks (the Hub falls back to the browser's own voice). */
-  tts?: TtsCommandConfig;
-  /** Default `match` when `tts` is set, else `never`. */
-  replyMode?: VoiceReplyMode;
-  /** Speech-to-text for the Hub's live call. Default: `telegram.transcribe`. */
-  stt?: TranscribeCommand;
-  /**
-   * v23: named provider (a key of `providers`, e.g. `"fast"`) for spoken turns: Hub calls and voice notes answered by
-   * voice. Default: `fast` when configured, else the chat provider. A failure escalates to the chat provider.
-   */
-  provider?: string;
-}
-
-/** v20: the Ambient Jarvis Hub (a phone/desktop web app). `true`: on, sharing the webhook's port, host and token. */
-export type HubConfig = boolean | { port?: number; host?: string; token?: string };
-
-/** Beeper Desktop API settings. Env vars (RUFUS_BEEPER_*) override these; prefer env for the token. */
-export interface BeeperConfig {
-  url?: string;
-  token?: string;
-  chatId?: string;
-  /** The chat is a note-to-self, so your own messages count as replies. */
-  selfChat?: boolean;
-  /** Beeper Desktop's local API for tools and sensors. Default http://127.0.0.1:23373 (falls back to `url`). */
-  apiUrl?: string;
-}
-
-/** A local CLI wrapped as a tool (`config.tools.commands["calendar.read"]`). */
-export interface CommandToolConfig {
-  /** The program to run (no shell). */
-  command: string;
-  /** Arguments; `{{key}}` is replaced with the tool call's `args.key`. The args also arrive on stdin as JSON. */
-  args?: string[];
-  description?: string;
-  /** True when it only reads (may run while planning/executing). Default from the name: `*.read` is read-only. */
-  readOnly?: boolean;
-  /** `external`, `money`, `login`: always needs a human's yes unless trusted. */
-  sensitivity?: Array<'external' | 'money' | 'login'>;
-  /** Default 30000. */
-  timeoutMs?: number;
-  cwd?: string;
-}
-
-/** Real tool hands. */
-export interface ToolsConfig {
-  /** Local CLI tools by name: `calendar.read`, `calendar.write`, `gmail.read`, `gmail.draft`, `shell.run`, or your own. */
-  commands?: Record<string, CommandToolConfig>;
-  /** Tools whose sensitive action may run without a per-run yes. Empty by default: think before adding one. */
-  trusted?: string[];
-  /** `false` turns off the built-in `beeper.read` / `beeper.send` even when Beeper is configured. */
-  beeper?: boolean;
-  /** `false` turns off the built-in read-only `web.search` / `web.fetch` (v19). On by default; no API key needed. */
-  web?: boolean;
-  /**
-   * v24c: MCP servers by name. Each tool they offer is registered as `mcp.<name>.<tool>`. Read-only only when the server
-   * says so (`annotations.readOnlyHint`) or you list it in `readOnlyTools`; everything else is an `external` write tool
-   * that waits for your yes on Verify, starts at `check` on the Earned Trust ladder and is written to `audit.jsonl`.
-   */
-  mcp?: Record<string, McpServerConfig>;
-}
-
-/** v24c: one MCP (Model Context Protocol) server (`config.tools.mcp.<name>`). Give either `command` or `url`. */
-export interface McpServerConfig {
-  /** Stdio transport: spawn a local MCP server process. */
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  /** HTTP JSON-RPC transport: connect to a local/remote MCP endpoint. */
-  url?: string;
-  headers?: Record<string, string>;
-  /** Tool names explicitly allowed as read-only (overrides default-safe write classification). */
-  readOnlyTools?: string[];
-  /** Tool names to block/hide from Rufus completely. */
-  denyTools?: string[];
-  /** Per request (initialize, tools/list, tools/call). Default 30s. */
-  timeoutMs?: number;
-}
-
-/** The Beeper sensor: new incoming messages from people, across your chats. */
-export interface BeeperSensorConfig {
-  /** Chats never sensed (your Rufus chat is always skipped). */
-  ignoreChatIds?: string[];
-  /** Also sense group chats. Default true. */
-  groups?: boolean;
-  /** Skip muted chats. Default true. */
-  skipMuted?: boolean;
-  /** Messages read per chat per pass. Default 20. */
-  limitPerChat?: number;
-  /** Chats whose title matches this (case-insensitive regex) are bots and skipped. Default `\bbot\b|bot$`. */
-  botPattern?: string;
-  /** Chats with exactly this title (case-insensitive) are never sensed: Rufus's own chat. Default `["rufus"]`. */
-  ignoreChatTitles?: string[];
-}
-
-/** A read-only command whose JSON output becomes signals (`config.sensors.commands[]`). */
-export interface CommandSensorConfig {
+export interface LosslessEvent {
   id: string;
-  /** `calendar`, `email`, ... Default `id`. */
-  surface?: string;
-  /** Default `<surface>.item`. */
-  kind?: string;
-  command: string;
-  args?: string[];
-  timeoutMs?: number;
-  cwd?: string;
-  /** Where the list is in the JSON (`items`, `data.events`). Default: the top-level array or `items`/`events`/`messages`/`threads`/`data`. */
-  itemsPath?: string;
-  idField?: string;
-  textField?: string;
-  actorField?: string;
-  timestampField?: string;
-  /** On the first pass, remember what is already there without emitting it. Default true (no flood on Day 1). */
-  baseline?: boolean;
-  urgency?: 'urgent' | 'normal';
+  source: EventSource;
+  kind: string;
+  timestamp: string;
+  actor?: string;
+  channel?: string;
+  threadId?: string;
+  text: string;
+  deleted?: boolean;
+  reactions?: EventReaction[];
+  replyTo?: string;
+  metadata?: Record<string, unknown>;
 }
 
-export interface SensorsConfig {
-  /** `true` (defaults) or settings. Needs Beeper configured (`beeper` or `RUFUS_BEEPER_TOKEN`). */
-  beeper?: boolean | BeeperSensorConfig;
-  commands?: CommandSensorConfig[];
+export type BouncerLabel = 'SLEEP' | 'WAKE';
+
+export interface BouncerDecision {
+  label: BouncerLabel;
+  confidence: number;
+  backend: 'setfit' | 'prototype' | 'rule';
+  reason?: string;
+  durationMs: number;
 }
 
-/** `rufus start`: the unified daemon. */
-export interface StartConfig {
-  /** How often to sense and read replies. Default `30s`. */
-  interval?: string;
-  /** How often normal (non-urgent) items are delivered as one check-in. Default `2h`. */
-  checkinEvery?: string;
-  /** Which chat to talk through, when both are configured. */
-  channel?: 'telegram' | 'beeper';
-  /**
-   * A tiny local `POST /signal` webhook (Bearer token) so phone automations (MacroDroid, Tasker) can push
-   * `phone.unlocked`, `app.opened`, `location.changed` into the loop. Off unless set. The token may also come from
-   * `RUFUS_WEBHOOK_TOKEN`. Default host `127.0.0.1`, port 8787.
-   */
-  webhook?: { port?: number; host?: string; token?: string };
-  /**
-   * v20: the Ambient Jarvis Hub, a token-protected web app (chat, live voice call, Now & Verify) served by the same
-   * small server as `/signal` (which keeps working exactly as before). Token: `hub.token`, `RUFUS_HUB_TOKEN`, or the
-   * webhook token. Off unless set.
-   */
-  hub?: HubConfig;
-  /** Proactive heads-ups before Anchor blocks and the good-morning brief. Default on; `false` turns it off. */
-  heartbeat?: false | { leadMinutes?: number; quietHours?: string | false; morningBrief?: boolean; morningUntil?: string; phrasing?: 'code' | 'ai' };
-  /**
-   * v15: the proactive think-beat. Every so often Rufus looks at the live board (time, Anchor, recent chat and runs) and
-   * says ONE useful thing, or nothing. Default `45m`; `'0'` turns it off. Never in quiet hours or protected time.
-   */
-  thinkEvery?: string;
-  /** v15: read-only tools the think-beat may glance at (default `["calendar.read"]`) and the named provider it uses. */
-  think?: { tools?: string[]; provider?: string; quietHours?: string | false; /** v25a: read-only tool calls per beat (default 3; 0 = off). */ maxToolSteps?: number };
-  /** v15: a Verify item that waited this long after reaching you expires (never sends). Default `60m`. */
-  pendingTtl?: string;
-  /** v17: mirror today's `calendar.read` events into the Anchor on start and every `every` (default `20m`). `false`: off. */
-  calendarSync?: false | { every?: string };
-  /**
-   * v17: the proactive day planner. Once a day, inside `window` (default `09:00-17:00`), when at least `minOpenMinutes`
-   * (default 90) are open, it offers a plan in chat; nothing is written until you say yes. Default on; `false`: off.
-   */
-  planner?: false | { window?: string; minOpenMinutes?: number; dayStart?: string; dayEnd?: string; maxFocusMinutes?: number; breakMinutes?: number; scroll?: boolean; ai?: boolean };
-  /** v17: a short curated digest when a scheduled `scroll` block (or the `kinds` you name) starts. Default on; `false`: off. */
-  breakDigest?: false | { kinds?: Array<'focus' | 'meeting' | 'break' | 'scroll' | 'personal' | 'protected'>; ai?: boolean; withinMinutes?: number };
-  /**
-   * v18: the daily self-review. Once each evening (after `after`, default `19:00`, before quiet hours, never in protected
-   * time) code reviews the last 24h into `self-review.jsonl`, and says one short note only when something is actionable.
-   * Default on; `false` turns it off.
-   */
-  selfReview?: false | { after?: string; quietHours?: string | false; repeatRejections?: number; repeatToolFailures?: number };
-  /** v22: background missions (read-only research and prep). Default on; `false` turns them off. */
-  missions?: false | { concurrency?: number; provider?: string };
-  /** v24b: the evening memory curation over `memory/YYYY-MM-DD.md` ("dreaming"). Default on; `false` turns it off. */
-  memoryDream?: false | { after?: string; ai?: boolean };
-  /**
-   * v26: `"continuous"` runs ONE Continuous Living Brain for chat, reactions and periodic wakes (it folds in what you
-   * text while it thinks, and can say / react / use tools / keep working / rest). Default `"classic"`.
-   */
-  brain?: 'classic' | 'continuous';
-  /** v26: model steps per continuous-brain wake. Default 6, max 10. */
-  maxStepsPerWake?: number;
-  /** v26: send a short, $0 "I'm up" snapshot to chat on startup showing what Rufus woke up to (5m cooldown). Default false. */
-  announceStartup?: boolean;
+export interface BouncerExample {
+  text: string;
+  label: BouncerLabel;
+  source: 'seed' | 'pushback' | 'skip' | 'approval' | 'user_message' | 'opus_sleep' | 'opus_acted';
+  at: string;
 }
 
-/** Guardrails against piling up prompt rules. */
-export interface LearningConfig {
-  /** Most active (non-hardened) lessons per scope. Default 7. */
-  maxLessonsPerScope?: number;
+export interface ModelRequest {
+  system: string;
+  prompt: string;
+  model?: string;
 }
 
-/** `rufus mine` settings. */
-export interface MineConfig {
-  /** Calendar-based recency, only when set: days for a reply's weight to halve (0 turns weighting off). By default weighting follows observations instead (see `halfLifeObservations`). */
-  halfLifeDays?: number;
-  /** Rank-based recency (the default, 100): the Nth newest reply weighs half the newest, however long those N took. Wins over `halfLifeDays`. */
-  halfLifeObservations?: number;
-  /** Named provider for `rufus mine --ai`. Default: `smart` if configured, else the default provider. */
-  provider?: string;
-  /** Your own intent buckets (first match wins). Replaces the built-in ones. `pattern` is a case-insensitive regex. */
-  buckets?: Array<{ id: string; label?: string; pattern: string }>;
-  /** Fewest pairs before rules are proposed (default 10). */
-  minPairs?: number;
-  /** @deprecated Use `invariantMinShare`. */
-  minShare?: number;
-  /** Share of replies a behavior must hold for to be a hard invariant (default 0.98). Below that it has real exceptions and is reported as conditional logic instead of a wall. */
-  invariantMinShare?: number;
-  /** Fewest exception cases before contrast (the `if / else` search) runs (default 5). */
-  minExceptions?: number;
-  /** A trigger's exception rate must be at least this many times the rest (default 2). */
-  minLift?: number;
-  /** Fewest replies a situation (channel, closeness, DM/group, ...) needs before it can become a generalized rule (default 30). */
-  minSlicePairs?: number;
-  /** ... and fewest different contacts in it (default 5). */
-  minDistinctContacts?: number;
-  /** ... and the largest share (0-1) any single contact may have of it (default 0.4). */
-  maxTopContactShare?: number;
+export interface ModelProvider {
+  readonly name: string;
+  complete(req: ModelRequest): Promise<string>;
 }
 
-export interface RufusConfig {
-  version: 1;
-  /** The default provider, used when a flow or step does not name one. */
-  provider?: ProviderConfig;
-  /** Extra named providers, e.g. `fast` (cheap model for phrasing) and `smart` (judgment). Pick one with `meta.provider` or `ctx.ai(..., { provider })`. */
-  providers?: Record<string, ProviderConfig>;
-  /** Chief of Staff chat settings. */
-  chief?: { /** Named provider (a key of `providers`) for free-form chat. */ provider?: string };
-  telegram?: TelegramConfig;
-  beeper?: BeeperConfig;
-  /** v20: local voice (text-to-speech replies, the Hub's live call). */
-  voice?: VoiceConfig;
-  /** The scheduler stays silent in this window unless a trigger is `urgent`. */
-  quietHours?: QuietHours;
-  learning?: LearningConfig;
-  mine?: MineConfig;
-  embeddings?: EmbeddingConfig;
-  /** Real tool hands (v12). */
-  tools?: ToolsConfig;
-  /** Live app sensors for `rufus start` (v12). */
-  sensors?: SensorsConfig;
-  /** The unified daemon (v12). */
-  start?: StartConfig;
+export interface RpgAction {
+  toolId: string;
+  input: Record<string, unknown>;
+  thought?: string;
+}
+
+export interface RpgWakeReport {
+  triggerEventId?: string;
+  turns: number;
+  receipts: Receipt[];
+  sentMessages: string[];
+  pendingApprovals: Array<{ toolId: string; input: Record<string, unknown>; receipt: Receipt }>;
+  slept: boolean;
+  sleepReason?: string;
+  acted: boolean;
+}
+
+export interface MessageSink {
+  send(text: string): Promise<void>;
+}
+
+export interface CoreConfig {
+  workspaceDir: string;
+  reasoningModel?: string;
+  speakerModel?: string;
+  heartbeatMs?: number;
+  maxTurnsPerWake?: number;
+  topKTools?: number;
+  topKContext?: number;
+  bouncerPython?: string;
+  telegram?: { token: string; chatId: string };
 }
