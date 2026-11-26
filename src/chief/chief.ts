@@ -19,6 +19,7 @@ import { MISSION_START_TOOL } from '../tools/mission-tools';
 import { parseAutonomyCommand, runAutonomyCommand, type AutonomyCommand } from '../unified/autonomy';
 import { formatMemoryForPrompt, loadMarkdownMemory, MEMORY_WRITE_TOOL } from '../memory/markdown-memory';
 import { relevantSkillsSection, SKILL_LIST_TOOL, SKILL_READ_TOOL } from '../skills/skills';
+import { layer3RetryPrompt, matchLayer3Units, relevantProjectsSection, runLayer3Prepare, runLayer3Verify } from '../skills/runner';
 import { detectUnbackedActionClaims, honestCorrection, VERIFIER_RETRY_PROMPT, type VerifiedToolCall } from '../engine/cross-verify';
 import { PENDING_CLEAR_TOOL, pendingClearTool } from '../tools/pending-tool';
 import { assignNumbers, loadStartState } from '../unified/state';
@@ -47,6 +48,12 @@ export interface ChiefReply {
    * one corrective retry ran, and whether code had to append an honest correction because the retry still claimed it.
    */
   verifier?: { violations: string[]; retried: boolean; corrected: boolean };
+  /**
+   * v25a: Code-in-Layer-3. Set when workspace `.mjs` hooks did something this turn: `prepared` names the skills or
+   * frameworks whose prepare.mjs added ground truth, `violations` what taste.mjs / verify.mjs rejected in the first
+   * draft, `remaining` what the one rewrite still got wrong, and `notes` any hook that failed (the turn carried on).
+   */
+  layer3?: { prepared?: string[]; violations?: string[]; retried?: boolean; remaining?: string[]; notes?: string[] };
 }
 
 /** The chat reply asks for no message at all. */
@@ -636,13 +643,15 @@ export class ChiefOfStaff {
    * the workspace has none of them, so prompts stay exactly as before. Never throws.
    */
   async memoryAndSkills(text: string): Promise<string> {
-    const [memory, skills] = await Promise.all([
+    const [memory, skills, projects] = await Promise.all([
       loadMarkdownMemory(this.loop?.dir ?? this.dir, this.now())
         .then((m) => formatMemoryForPrompt(m))
         .catch(() => ''),
       relevantSkillsSection(this.dir, text),
+      // v25a: the active projects/*.md that fit the message (nothing when the folder doesn't exist).
+      relevantProjectsSection(this.dir, text),
     ]);
-    return [memory, skills].filter(Boolean).join('\n\n');
+    return [memory, skills, projects].filter(Boolean).join('\n\n');
   }
 
   /**
@@ -665,15 +674,23 @@ export class ChiefOfStaff {
   private async chat(text: string, spoken = false): Promise<ChiefReply> {
     const reply = (t: string, extra: Partial<ChiefReply> = {}): ChiefReply => ({ text: t, cards: [], via: 'chat', ...extra });
     try {
-      const [snapshot, persona, history] = await Promise.all([
+      const channel = spoken ? 'voice' : 'chat';
+      const [snapshot, persona, history, units] = await Promise.all([
         this.snapshot(),
         this.persona(text),
         this.historyTurns ? loadChatHistory(this.dir, this.historyTurns).catch(() => []) : Promise.resolve([]),
+        matchLayer3Units(this.dir, text),
       ]);
       const tools = this.hasTools ? this.tools! : undefined;
+      // v25a Code Prepares (Layer 3): matched skills'/frameworks' prepare.mjs gather ground truth before the AI thinks.
+      const layer3: NonNullable<ChiefReply['layer3']> = {};
+      const prepared = units.length ? await runLayer3Prepare({ dir: this.dir, skills: units, query: text, channel, now: this.now(), ...(this.tools ? { tools: this.tools } : {}) }) : { context: '', notes: [] };
+      if (prepared.context) layer3.prepared = units.map((u) => u.name);
+      if (prepared.notes.length) layer3.notes = [...prepared.notes];
+      const ground = prepared.context ? `${prepared.context}\n\n` : '';
       const recent = history.length ? `Recent conversation (oldest first, local times):\n${formatChatHistory(history, this.now())}\n\n` : '';
       const messages: AiMessage[] = [
-        { role: 'user', content: `Live snapshot (exact data gathered by code):\n\`\`\`json\n${JSON.stringify(snapshot, null, 2)}\n\`\`\`\n\n${recent}Their message:\n${text}` },
+        { role: 'user', content: `Live snapshot (exact data gathered by code):\n\`\`\`json\n${JSON.stringify(snapshot, null, 2)}\n\`\`\`\n\n${ground}${recent}Their message:\n${text}` },
       ];
       const base = withPersona(tools ? systemWithTools(tools, this.maxToolSteps) : SYSTEM, persona);
       const system = spoken ? `${base}\n\n${VOICE_CALL_HINT}` : base;
@@ -699,32 +716,45 @@ export class ChiefOfStaff {
       // v24a: every tool call this turn, for Code Verifies (a queued or failed call did not perform anything).
       const executed: VerifiedToolCall[] = [];
       let verifier: ChiefReply['verifier'];
+      /** One corrective retry per turn, shared by the claim verifier (v24a) and the Layer 3 verifiers (v25a). */
+      let retried = false;
       let toolSteps = 0;
+      const withLayer3 = (): Partial<ChiefReply> => (Object.keys(layer3).length ? { layer3 } : {});
       for (let step = 0; ; step++) {
         const out = (await provider.complete({ system, messages, meta: { runId: 'chief', flowId: 'chief', step: `${spoken ? 'voice' : 'chat'}${step ? `.tool${step}` : ''}`, attempt: 1 } })).trim();
         const call = tools ? parseToolCall(out) : undefined;
         if (!call) {
           // Talk-only chat (no tools) is told it cannot act; Code Verifies guards the chat that can.
           const violations = tools ? detectUnbackedActionClaims(out, executed) : [];
-          if (violations.length && !verifier) {
-            // Code Verifies: one corrective retry. The model may call the tool now, or say honestly it hasn't done it.
-            verifier = { violations, retried: true, corrected: false };
+          // v25a Code Verifies (Layer 3): taste.mjs plus the matched units' verify.mjs, on anything that will be said.
+          const taste = this.speaks(out) ? await runLayer3Verify({ dir: this.dir, skills: units, text: out, toolCalls: executed, channel, now: this.now(), query: text }) : undefined;
+          const rejected = taste?.reasons ?? [];
+          if (taste?.errors.length) layer3.notes = [...(layer3.notes ?? []), ...taste.errors];
+          if ((violations.length || rejected.length) && !retried) {
+            // Code Verifies: one corrective retry. The model may call the tool now, say honestly it hasn't done it, or
+            // rewrite the draft so every Layer 3 rule passes.
+            retried = true;
+            if (violations.length) verifier = { violations, retried: true, corrected: false };
+            if (rejected.length) Object.assign(layer3, { violations: rejected, retried: true });
             messages.push({ role: 'assistant', content: out });
-            messages.push({ role: 'user', content: `${VERIFIER_RETRY_PROMPT}\nFlagged: ${violations.join(', ')}.` });
+            const fixes = [...(violations.length ? [`${VERIFIER_RETRY_PROMPT}\nFlagged: ${violations.join(', ')}.`] : []), ...(rejected.length ? [layer3RetryPrompt(rejected)] : [])];
+            messages.push({ role: 'user', content: fixes.join('\n\n') });
             continue;
           }
+          if (rejected.length) layer3.remaining = rejected;
           let final = out;
-          if (violations.length && verifier) {
+          if (violations.length) {
+            verifier ??= { violations: [], retried: true, corrected: false };
             verifier.corrected = true;
             verifier.violations = [...new Set([...verifier.violations, ...violations])];
             final = `${out}\n---\n${honestCorrection(violations)}`;
           }
-          const extra = { ...(toolsUsed.length ? { toolsUsed } : {}), ...(queued.length ? { queued } : {}), ...(verifier ? { verifier } : {}) };
+          const extra = { ...(toolsUsed.length ? { toolsUsed } : {}), ...(queued.length ? { queued } : {}), ...(verifier ? { verifier } : {}), ...withLayer3() };
           return { ...this.shaped(final, text), ...extra };
         }
         if (toolSteps++ >= this.maxToolSteps) {
           const before = out.slice(0, TOOL_CALL.exec(out)?.index ?? 0).trim();
-          return reply(clip(concise(before || "I couldn't finish looking that up. Ask me again in a moment.", text)), { ...(toolsUsed.length ? { toolsUsed } : {}), ...(queued.length ? { queued } : {}), ...(verifier ? { verifier } : {}) });
+          return reply(clip(concise(before || "I couldn't finish looking that up. Ask me again in a moment.", text)), { ...(toolsUsed.length ? { toolsUsed } : {}), ...(queued.length ? { queued } : {}), ...(verifier ? { verifier } : {}), ...withLayer3() });
         }
         const result = await this.useTool(tools!, call.tool, call.args, readOutside ? 'external' : 'user');
         executed.push({ name: call.tool, ok: result.ran === true });
@@ -741,6 +771,11 @@ export class ChiefOfStaff {
         { unavailable: true },
       );
     }
+  }
+
+  /** True when a final model reply will actually say words (not silence, not just a reaction). */
+  private speaks(out: string): boolean {
+    return 'bubbles' in parseChatShape(out || 'x');
   }
 
   /** A final model reply as a ChiefReply: silence, a reaction, or 1-2 short bubbles (each kept to text-message size). */

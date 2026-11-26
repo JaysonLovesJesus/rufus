@@ -781,7 +781,13 @@ export class UnifiedDaemon {
     // v24a Code Prepares: the beat never sees (or nudges about) an item you already answered in Beeper.
     await this.pruneStale(state, report, true).catch((err) => report.errors.push(`stale-guard: ${message(err)}`));
     const provider = this.engine.routeProvider(opts.provider ? { provider: opts.provider } : { tier: 'fast' });
-    const r = await think({ provider, dir: this.loop.dir, loop: this.loop, now, tools: this.loop.tools, ...(opts.tools ? { glance: opts.tools } : {}), ...(opts.toolTimeoutMs !== undefined ? { toolTimeoutMs: opts.toolTimeoutMs } : {}) });
+    const r = await think({ provider, dir: this.loop.dir, loop: this.loop, now, tools: this.loop.tools, ...(opts.tools ? { glance: opts.tools } : {}), ...(opts.toolTimeoutMs !== undefined ? { toolTimeoutMs: opts.toolTimeoutMs } : {}), ...(opts.maxToolSteps !== undefined ? { maxToolSteps: opts.maxToolSteps } : {}) });
+    if (r.layer3?.errors?.length) report.errors.push(...r.layer3.errors.map((e) => `layer3: ${e}`));
+    if (r.blocked?.length) report.errors.push(`think: blocked non-read-only tool(s) ${r.blocked.join(', ')}`);
+    if (r.boundary) {
+      report.thought = `skipped: boundaries.mjs: ${r.boundary}`;
+      return;
+    }
     if (!r.bubbles) {
       report.thought = 'silent';
       return;

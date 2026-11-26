@@ -376,7 +376,7 @@ export {
   type TriageResult,
 } from './sensors';
 export { parseLoopReply, isBareVerdict, refOf, recipientOf, MAX_REASON_CHARS, formatLoopItem, formatCheckin, replyHint, draftOf, type LoopReply } from './unified/loop-text';
-export { think, gatherBoard, parseThought, thinkInterval, thinkSkipReason, freshThinkState, THINK_PROMPT, SILENT, DEFAULT_THINK_EVERY, DEFAULT_BACKOFF_AFTER, MAX_BACKOFF_FACTOR, type ThinkOptions, type ThinkState } from './unified/think';
+export { think, gatherBoard, parseThought, thinkInterval, thinkSkipReason, freshThinkState, thinkTools, thinkToolsPrompt, THINK_PROMPT, SILENT, DEFAULT_THINK_EVERY, DEFAULT_BACKOFF_AFTER, DEFAULT_THINK_TOOL_STEPS, MAX_BACKOFF_FACTOR, PROACTIVE_ACTION, type ThinkOptions, type ThinkResult, type ThinkState } from './unified/think';
 export { rememberNote, rememberTool, noteItem, loadHumanNotes, guessKind, guessVerdict, REMEMBER_TOOL, HUMAN_NOTE_TAG, NOTE_KINDS, NOTE_ACTION_TYPES, type HumanNote, type NoteKind, type NoteVerdict, type RememberOptions, type RememberResult } from './chief/learning';
 export { UnifiedDaemon, DEFAULT_CHECKIN_MS, DEFAULT_CALENDAR_SYNC_MS, DEFAULT_STALE_GUARD_MS, type UnifiedDaemonOptions, type StartTickReport, type DayPlannerOptions, type BreakDigestOptions, type MissionDaemonOptions } from './unified/daemon';
 export {
@@ -550,6 +550,14 @@ export {
   SKILL_LIST_TOOL,
   SKILL_READ_TOOL,
   DEFAULT_MAX_SKILLS,
+  FRAMEWORKS_DIR,
+  FRAMEWORK_FILE,
+  frameworkFile,
+  layer3UnitDir,
+  listFrameworks,
+  listLayer3Units,
+  loadFramework,
+  type Layer3Kind,
   type Skill,
   type SkillInput,
 } from './skills/skills';
@@ -615,3 +623,35 @@ export {
   type StarterConfigOptions,
   type VoiceTool,
 } from './unified/setup';
+// v25a: Executable Code-in-Layer-3 (taste.mjs, boundaries.mjs, prepare/run/verify.mjs) and the action-first think-beat.
+export {
+  loadLayer3Module,
+  resolveLayer3File,
+  discoverLayer3,
+  matchLayer3Units,
+  runLayer3Prepare,
+  runLayer3Verify,
+  checkLayer3Boundary,
+  relevantProjectsSection,
+  readOnlyToolCaller,
+  normalizeViolations,
+  layer3RetryPrompt,
+  Layer3PathError,
+  LAYER3_RETRY_PREFIX,
+  TASTE_FILE,
+  BOUNDARIES_FILE,
+  PREPARE_FILE,
+  RUN_FILE,
+  VERIFY_FILE,
+  PROJECTS_DIR,
+  DEFAULT_LAYER3_TIMEOUT_MS,
+  type Layer3BoundaryContext,
+  type Layer3BoundaryOptions,
+  type Layer3Channel,
+  type Layer3Inventory,
+  type Layer3PrepareContext,
+  type Layer3PrepareOptions,
+  type Layer3VerifyContext,
+  type Layer3VerifyOptions,
+  type Layer3VerifyResult,
+} from './skills/runner';

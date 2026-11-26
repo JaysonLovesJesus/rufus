@@ -178,7 +178,12 @@ const ms = (iso: string | undefined): number => (iso ? Date.parse(iso) : NaN);
 export function isMessageAlreadyHandled(messages: ReadonlyArray<StalenessMessage>, incomingTimestamp: string, incomingMessageId?: string): boolean {
   const at = ms(incomingTimestamp);
   for (const m of messages) {
-    if (!m || m.isDeleted) continue;
+    if (!m) continue;
+    // If the original incoming message was deleted before you answered, no reply is needed.
+    if (m.isDeleted) {
+      if (incomingMessageId !== undefined && m.id === incomingMessageId) return true;
+      continue;
+    }
     const t = ms(m.timestamp);
     if (m.isSender) {
       if (Number.isFinite(at) && Number.isFinite(t) && t > at && (m.text ?? '').trim()) return true;

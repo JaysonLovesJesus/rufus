@@ -910,6 +910,34 @@ Rufus has a built-in, zero-dependency **MCP (Model Context Protocol) client**, s
 }
 ```
 
+### Executable Code-in-Layer-3 and the action-first think-beat (v25a)
+
+Skills and frameworks can now carry small local `.mjs` hooks next to their markdown, so taste and judgement rules run as code instead of living only in a prompt:
+
+```
+<workspace>/taste.mjs                               verifyDraft(text, ctx) -> violations, checked on every reply
+<workspace>/boundaries.mjs                          canActNow(ctx) -> { allow, reason }, before anything proactive or autonomous
+<workspace>/skills/<name>/{prepare,run,verify}.mjs  prepare(ctx) before the AI thinks, verify(text, ctx) after it drafts
+<workspace>/frameworks/<name>/FRAMEWORK.md          same frontmatter and $0 matching as SKILL.md
+<workspace>/frameworks/<name>/{prepare,run,verify}.mjs
+<workspace>/projects/*.md                           active projects that fit the message go into chat (bounded)
+```
+
+- **Prepare, then verify.** For the skills and frameworks that match a message, `runLayer3Prepare` runs each `prepare.mjs` (5s timeout). It can call registered read-only tools through `ctx.callReadOnlyTool`, and whatever it returns goes into the prompt as ground truth. After the draft, `runLayer3Verify` runs `taste.mjs` and the matched `verify.mjs` files (`ctx.channel` is `chat`, `voice` or `proactive`) and collects their violations, e.g. `no em-dashes`, `leaked code/file jargon`, `punted read-only work back to user` or `missing decision tradeoffs`. The Chief of Staff makes one corrective retry (`LAYER 3 VERIFIER REJECTED YOUR DRAFT: ...`), using the same single retry as the v24a claim verifier. `ChiefReply.layer3` records what ran.
+- **Boundaries.** `checkLayer3Boundary` asks `boundaries.mjs` whether Rufus may act on its own right now. The think-beat asks before it calls the model. The Master Loop asks before any `auto_notify` or `autonomous` commit, and a "no" turns that run back into a Verify item.
+- **Safe by construction.** Only `.mjs` files inside the workspace are loaded. Real paths are checked, so `..`, absolute paths elsewhere and symlinks that point out of the workspace are all refused. Each load is keyed by the file's mtime, so an edit takes effect on the next turn with no restart. A hook that throws or hangs never crashes the daemon. It is reported in `layer3.notes` or the tick's errors, verify fails open, and boundaries fail closed.
+- **Action-first think-beat.** Within one beat the model can now make up to 3 read-only tool calls (`TOOL_CALL: {"tool":"web.search",...}`) and then send one message with the finished answer, instead of "Still owe you that lookup, want me to run it?". Only `readOnly` tools are offered. A write or send (`beeper.send`, `gmail.send`...) is hard-blocked and nothing runs. `taste.mjs` checks the message: one rewrite, and if it still breaks a rule, the beat stays silent. Set `"start": { "think": { "maxToolSteps": 0 } }` to turn this off.
+
+```js
+// <workspace>/taste.mjs
+export function verifyDraft(text, ctx) {
+  const out = [];
+  if (/\u2014/.test(text)) out.push('no em-dashes');
+  if (/want me to (look|check)/i.test(text)) out.push('punted read-only work back to user');
+  return out;
+}
+```
+
 ### What is primary and what is legacy
 
 `rufus --help` is the Jarvis core: ten **primary commands**, `start`, `now`, `anchor`, `trust`, `decide`, `chat`, `missions`, `say`, `collect`, `embed`, with their options. Everything else (`init`, `bridge`, `loop`, `signal`, `run`/`pending`/`answer`, `tick`/`watch`/`emit`, `lessons`/`propose`, `seed`, `mine`, `replay`/`compare`, `backtest`, `context`, `demo`) still works exactly as before, listed one line each under **Advanced / Legacy**; `rufus --help --all` spells out their options. `rufus bridge` and `rufus loop` are each half of what `rufus start` does.

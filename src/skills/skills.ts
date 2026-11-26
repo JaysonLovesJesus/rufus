@@ -22,6 +22,15 @@ import type { ToolDefinition } from '../tools/tools';
 
 export const SKILLS_DIR = 'skills';
 export const SKILL_FILE = 'SKILL.md';
+/** v25a: frameworks are skills for judgement (decision frameworks, review rubrics): `<workspace>/frameworks/<name>/FRAMEWORK.md`. */
+export const FRAMEWORKS_DIR = 'frameworks';
+export const FRAMEWORK_FILE = 'FRAMEWORK.md';
+/** v25a: a Layer 3 unit is a skill (`skills/<name>/SKILL.md`) or a framework (`frameworks/<name>/FRAMEWORK.md`). */
+export type Layer3Kind = 'skill' | 'framework';
+const KIND_DIR: Record<Layer3Kind, { dir: string; file: string }> = {
+  skill: { dir: SKILLS_DIR, file: SKILL_FILE },
+  framework: { dir: FRAMEWORKS_DIR, file: FRAMEWORK_FILE },
+};
 export const SKILL_LIST_TOOL = 'skill.list';
 export const SKILL_READ_TOOL = 'skill.read';
 export const DEFAULT_MAX_SKILLS = 2;
@@ -37,6 +46,8 @@ export interface Skill {
   /** The markdown instructions after the frontmatter. */
   body: string;
   file: string;
+  /** v25a: `framework` for `frameworks/<name>/FRAMEWORK.md`. Unset means a skill. */
+  kind?: Layer3Kind;
 }
 
 export interface SkillInput {
@@ -116,7 +127,7 @@ const asList = (v: string | string[] | undefined): string[] => (Array.isArray(v)
 const asText = (v: string | string[] | undefined): string => (Array.isArray(v) ? v.join(', ') : (v ?? '')).replace(/\s+/g, ' ').trim();
 
 /** A Skill from a SKILL.md text in the folder `name`. */
-export function skillFromMarkdown(name: string, text: string, file = ''): Skill {
+export function skillFromMarkdown(name: string, text: string, file = '', kind: Layer3Kind = 'skill'): Skill {
   const { meta, body } = parseSkillMarkdown(text);
   const firstLine = body.split('\n').find((l) => l.trim() && !l.startsWith('#'))?.trim() ?? '';
   return {
@@ -125,28 +136,45 @@ export function skillFromMarkdown(name: string, text: string, file = ''): Skill 
     triggers: asList(meta.triggers ?? meta.trigger),
     body,
     file,
+    ...(kind === 'framework' ? { kind } : {}),
   };
 }
 
-const skillsRoot = (dir: string): string => path.resolve(dir, SKILLS_DIR);
+const unitsRoot = (dir: string, kind: Layer3Kind): string => path.resolve(dir, KIND_DIR[kind].dir);
+
+/**
+ * v25a: the folder of a skill or framework (`<dir>/skills/<name>` or `<dir>/frameworks/<name>`), or undefined when the
+ * name is unsafe (it could escape that folder).
+ */
+export function layer3UnitDir(dir: string, kind: Layer3Kind, name: string): string | undefined {
+  if (!isSkillName(name)) return undefined;
+  const root = unitsRoot(dir, kind);
+  const folder = path.resolve(root, name);
+  return folder.startsWith(root + path.sep) ? folder : undefined;
+}
 
 /** The SKILL.md path for a skill name, or undefined when the name is unsafe (it could escape `skills/`). */
 export function skillFile(dir: string, name: string): string | undefined {
-  if (!isSkillName(name)) return undefined;
-  const root = skillsRoot(dir);
-  const file = path.resolve(root, name, SKILL_FILE);
-  return file.startsWith(root + path.sep) ? file : undefined;
+  const folder = layer3UnitDir(dir, 'skill', name);
+  return folder ? path.join(folder, SKILL_FILE) : undefined;
 }
 
-async function readSkill(dir: string, name: string): Promise<Skill | undefined> {
-  const file = skillFile(dir, name);
-  if (!file) return undefined;
+/** v25a: the FRAMEWORK.md path for a framework name, or undefined when the name is unsafe. */
+export function frameworkFile(dir: string, name: string): string | undefined {
+  const folder = layer3UnitDir(dir, 'framework', name);
+  return folder ? path.join(folder, FRAMEWORK_FILE) : undefined;
+}
+
+async function readUnit(dir: string, kind: Layer3Kind, name: string): Promise<Skill | undefined> {
+  const folder = layer3UnitDir(dir, kind, name);
+  if (!folder) return undefined;
+  const file = path.join(folder, KIND_DIR[kind].file);
   let handle: fs.FileHandle | undefined;
   try {
     handle = await fs.open(file, 'r');
     const buf = Buffer.alloc(MAX_SKILL_BYTES);
     const { bytesRead } = await handle.read(buf, 0, MAX_SKILL_BYTES, 0);
-    return skillFromMarkdown(name, buf.subarray(0, bytesRead).toString('utf8'), file);
+    return skillFromMarkdown(name, buf.subarray(0, bytesRead).toString('utf8'), file, kind);
   } catch (err) {
     if (['ENOENT', 'ENOTDIR', 'EISDIR'].includes((err as NodeJS.ErrnoException).code ?? '')) return undefined;
     throw err;
@@ -155,21 +183,41 @@ async function readSkill(dir: string, name: string): Promise<Skill | undefined> 
   }
 }
 
-/** Every skill in `<dir>/skills/`, by name. Folders with an unsafe name or no SKILL.md are skipped. */
-export async function listSkills(dir: string): Promise<Skill[]> {
+async function listUnits(dir: string, kind: Layer3Kind): Promise<Skill[]> {
   let entries: string[];
   try {
-    entries = await fs.readdir(skillsRoot(dir));
+    entries = await fs.readdir(unitsRoot(dir, kind));
   } catch {
     return [];
   }
-  const skills = await Promise.all(entries.filter(isSkillName).sort().map((n) => readSkill(dir, n).catch(() => undefined)));
-  return skills.filter((s): s is Skill => !!s);
+  const units = await Promise.all(entries.filter(isSkillName).sort().map((n) => readUnit(dir, kind, n).catch(() => undefined)));
+  return units.filter((s): s is Skill => !!s);
+}
+
+/** Every skill in `<dir>/skills/`, by name. Folders with an unsafe name or no SKILL.md are skipped. */
+export async function listSkills(dir: string): Promise<Skill[]> {
+  return listUnits(dir, 'skill');
+}
+
+/** v25a: every framework in `<dir>/frameworks/` (`<name>/FRAMEWORK.md`), by name. Same rules as skills. */
+export async function listFrameworks(dir: string): Promise<Skill[]> {
+  return listUnits(dir, 'framework');
+}
+
+/** v25a: skills and frameworks together (skills first), for matching: both use the same frontmatter and scoring. */
+export async function listLayer3Units(dir: string): Promise<Skill[]> {
+  const [skills, frameworks] = await Promise.all([listSkills(dir), listFrameworks(dir)]);
+  return [...skills, ...frameworks];
+}
+
+/** v25a: one framework by name, or undefined (also for an unsafe name). */
+export async function loadFramework(dir: string, name: string): Promise<Skill | undefined> {
+  return readUnit(dir, 'framework', name.trim().toLowerCase());
 }
 
 /** One skill by name, or undefined (also for an unsafe name such as `../x`: nothing outside `skills/` is ever read). */
 export async function loadSkill(dir: string, name: string): Promise<Skill | undefined> {
-  return readSkill(dir, name.trim().toLowerCase());
+  return readUnit(dir, 'skill', name.trim().toLowerCase());
 }
 
 const STOP = new Set(['about', 'after', 'again', 'also', 'before', 'could', 'from', 'have', 'into', 'just', 'like', 'more', 'need', 'please', 'should', 'some', 'than', 'that', 'their', 'them', 'then', 'there', 'these', 'they', 'this', 'what', 'when', 'where', 'which', 'while', 'with', 'would', 'your', 'skill', 'help', 'make']);
@@ -200,7 +248,7 @@ export function matchSkills(skills: readonly Skill[], query: string, maxSkills =
   return skills
     .map((s) => ({ s, score: scoreSkill(s, query) }))
     .filter((x) => x.score >= 2)
-    .sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name))
+    .sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name) || (a.s.kind ?? 'skill').localeCompare(b.s.kind ?? 'skill'))
     .slice(0, Math.max(0, maxSkills))
     .map((x) => x.s);
 }
@@ -211,16 +259,16 @@ export function formatSkillsForPrompt(skills: readonly Skill[], maxChars = DEFAU
   const each = Math.max(200, Math.floor(maxChars / skills.length) - 80);
   const parts = skills.map((s) => {
     const body = s.body.length > each ? `${s.body.slice(0, each - 1).trimEnd()}…` : s.body;
-    return `### ${s.name}${s.description ? ` — ${s.description}` : ''}\n${body}`;
+    return `### ${s.name}${s.kind === 'framework' ? ' (framework)' : ''}${s.description ? ` — ${s.description}` : ''}\n${body}`;
   });
-  return `## Skills that fit this request (skills/<name>/SKILL.md; follow them when they apply)\n${parts.join('\n\n')}`;
+  return `## Skills that fit this request (skills/<name>/SKILL.md and frameworks/<name>/FRAMEWORK.md; follow them when they apply)\n${parts.join('\n\n')}`;
 }
 
 /** The prompt section for the skills in `dir` that fit `query`. Never throws: '' on any problem. */
 export async function relevantSkillsSection(dir: string, query: string, maxSkills = DEFAULT_MAX_SKILLS): Promise<string> {
   try {
     if (!query.trim()) return '';
-    return formatSkillsForPrompt(matchSkills(await listSkills(dir), query, maxSkills));
+    return formatSkillsForPrompt(matchSkills(await listLayer3Units(dir), query, maxSkills));
   } catch {
     return '';
   }

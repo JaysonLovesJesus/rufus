@@ -881,7 +881,7 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
             chief: new ChiefOfStaff({ engine, provider: config.chief?.provider, ...(config.voice?.provider ? { voiceProvider: config.voice.provider } : {}), loop, tools: loop.tools, ...(now ? { now } : {}) }),
             checkinEveryMs,
             ...(config.start?.heartbeat !== undefined ? { heartbeat: config.start.heartbeat } : {}),
-            ...(thinkEveryMs > 0 ? { think: { everyMs: thinkEveryMs, ...(config.start?.think?.tools ? { tools: config.start.think.tools } : {}), ...(config.start?.think?.provider ? { provider: config.start.think.provider } : {}), ...(config.start?.think?.quietHours !== undefined ? { quietHours: config.start.think.quietHours } : {}) } } : {}),
+            ...(thinkEveryMs > 0 ? { think: { everyMs: thinkEveryMs, ...(config.start?.think?.tools ? { tools: config.start.think.tools } : {}), ...(config.start?.think?.provider ? { provider: config.start.think.provider } : {}), ...(config.start?.think?.quietHours !== undefined ? { quietHours: config.start.think.quietHours } : {}), ...(config.start?.think?.maxToolSteps !== undefined ? { maxToolSteps: config.start.think.maxToolSteps } : {}) } } : {}),
             pendingTtlMs: parseDuration(config.start?.pendingTtl ?? '60m'),
             calendarSync: config.start?.calendarSync === false ? false : { everyMs: parseDuration(config.start?.calendarSync?.every ?? '20m') },
             planner: config.start?.planner === false ? false : (config.start?.planner ?? {}),

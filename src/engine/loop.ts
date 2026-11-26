@@ -12,6 +12,7 @@ import { clip, stableId } from '../corpus/types';
 import { FileStore } from '../store';
 import { buildPersona, loadSoul, relevantHits, withPersona } from '../soul/soul';
 import { ToolRegistry } from '../tools/tools';
+import { checkLayer3Boundary } from '../skills/runner';
 import type { AiProvider, Route, Spectrum, StagePlan, Tier, VerifyResult } from '../types';
 
 /**
@@ -924,6 +925,12 @@ export class MasterLoop {
         if (bounds.approvalBy.length) run.approvals = bounds.approvalBy.map((b) => b.rule);
         run.promotionSuggested = trust.promotionSuggested;
         if (trust.promotionSuggested) run.promotionHint = promotionMessage(trust);
+        return this.pause(run, 'awaiting_human_verify');
+      }
+      // v25a: <workspace>/boundaries.mjs has the last word on acting alone right now (e.g. a protected window).
+      const layer3 = await checkLayer3Boundary({ dir: this.dir, now: this.now(), action: plan.actionType, sensitivity, trust: current });
+      if (layer3 && !layer3.allow) {
+        run.approvals = [...(run.approvals ?? []), `boundaries.mjs: ${layer3.reason ?? 'not now'}`];
         return this.pause(run, 'awaiting_human_verify');
       }
       run.status = 'completed';

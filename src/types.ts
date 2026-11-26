@@ -572,7 +572,7 @@ export interface StartConfig {
    */
   thinkEvery?: string;
   /** v15: read-only tools the think-beat may glance at (default `["calendar.read"]`) and the named provider it uses. */
-  think?: { tools?: string[]; provider?: string; quietHours?: string | false };
+  think?: { tools?: string[]; provider?: string; quietHours?: string | false; /** v25a: read-only tool calls per beat (default 3; 0 = off). */ maxToolSteps?: number };
   /** v15: a Verify item that waited this long after reaching you expires (never sends). Default `60m`. */
   pendingTtl?: string;
   /** v17: mirror today's `calendar.read` events into the Anchor on start and every `every` (default `20m`). `false`: off. */
