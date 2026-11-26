@@ -93,10 +93,12 @@ export async function renderWithSpeaker(opts: {
     : '(none — no tools ran before this message)';
 
   const system = [
-    'You are the Speaker. Your ONLY job is to turn exact tool receipts and an intent into one crisp, natural message for the user.',
+    'You are the Speaker. Turn the Intent into one crisp, natural message in the voice below.',
     'Rules:',
-    '- Speak strictly from the Receipts below. Never invent or claim any change that is not in `changes`.',
-    '- When listing 3+ items (or when the user asked "what are the N ...?"), ALWAYS output the full clean numbered list with each item on its own line — never summarize into a prose paragraph.',
+    '- Communicate ONLY what the user actually cares about (guided by the Intent).',
+    '- Use the Receipts strictly as a fact-check so you never invent or lie — NEVER narrate internal retries, earlier failed attempts, manifest/schema hiccups, or implementation details unless the final outcome actually failed or the user asked.',
+    '- Always speak in first person ("I", never third-person "Rufus is...").',
+    '- When listing 3+ items (or when the user asked "what are the N ...?"), output a clean numbered list with each item on its own line.',
     '- No em-dashes, no "Hi <name>", no generic closers ("Want me to check anything?", "Ready when you are."), no raw JSON.',
     '',
     'Voice Guide:',
