@@ -35,6 +35,7 @@ import type { TtsCommandConfig, VoiceReplyMode } from '../types';
 import { loadChatHistory } from '../chief/history';
 import { curateMemoryDream, describeDream, MEMORY_WRITE_TOOL, memoryWriteTool } from '../memory/markdown-memory';
 import { SKILL_LIST_TOOL, skillTools } from '../skills/skills';
+import { brainEvent, ContinuousBrain, type BrainEvent, type BrainWakeReport } from '../brain/actor';
 import type { HubAuditEntry, HubBackend, HubBlock, HubDecision, HubItem, HubMission, HubState, HubTrust } from './hub';
 
 /**
@@ -109,7 +110,28 @@ export interface UnifiedDaemonOptions {
    * registered; `false`: off.
    */
   staleGuard?: { everyMs?: number } | false;
+  /**
+   * v26: which mind answers chat and wakes. `'classic'` (the default): the Chief of Staff answers each message and the
+   * think-beat runs on its own. `'continuous'`: ONE Continuous Living Brain (`src/brain/actor.ts`) gets every
+   * conversational message, reaction and periodic wake through one awareness queue, folds in what you text while it is
+   * thinking, and can say / react / use tools / keep working / rest. Explicit Verify replies (`#1 send`), undo/demote,
+   * and chat commands (pause autonomy, status, missions...) still run in plain code first.
+   */
+  brain?: 'classic' | 'continuous';
+  /** v26: the continuous brain's limits and provider. */
+  brainOptions?: ContinuousBrainDaemonOptions;
   now?: () => Date;
+}
+
+export interface ContinuousBrainDaemonOptions {
+  /** Model steps per wake. Default 6, max 10. */
+  maxStepsPerWake?: number;
+  /** Stale drafts dropped per wake because you kept typing. Default 2. */
+  maxInterrupts?: number;
+  /** Named provider. Default: the default provider. */
+  provider?: string;
+  /** Each tool call gets this long. Default 15s. */
+  toolTimeoutMs?: number;
 }
 
 export interface MissionDaemonOptions {
@@ -174,6 +196,8 @@ export interface StartTickReport {
   autoNotified?: string[];
   /** v24a: Verify items dismissed this pass because you already replied or reacted in Beeper (nothing was sent). */
   pruned?: string[];
+  /** v26: what each continuous-brain wake did this pass. */
+  brain?: BrainWakeReport[];
   /** Problems this pass; the next pass retries. */
   errors: string[];
 }
@@ -279,6 +303,9 @@ export class UnifiedDaemon {
   /** v24a: the Beeper staleness guard, and when it last read the chats. */
   private readonly staleGuard: { everyMs: number } | false;
   private lastPruneAt?: number;
+  /** v26: the Continuous Living Brain (`brain: 'continuous'`), and conversational events waiting for it. */
+  private readonly brain?: ContinuousBrain;
+  private brainInbox: BrainEvent[] = [];
 
   constructor(opts: UnifiedDaemonOptions) {
     this.loop = opts.loop;
@@ -319,6 +346,26 @@ export class UnifiedDaemon {
     if (!this.loop.listHandlers().some((h) => h.id === chiefActionHandler.id)) this.loop.addHandler(chiefActionHandler);
     if (!this.loop.listHandlers().some((h) => h.id === phoneSignalHandler.id)) this.loop.addHandler(phoneSignalHandler);
     if (this.chief?.hasTools && !this.loop.listSensors().some((x) => x.id === 'inbox')) this.loop.addSensor(inboxSensor(this.loop.dir));
+    if (opts.brain === 'continuous') {
+      const b = opts.brainOptions ?? {};
+      this.brain = new ContinuousBrain({
+        dir: this.loop.dir,
+        provider: this.engine.providerFor(b.provider),
+        tools: this.loop.tools,
+        loop: this.loop,
+        now: this.now,
+        ...(b.maxStepsPerWake !== undefined ? { maxStepsPerWake: b.maxStepsPerWake } : {}),
+        ...(b.maxInterrupts !== undefined ? { maxInterrupts: b.maxInterrupts } : {}),
+        ...(b.toolTimeoutMs !== undefined ? { toolTimeoutMs: b.toolTimeoutMs } : {}),
+        ...(this.thinkOpts && this.thinkOpts.tools ? { glance: this.thinkOpts.tools } : {}),
+        outlet: {
+          // The brain records its own chat history, so the daemon only sends (and remembers the echo).
+          say: (text, o) => this.say(text, true, false, o.proactive, true),
+          ...(this.channel?.react ? { react: (emoji: string, messageId: string) => this.channel!.react!(messageId, emoji) } : {}),
+          typing: async () => void (await this.channel?.typing?.().catch(() => undefined)),
+        },
+      });
+    }
     if (this.channel) {
       this.relay = new RelayChannel((text, chat) => this.say(text, true, false, false, chat), this.channel);
       this.bridge = new CardBridge({
@@ -488,8 +535,18 @@ export class UnifiedDaemon {
         }
         if (report.bridge.error) report.errors.push(`channel: ${report.bridge.error}`);
       }
+      // v26: everything conversational this pass goes to the one continuous mind (which keeps listening while it thinks).
+      if (this.brain && this.brainInbox.length) {
+        try {
+          await this.brainWake(state, report);
+        } catch (err) {
+          report.errors.push(`brain: ${message(err)}`);
+        }
+      }
       // Chat queued an action ("send Sam ..."): plan and deliver it now, so its "1" works right after the reply.
-      if (this.chief?.drainQueued()) {
+      const chiefQueued = this.chief?.drainQueued() ?? 0;
+      const brainQueued = this.brain?.drainQueued() ?? 0;
+      if (chiefQueued || brainQueued) {
         try {
           const again = await this.loop.runOnce();
           for (const e of again.errors) report.errors.push(`sensor ${e.sensorId}: ${e.error}`);
@@ -780,6 +837,19 @@ export class UnifiedDaemon {
     t.lastAt = now.toISOString();
     // v24a Code Prepares: the beat never sees (or nudges about) an item you already answered in Beeper.
     await this.pruneStale(state, report, true).catch((err) => report.errors.push(`stale-guard: ${message(err)}`));
+    if (this.brain) {
+      // v26: the periodic wake is just one more event for the same mind.
+      this.brainInbox.push(brainEvent('timer_wake', 'Periodic wake: look at the whole board. Is there one genuinely useful thing to do or say right now? If not, rest.', { at: now }));
+      const r = await this.brainWake(state, report);
+      if (r.boundary) report.thought = `skipped: boundaries.mjs: ${r.boundary}`;
+      else if (r.said.length) {
+        t.unanswered += 1;
+        t.lastSentAt = now.toISOString();
+        report.thought = 'sent';
+        report.proactive = [...(report.proactive ?? []), ...r.said];
+      } else report.thought = 'silent';
+      return;
+    }
     const provider = this.engine.routeProvider(opts.provider ? { provider: opts.provider } : { tier: 'fast' });
     const r = await think({ provider, dir: this.loop.dir, loop: this.loop, now, tools: this.loop.tools, ...(opts.tools ? { glance: opts.tools } : {}), ...(opts.toolTimeoutMs !== undefined ? { toolTimeoutMs: opts.toolTimeoutMs } : {}), ...(opts.maxToolSteps !== undefined ? { maxToolSteps: opts.maxToolSteps } : {}) });
     if (r.layer3?.errors?.length) report.errors.push(...r.layer3.errors.map((e) => `layer3: ${e}`));
@@ -851,6 +921,37 @@ export class UnifiedDaemon {
     return true;
   }
 
+  /** v26: an incoming chat message as an awareness event. */
+  private toBrainEvent(msg: IncomingMessage, kind: 'owner_message' | 'owner_reaction'): BrainEvent {
+    const meta: Record<string, unknown> = {};
+    if (msg.messageId) meta.messageId = msg.messageId;
+    if (msg.voice) meta.voice = true;
+    if (msg.reaction) Object.assign(meta, { emoji: msg.reaction.emoji, targetMessageId: msg.reaction.targetMessageId });
+    return brainEvent(kind, msg.text.trim(), { id: msg.id, at: msg.at ?? this.now().toISOString(), ...(Object.keys(meta).length ? { meta } : {}) });
+  }
+
+  /**
+   * v26: one wake of the continuous brain. Its live `drain` polls the channel again, so a clarifying message sent while
+   * the model is thinking is folded in (and an explicit "#1 send" still runs in plain code first).
+   */
+  private async brainWake(state: StartState, report: StartTickReport): Promise<BrainWakeReport> {
+    const brain = this.brain!;
+    for (const e of this.brainInbox.splice(0)) brain.push(e);
+    const drain = async (): Promise<BrainEvent[]> => {
+      if (this.channel?.poll) await this.receive(state, report);
+      return this.brainInbox.splice(0);
+    };
+    try {
+      const r = await brain.runUntilRest({ drain });
+      (report.brain ??= []).push(r);
+      for (const e of r.errors) report.errors.push(`brain: ${e}`);
+      if (r.layer3?.errors?.length) report.errors.push(...r.layer3.errors.map((e) => `layer3: ${e}`));
+      return r;
+    } finally {
+      this.voiceTurn = false;
+    }
+  }
+
   private async persist(): Promise<void> {
     if (this.current) await saveStartState(this.loop.dir, this.current);
   }
@@ -877,24 +978,30 @@ export class UnifiedDaemon {
    */
   private async handleIncoming(state: StartState, msg: IncomingMessage, text: string, report: StartTickReport): Promise<void> {
     // An emoji reaction is seen and remembered by the chat side, never read as an answer or an edit.
-    if (msg.reaction) return void this.relay!.inbox.push(msg);
+    if (msg.reaction) {
+      if (this.brain) return void this.brainInbox.push(this.toBrainEvent(msg, 'owner_reaction'));
+      return void this.relay!.inbox.push(msg);
+    }
     // v21: "undo" / "demote" right after something Rufus did on its own demotes it at once.
     if (await this.undoOrDemote(state, text)) return;
-    // v21: the kill switch and friends work even with no Chief of Staff.
-    if (!this.chief) {
+    // v21: the kill switch and friends work even with no Chief of Staff (and always in plain code with the v26 brain).
+    if (!this.chief || this.brain) {
       const cmd = parseAutonomyCommand(text);
       if (cmd) return this.say(await runAutonomyCommand(this.loop.dir, cmd, { trust: this.loop.trust, now: this.now() }));
     }
     const pending = await this.loop.pending();
     assignNumbers(state, pending);
     const delivered = pending.filter((r) => state.delivered.includes(r.id)).sort((a, b) => (state.numbers[a.id] ?? 0) - (state.numbers[b.id] ?? 0));
+    // With a flow card open, bare answers belong to the card: loop items then need "#n".
+    const cardsOpen = (await this.engine.pending()).length > 0;
     const passOn = (): void => {
       const voice = msg.voice === true || this.channel?.isVoiceNote?.(msg.id) === true;
       if (voice) this.voiceTurn = true;
-      this.relay!.inbox.push(voice && !msg.voice ? { ...msg, voice: true } : msg);
+      const m = voice && !msg.voice ? { ...msg, voice: true } : msg;
+      // v26: conversation goes to the continuous mind; card answers and plain-code chat commands stay deterministic.
+      if (this.brain && !cardsOpen && !this.chief?.isCommand(text)) return void this.brainInbox.push(this.toBrainEvent(m, 'owner_message'));
+      this.relay!.inbox.push(m);
     };
-    // With a flow card open, bare answers belong to the card: loop items then need "#n".
-    const cardsOpen = (await this.engine.pending()).length > 0;
     const parsed: LoopReply | undefined = parseLoopReply(text, cardsOpen ? 0 : delivered.length);
     if (parsed?.kind === 'checkin') {
       this.chatCheckin = true;

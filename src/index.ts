@@ -378,7 +378,7 @@ export {
 export { parseLoopReply, isBareVerdict, refOf, recipientOf, MAX_REASON_CHARS, formatLoopItem, formatCheckin, replyHint, draftOf, type LoopReply } from './unified/loop-text';
 export { think, gatherBoard, parseThought, thinkInterval, thinkSkipReason, freshThinkState, thinkTools, thinkToolsPrompt, THINK_PROMPT, SILENT, DEFAULT_THINK_EVERY, DEFAULT_BACKOFF_AFTER, DEFAULT_THINK_TOOL_STEPS, MAX_BACKOFF_FACTOR, PROACTIVE_ACTION, type ThinkOptions, type ThinkResult, type ThinkState } from './unified/think';
 export { rememberNote, rememberTool, noteItem, loadHumanNotes, guessKind, guessVerdict, REMEMBER_TOOL, HUMAN_NOTE_TAG, NOTE_KINDS, NOTE_ACTION_TYPES, type HumanNote, type NoteKind, type NoteVerdict, type RememberOptions, type RememberResult } from './chief/learning';
-export { UnifiedDaemon, DEFAULT_CHECKIN_MS, DEFAULT_CALENDAR_SYNC_MS, DEFAULT_STALE_GUARD_MS, type UnifiedDaemonOptions, type StartTickReport, type DayPlannerOptions, type BreakDigestOptions, type MissionDaemonOptions } from './unified/daemon';
+export { UnifiedDaemon, DEFAULT_CHECKIN_MS, DEFAULT_CALENDAR_SYNC_MS, DEFAULT_STALE_GUARD_MS, type UnifiedDaemonOptions, type ContinuousBrainDaemonOptions, type StartTickReport, type DayPlannerOptions, type BreakDigestOptions, type MissionDaemonOptions } from './unified/daemon';
 export {
   createMission,
   loadMission,
@@ -655,3 +655,20 @@ export {
   type Layer3VerifyOptions,
   type Layer3VerifyResult,
 } from './skills/runner';
+// v26: the Continuous Living Brain (one awareness queue; say / react / tool / continue / rest; interrupt-while-thinking).
+export {
+  ContinuousBrain,
+  parseBrainStep,
+  brainEvent,
+  BRAIN_PROTOCOL,
+  DEFAULT_MAX_STEPS_PER_WAKE,
+  MAX_STEPS_PER_WAKE,
+  DEFAULT_MAX_INTERRUPTS,
+  MAX_ACTIONS_PER_STEP,
+  type BrainEvent,
+  type BrainEventKind,
+  type BrainAction,
+  type BrainOutlet,
+  type BrainWakeReport,
+  type ContinuousBrainOptions,
+} from './brain/actor';

@@ -594,6 +594,13 @@ export interface StartConfig {
   missions?: false | { concurrency?: number; provider?: string };
   /** v24b: the evening memory curation over `memory/YYYY-MM-DD.md` ("dreaming"). Default on; `false` turns it off. */
   memoryDream?: false | { after?: string; ai?: boolean };
+  /**
+   * v26: `"continuous"` runs ONE Continuous Living Brain for chat, reactions and periodic wakes (it folds in what you
+   * text while it thinks, and can say / react / use tools / keep working / rest). Default `"classic"`.
+   */
+  brain?: 'classic' | 'continuous';
+  /** v26: model steps per continuous-brain wake. Default 6, max 10. */
+  maxStepsPerWake?: number;
 }
 
 /** Guardrails against piling up prompt rules. */

@@ -938,6 +938,20 @@ export function verifyDraft(text, ctx) {
 }
 ```
 
+### The Continuous Living Brain (v26)
+
+With `"start": { "brain": "continuous" }`, Rufus stops working as a request/response chatbot and runs one mind with one awareness queue (`src/brain/actor.ts`). Your messages, your reactions, app signals and periodic wakes all land in that queue. Each step, the brain picks up whatever is new and makes one model call that returns a few natural actions:
+
+```json
+{"actions":[{"type":"say","text":"Checking now"},{"type":"tool","name":"web.search","args":{"query":"..."}}]}
+```
+
+- **`say`, `react`, `tool`, `continue`, `rest`.** It can text you, react 👍 to a "cool" without writing back, run a tool and see the result on its next step ("checking now" → search → "found it: ..."), keep working, or rest until the next event. Plain-text output from any model still works: it is treated as `say` + `rest`.
+- **Interrupts while it thinks.** Just before a `say` goes out, the brain checks the channel again. If you sent more in the meantime ("wait, tomorrow", "for 4 people"), the outdated draft is dropped and the brain answers everything you said in one reply. This happens at most 2 times per wake.
+- **The same safety as before.** Outside writes (`beeper.send`, `gmail.send`, `shell.run`, `files.write`, `mac.control`, MCP writes) never run from a brain step. They become Verify items and wait for your yes, Earned Trust and the kill switch. Private workspace tools (`memory.write`, `anchor.update`, `pending.clear`) only run when you asked for the change. Every `say` goes through `taste.mjs` and the claim verifier, with one rewrite allowed. `boundaries.mjs` is checked before Rufus speaks without being asked, and `maxStepsPerWake` (default 6, max 10) caps the steps in each wake.
+- **Plain-code commands come first.** `#1 send` / `#1 skip` / `#1 edit: ...`, `undo` / `demote`, `pause autonomy` and the other chat commands run in code before the brain sees anything.
+- The default is still `"classic"`, which uses the Chief of Staff and the separate think-beat.
+
 ### What is primary and what is legacy
 
 `rufus --help` is the Jarvis core: ten **primary commands**, `start`, `now`, `anchor`, `trust`, `decide`, `chat`, `missions`, `say`, `collect`, `embed`, with their options. Everything else (`init`, `bridge`, `loop`, `signal`, `run`/`pending`/`answer`, `tick`/`watch`/`emit`, `lessons`/`propose`, `seed`, `mine`, `replay`/`compare`, `backtest`, `context`, `demo`) still works exactly as before, listed one line each under **Advanced / Legacy**; `rufus --help --all` spells out their options. `rufus bridge` and `rufus loop` are each half of what `rufus start` does.

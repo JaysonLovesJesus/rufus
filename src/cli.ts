@@ -263,6 +263,11 @@ function describeStartTick(r: StartTickReport): string[] {
   if (r.dreamed) lines.push(`memory: ${r.dreamed}`);
   if (r.expired?.length) lines.push(`${r.expired.length} item(s) expired unanswered (nothing was sent)`);
   if (r.pruned?.length) lines.push(`${r.pruned.length} item(s) dismissed: you already replied or reacted in Beeper`);
+  for (const b of r.brain ?? []) {
+    if (b.stopped === 'empty') continue;
+    const did = [b.said.length ? `said ${b.said.length}` : '', b.reacted.length ? `reacted ${b.reacted.join('')}` : '', b.toolsUsed.length ? `used ${b.toolsUsed.join(', ')}` : '', b.queued.length ? `queued ${b.queued.join(', ')} for your yes` : '', b.interrupts ? `folded in ${b.interrupts} interruption(s)` : ''].filter(Boolean);
+    lines.push(`brain: ${b.steps} step(s)${did.length ? `, ${did.join(', ')}` : ''} (${b.stopped})`);
+  }
   if (r.bridge) lines.push(...describeBridgeTick(r.bridge));
   return lines;
 }
@@ -889,6 +894,8 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
             selfReview: config.start?.selfReview === false ? false : { ...(config.start?.selfReview ?? {}) },
             ...(config.start?.missions !== undefined ? { missions: config.start.missions } : {}),
             ...(config.start?.memoryDream !== undefined ? { memoryDream: config.start.memoryDream } : {}),
+            ...(config.start?.brain ? { brain: config.start.brain } : {}),
+            ...(config.start?.maxStepsPerWake !== undefined || config.chief?.provider ? { brainOptions: { ...(config.start?.maxStepsPerWake !== undefined ? { maxStepsPerWake: config.start.maxStepsPerWake } : {}), ...(config.chief?.provider ? { provider: config.chief.provider } : {}) } } : {}),
             ...(config.voice?.tts ? { voice: { tts: config.voice.tts, ...(config.voice.replyMode ? { replyMode: config.voice.replyMode } : {}) } } : {}),
             ...(now ? { now } : {}),
           });
