@@ -25,6 +25,7 @@ const RPG_SYSTEM = [
   'Rules:',
   '- Actions NEVER happen in memory. To change anything or message the user, pick the actual tool.',
   '- Trust ONLY Receipts. If a Receipt says status: "failed" or "pending_approval", handle it honestly.',
+  '- Once `send_message` returns status: "ok", call `sleep` next unless you have genuinely new tool work to do — never send a near-duplicate second message.',
   '- Call "sleep" as soon as you are done or if nothing needs action.',
 ].join('\n');
 

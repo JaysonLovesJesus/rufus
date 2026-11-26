@@ -34,8 +34,11 @@ export function verifySpokenReply(text: string, receipts: readonly Receipt[]): s
 
   // 2. Clean formatting & voice invariants
   if (/—/.test(s)) fails.push('no em-dashes (use a comma, period, or plain hyphen)');
-  if (/^(?:great question|awesome question|sure thing|absolutely!|happy to help|certainly!)/i.test(s)) {
-    fails.push('sycophantic opener');
+  if (/^(?:great question|awesome question|sure thing|absolutely!|happy to help|certainly!|hi\s+\w+[.!,\s])/i.test(s)) {
+    fails.push('sycophantic or generic chatbot opener (lead straight with the answer)');
+  }
+  if (/\b(?:want me to (?:check anything|pull something up|look into anything|do anything)|let me know if you need anything|how can i help)\b/i.test(s)) {
+    fails.push('generic assistant closing filler ("Want me to...?") — drop it and end cleanly');
   }
   if (/\b1\.[ \t]+\S+[^\n]*[ \t]+2\.[ \t]+\S+/.test(s)) {
     fails.push('numbered list is cramped on one line — put each numbered item on its own line');
@@ -93,8 +96,8 @@ export async function renderWithSpeaker(opts: {
     'You are the Speaker. Your ONLY job is to turn exact tool receipts and an intent into one crisp, natural message for the user.',
     'Rules:',
     '- Speak strictly from the Receipts below. Never invent or claim any change that is not in `changes`.',
-    '- For 3+ items, use a clean numbered list with each item on its own line.',
-    '- No em-dashes, no filler openers, no raw JSON, no internal file paths.',
+    '- When listing 3+ items (or when the user asked "what are the N ...?"), ALWAYS output the full clean numbered list with each item on its own line — never summarize into a prose paragraph.',
+    '- No em-dashes, no "Hi <name>", no generic closers ("Want me to check anything?", "Ready when you are."), no raw JSON.',
     '',
     'Voice Guide:',
     voice,
