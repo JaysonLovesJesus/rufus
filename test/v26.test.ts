@@ -542,5 +542,17 @@ describe('v26 UnifiedDaemon with brain: "continuous"', () => {
     expect(evalReport.ok).toBe(true);
     expect(evalReport.badCaught).toBe(1);
     expect(evalReport.idealPassed).toBe(1);
+
+    // Multi-line say preserves newlines (never flattens numbered lists)
+    const sent: string[] = [];
+    const multiBrain = new ContinuousBrain({
+      dir,
+      provider: new FakeProvider(() => actions(say('Your projects:\n1. alpha\n2. beta'), rest)),
+      outlet: { say: async (t) => void sent.push(t) },
+      now: () => NOW,
+    });
+    multiBrain.push(brainEvent('owner_message', 'list them', { at: NOW }));
+    await multiBrain.runUntilRest();
+    expect(sent).toEqual(['Your projects:\n1. alpha\n2. beta']);
   });
 });

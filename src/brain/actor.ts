@@ -71,6 +71,11 @@ const OWN_READS = new Set([SKILL_LIST_TOOL, SKILL_READ_TOOL, 'mission.list']);
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const oneLine = (s: string, max = 200): string => clip(s.replace(/\s+/g, ' ').trim(), max);
+/** Clips while preserving newlines (so numbered lists and multi-paragraph replies stay intact). */
+const clipKeepLines = (s: string, max: number): string => {
+  const t = s.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return t.length > max ? `${t.slice(0, max - 1).trimEnd()}…` : t;
+};
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const isLocal = (t: { local?: boolean; sensitivity?: readonly string[] }): boolean => t.local === true && !(t.sensitivity ?? []).length;
 
@@ -344,7 +349,7 @@ export class ContinuousBrain {
   }
 
   private note(text: string): void {
-    this.workingNotes.push(clip(text.trim(), MAX_TOOL_RESULT));
+    this.workingNotes.push(clipKeepLines(text, MAX_TOOL_RESULT));
     if (this.workingNotes.length > KEEP_NOTES) this.workingNotes.splice(0, this.workingNotes.length - KEEP_NOTES);
   }
 
@@ -546,7 +551,7 @@ export class ContinuousBrain {
     text: string,
     ctx: { executed: VerifiedToolCall[]; query: string; proactive: boolean; retried: boolean; report: BrainWakeReport; raw: string; system: string; messages: AiMessage[] },
   ): Promise<{ text?: string; rewrite?: BrainAction[] }> {
-    const draft = clip(text.trim(), MAX_SAY_CHARS);
+    const draft = clipKeepLines(text, MAX_SAY_CHARS);
     if (!draft) return {};
     const violations = detectUnbackedActionClaims(draft, ctx.executed);
     const taste = await runLayer3Verify({ dir: this.dir, text: draft, toolCalls: ctx.executed, channel: ctx.proactive ? 'proactive' : 'chat', now: this.now(), ...(ctx.query ? { query: ctx.query } : {}) });
@@ -661,7 +666,7 @@ export class ContinuousBrain {
           timer = setTimeout(() => reject(new Error(`timed out after ${this.toolTimeoutMs}ms`)), this.toolTimeoutMs);
         }),
       ]);
-      return { text: clip(typeof out === 'string' ? out : JSON.stringify(out ?? null), MAX_TOOL_RESULT), ran: true };
+      return { text: clipKeepLines(typeof out === 'string' ? out : JSON.stringify(out ?? null), MAX_TOOL_RESULT), ran: true };
     } catch (err) {
       return { text: err instanceof ToolGatedError ? err.message : `Tool ${name} failed: ${oneLine(message(err), 300)}` };
     } finally {
