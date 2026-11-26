@@ -49,8 +49,9 @@ export class TelegramChannel implements MessageSink {
     }).catch(() => undefined);
   }
 
-  async poll(): Promise<LosslessEvent[]> {
-    const url = `${this.base}/getUpdates?timeout=0&allowed_updates=${encodeURIComponent(JSON.stringify(['message']))}${this.offset ? `&offset=${this.offset}` : ''}`;
+  async poll(timeoutSec = 0): Promise<LosslessEvent[]> {
+    const t = Math.max(0, Math.min(50, Math.floor(timeoutSec)));
+    const url = `${this.base}/getUpdates?timeout=${t}&allowed_updates=${encodeURIComponent(JSON.stringify(['message']))}${this.offset ? `&offset=${this.offset}` : ''}`;
     const res = await fetch(url);
     if (!res.ok) return [];
     const data = (await res.json()) as {

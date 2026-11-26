@@ -14,6 +14,9 @@ const COMPLETION_CLAIM =
 const HEDGE_OR_QUESTION =
   /\b(?:not|never|haven'?t|hasn'?t|didn'?t|don'?t|can'?t|cannot|won'?t|waiting|queued|approval|approve|pending|say yes|want me|should i|i'?ll|i will)\b|\?\s*$/i;
 
+const EMPTY_FUTURE_PROMISE =
+  /\b(?:i(?:'ll| will)\s+(?:stop|start|always|never|remember to|make sure to|drop|skip)|from now on\s+i(?:'ll| will))\b/i;
+
 export function verifySpokenReply(text: string, receipts: readonly Receipt[]): string[] {
   const s = text.trim();
   if (!s) return ['reply is empty'];
@@ -25,6 +28,9 @@ export function verifySpokenReply(text: string, receipts: readonly Receipt[]): s
   if (actualChanges.length === 0) {
     if (/^done\b/i.test(s) && anyFailed) {
       fails.push('opened with "Done" even though a tool failed and 0 writes succeeded');
+    }
+    if (EMPTY_FUTURE_PROMISE.test(s)) {
+      fails.push('empty future promise ("I\'ll stop/start/always..."): persist the rule via skills.save first before promising it');
     }
     const clauses = s.split(/(?<=[.!?])\s+|\n+/).map((c) => c.trim()).filter(Boolean);
     for (const clause of clauses) {

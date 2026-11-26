@@ -190,12 +190,13 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
     const tools = await opts.registry.selectForPrompt(query, topKTools);
     const skillsBlock = await selectRelevantSkills(opts.workspaceDir, query, { topK: 2 });
 
+    const triggerMsgId = opts.trigger.metadata?.messageId !== undefined ? ` | messageId:${opts.trigger.metadata.messageId}` : '';
     const prompt = [
       `Current local time: ${formatLocalTime(now())}`,
       `Workspace path: ${opts.workspaceDir}`,
       `Live Context (schedule, todos, projects):\n${liveContext}`,
       ...(skillsBlock ? [`Relevant Judgment Skills:\n${skillsBlock}`] : []),
-      `Trigger Event:\n[${formatLocalTime(opts.trigger.timestamp)}] (${opts.trigger.source}${opts.trigger.actor ? ` / ${opts.trigger.actor}` : ''}${opts.trigger.deleted ? ' / DELETED' : ''}): ${opts.trigger.text}`,
+      `Trigger Event:\n[${formatLocalTime(opts.trigger.timestamp)}] (${opts.trigger.source}${opts.trigger.actor ? ` / ${opts.trigger.actor}` : ''}${triggerMsgId}${opts.trigger.deleted ? ' / DELETED' : ''}): ${opts.trigger.text}`,
       ...(arrivalBlock ? [arrivalBlock] : []),
       `Recent Conversation (including what YOU already said — do not repeat yourself):\n${recentChatBlock}`,
       `Relevant Past Events (embedded retrieval):\n${relatedBlock}`,

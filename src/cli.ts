@@ -114,15 +114,17 @@ async function main(argv: string[]): Promise<void> {
     try {
       while (!stop.signal.aborted) {
         if (tg) {
-          const incoming = await tg.poll().catch(() => []);
+          // Native Telegram long-polling (~150ms instant delivery, $0, zero 5s sleep lag)
+          const incoming = await tg.poll(25).catch(() => []);
           if (incoming.length) {
             const [first, ...extras] = incoming;
             const res = await core.processEvent(first!, {
               additionalEvents: extras,
-              pollIncoming: () => tg.poll().catch(() => []),
+              pollIncoming: () => tg.poll(0).catch(() => []),
             });
             console.log(`[${first!.id}${extras.length ? ` +${extras.length}` : ''}] bouncer=${res.decision.label} (${res.decision.backend}) turns=${res.wake?.turns ?? 0}`);
           }
+          continue;
         }
         await new Promise<void>((resolve) => {
           const t = setTimeout(resolve, intervalMs);

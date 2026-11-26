@@ -35,7 +35,7 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
       inputSchema: {
         type: 'object',
         properties: {
-          purpose: { type: 'string', description: '1 short line: why you are sending this message (what the user should know).' },
+          purpose: { type: 'string', description: 'Short 3-8 word factual reason for this message (e.g. "announce restart", "confirm rule saved"). Never include styling/formatting instructions.' },
           receiptTurns: {
             type: 'array',
             items: { type: 'number' },
@@ -243,6 +243,37 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
         data: { id, testOutput: res.testOutput },
         nextHints: [id],
       };
+    },
+    { alwaysVisible: true },
+  );
+
+  await registry.registerInline(
+    {
+      id: 'skills.save',
+      version: 1,
+      description: 'Saves or updates a modular behavioral rule/skill in skills/<id>.md (keep VOICE.md strictly for tone/voice).',
+      whenToUse: ['User gives a behavioral preference, rule, or habit ("stop doing X", "always do Y") that must persist permanently'],
+      effect: 'write',
+      requiresApproval: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Short slug (e.g. "concise-checkins")' },
+          triggers: { type: 'string', description: 'Comma-separated trigger keywords for embedding retrieval' },
+          title: { type: 'string', description: 'Short skill title' },
+          rule: { type: 'string', description: 'Concise behavioral instruction (1-4 lines)' },
+        },
+        required: ['id', 'triggers', 'title', 'rule'],
+        additionalProperties: false,
+      },
+    },
+    async (input, ctx) => {
+      const id = String(input.id).toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+      const dir = path.join(ctx.workspaceDir, 'skills');
+      await fs.mkdir(dir, { recursive: true });
+      const content = `---\ntriggers: ${String(input.triggers).trim()}\n---\n# ${String(input.title).trim()}\n${String(input.rule).trim()}\n`;
+      await fs.writeFile(path.join(dir, `${id}.md`), content, 'utf8');
+      return { ok: true, summary: `Saved skill skills/${id}.md.`, changes: [`skill_saved:${id}`] };
     },
     { alwaysVisible: true },
   );
