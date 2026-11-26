@@ -1,3 +1,6 @@
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { LosslessEvent, ModelProvider, Receipt, RpgAction, RpgWakeReport, ToolManifest } from '../types';
 import type { EventStore } from '../events/store';
 import type { ToolRegistry } from '../scripts/registry';
@@ -75,6 +78,39 @@ function formatReceiptsForPrompt(receipts: readonly Receipt[]): string {
     .join('\n\n');
 }
 
+/** Compact $0 live orientation block (schedule + todos + active projects) injected into Turn 1 of every wake. */
+async function gatherLiveContext(workspaceDir: string): Promise<string> {
+  const parts: string[] = [];
+  // 1. Today's schedule (if anchor.json exists in workspace or ~/.rufus)
+  for (const p of [path.join(workspaceDir, 'anchor.json'), path.join(os.homedir(), '.rufus', 'anchor.json')]) {
+    try {
+      const data = JSON.parse(await fs.readFile(p, 'utf8')) as { schedule?: { date?: string; blocks?: Array<{ title: string; start: string; end: string; status?: string }> } };
+      const blocks = (data.schedule?.blocks ?? []).filter((b) => b.status !== 'skipped');
+      if (blocks.length) {
+        parts.push(`Schedule (${data.schedule?.date ?? 'today'}): ${blocks.map((b) => `${b.title} (${b.start}-${b.end})`).join(', ')}`);
+      }
+      break;
+    } catch {
+      /* try next */
+    }
+  }
+  // 2. Open todos from TODOS.md
+  try {
+    const raw = (await fs.readFile(path.join(workspaceDir, 'TODOS.md'), 'utf8')).trim();
+    if (raw) parts.push(`Todos:\n${raw.slice(0, 1200)}`);
+  } catch {
+    /* no TODOS.md yet */
+  }
+  // 3. Active projects
+  try {
+    const projects = (await fs.readdir(path.join(workspaceDir, 'projects'))).filter((f) => f.endsWith('.md') && !f.startsWith('.')).map((f) => f.replace(/\.md$/, '')).sort();
+    if (projects.length) parts.push(`Active projects (${projects.length}): ${projects.join(', ')}`);
+  } catch {
+    /* no projects dir */
+  }
+  return parts.length ? parts.join('\n') : '(none)';
+}
+
 /**
  * Runs one complete Awake cycle:
  * Fresh context -> Opus chooses 1 tool -> Opus OFF -> Tool executes -> immutable Receipt -> repeat until `sleep` or turn cap.
@@ -91,6 +127,7 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
   let slept = false;
   let sleepReason: string | undefined;
 
+  const liveContext = await gatherLiveContext(opts.workspaceDir);
   // Retrieve semantically relevant past events once for this wake
   const related = await opts.events.search(opts.trigger.text, topKContext, { excludeIds: [opts.trigger.id] });
   const relatedBlock = related.length
@@ -111,6 +148,7 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
 
     const prompt = [
       `Current time: ${now().toISOString()}`,
+      `Live Context (schedule, todos, projects):\n${liveContext}`,
       `Trigger Event:\n[${opts.trigger.timestamp}] (${opts.trigger.source}${opts.trigger.actor ? ` / ${opts.trigger.actor}` : ''}${opts.trigger.deleted ? ' / DELETED' : ''}): ${opts.trigger.text}`,
       `Relevant Past Events (embedded retrieval):\n${relatedBlock}`,
       `Receipts So Far (exact ground truth):\n${formatReceiptsForPrompt(receipts)}`,
