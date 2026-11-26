@@ -404,7 +404,8 @@ const CLOSED_STATUS = /^(done|archived|closed|complete|completed|paused|dropped|
  */
 export async function relevantProjectsSection(dir: string, query: string, maxChars = DEFAULT_PROJECTS_CHARS): Promise<string> {
   try {
-    if (!query.trim()) return '';
+    const all = query.trim() === '*';
+    if (!all && !query.trim()) return '';
     const root = path.resolve(dir, PROJECTS_DIR);
     let entries: string[];
     try {
@@ -439,7 +440,7 @@ export async function relevantProjectsSection(dir: string, query: string, maxCha
       const firstLine = body.split('\n').find((l) => l.trim() && !l.startsWith('#'))?.trim() ?? '';
       const description = (typeof meta.description === 'string' && meta.description) || firstLine;
       const triggers = Array.isArray(meta.triggers) ? meta.triggers : typeof meta.triggers === 'string' ? meta.triggers.split(',').map((t) => t.trim()) : [];
-      const score = Math.max(scoreSkill({ name, description, triggers }, query), heading ? scoreSkill({ name: heading, description: '', triggers: [] }, query) : 0);
+      const score = all ? 10 : Math.max(scoreSkill({ name, description, triggers }, query), heading ? scoreSkill({ name: heading, description: '', triggers: [] }, query) : 0);
       if (score < 2) continue;
       const summary = body.replace(/^#.*$/gm, '').replace(/\n{2,}/g, '\n').trim();
       found.push({ name, score, summary });

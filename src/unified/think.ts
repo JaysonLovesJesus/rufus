@@ -7,7 +7,8 @@ import { clip } from '../corpus/types';
 import type { MasterLoop } from '../engine/loop';
 import { buildPersona, loadSoul, timeFacts, withPersona } from '../soul/soul';
 import { isExternalWriteTool, type ToolRegistry } from '../tools/tools';
-import { checkLayer3Boundary, layer3RetryPrompt, runLayer3Verify } from '../skills/runner';
+import { checkLayer3Boundary, layer3RetryPrompt, relevantProjectsSection, runLayer3Verify } from '../skills/runner';
+import { MISSION_START_TOOL } from '../tools/mission-tools';
 import type { AiMessage, AiProvider } from '../types';
 import { DEFAULT_QUIET_HOURS, inQuietHours } from './heartbeat';
 
@@ -38,11 +39,11 @@ const CHAT_LINES = 8;
 const RECENT_RUNS = 8;
 
 export const THINK_PROMPT = [
-  'You are waking up on your own periodic beat. Look at what\'s actually going on right now.',
-  'Is there ONE genuinely useful, natural thing to mention or offer (e.g., an open afternoon with no plan yet, an important goal coming up, a follow-up on something the human mentioned earlier)?',
-  `If nothing genuinely matters right now, reply with exactly \`${SILENT}\`. Never invent busywork.`,
-  'Write like a real person texting — casual, natural emphasis, zero form templates.',
-  'Keep it to one short message (two short bubbles at most, split by a line with only ---). Never repeat something you already said in the recent conversation. Say times the casual 12-hour way (2pm).',
+  'You are waking up on your own periodic beat. Act like a real Jarvis-level Chief of Staff looking at the whole board: calendar, goals, active projects, unread messages/emails, and recent chat.',
+  'Ask yourself: is there ONE genuinely high-leverage thing you can finish right now (research a real question, prep for an upcoming trip/meeting, check a project file/status, or bring a crisp decision with real facts) that will actually take weight off the human?',
+  `If nothing genuinely moves the needle right now, reply with exactly \`${SILENT}\`. Never invent busywork and never nag.`,
+  'Write like a warm, sharp, joyful human texting — simple plain English, zero jargon, zero form templates.',
+  'Keep it concise (1-2 short bubbles, split by a line with only ---). Never repeat something you already said recently. Say times casually (2pm).',
 ].join('\n');
 
 export interface ThinkOptions {
@@ -140,6 +141,8 @@ export async function gatherBoard(opts: { dir: string; loop: MasterLoop; now: Da
   if (goals.length) lines.push(`Goals: ${goals.map((g) => `[${g.priority}/${g.horizon}] ${g.title}`).join('; ')}`);
   const projects = anchor.projects.filter((p) => p.status === 'active').slice(0, 5);
   if (projects.length) lines.push(`Projects: ${projects.map((p) => `${p.name}${p.nextStep ? ` (next: ${p.nextStep})` : ''}`).join('; ')}`);
+  const projectDocs = await relevantProjectsSection(dir, '*', 1800).catch(() => '');
+  if (projectDocs) lines.push(projectDocs);
   const history = await loadChatHistory(dir, CHAT_LINES).catch(() => []);
   lines.push(history.length ? `Recent conversation (oldest first):\n${formatChatHistory(history, now)}` : 'Recent conversation: none yet.');
   const runs = (await loop.listRuns().catch(() => []))
@@ -159,9 +162,11 @@ export async function gatherBoard(opts: { dir: string; loop: MasterLoop; now: Da
   return lines.join('\n');
 }
 
-/** v25a: the tools a beat may call itself: read-only ones only, never a write or anything that reaches out. */
+/** v25a: the tools a beat may call itself: read-only ones (plus local `mission.start`), never a write or anything that reaches out. */
 export function thinkTools(tools: ToolRegistry | undefined): string[] {
-  return (tools?.list() ?? []).filter((t) => t.readOnly === true && !isExternalWriteTool(t.name)).map((t) => t.name);
+  return (tools?.list() ?? [])
+    .filter((t) => (t.readOnly === true && !isExternalWriteTool(t.name)) || t.name === MISSION_START_TOOL)
+    .map((t) => t.name);
 }
 
 /** v25a: the action-first part of the beat prompt, listing the read-only tools it may use. */
@@ -261,13 +266,14 @@ export async function think(opts: { provider: AiProvider; dir: string; loop: Mas
 async function thinkToolCall(tools: ToolRegistry, name: string, args: Record<string, unknown>, dir: string, now: Date, timeoutMs = DEFAULT_THINK_TOOL_CALL_MS): Promise<{ text: string; ran: boolean; blocked?: boolean }> {
   const tool = tools.get(name);
   if (!tool) return { text: `No tool called "${name}". Read-only tools: ${thinkTools(tools).join(', ')}.`, ran: false };
-  if (tool.readOnly !== true || isExternalWriteTool(name)) {
+  const isMissionStart = name === MISSION_START_TOOL;
+  if (!isMissionStart && (tool.readOnly !== true || isExternalWriteTool(name))) {
     return { text: `BLOCKED: ${name} is not read-only, and a think-beat may only read. Nothing was sent or changed. Do not claim it was.`, ran: false, blocked: true };
   }
   let timer: NodeJS.Timeout | undefined;
   try {
     const out = await Promise.race([
-      tools.call(name, args, { dir, now, stage: 'execute' }),
+      tools.call(name, args, { dir, now, stage: isMissionStart ? 'commit' : 'execute' }),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
       }),
