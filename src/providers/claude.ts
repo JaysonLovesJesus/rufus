@@ -8,7 +8,7 @@ export class ClaudeCliProvider implements ModelProvider {
   private readonly timeoutMs: number;
 
   constructor(opts: { name?: string; model?: string; timeoutMs?: number } = {}) {
-    this.defaultModel = opts.model ?? 'claude-opus-4-5';
+    this.defaultModel = opts.model ?? 'opus';
     this.name = opts.name ?? `claude-cli:${this.defaultModel}`;
     this.timeoutMs = opts.timeoutMs ?? 90_000;
   }

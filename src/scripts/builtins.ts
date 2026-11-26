@@ -26,6 +26,7 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
       whenToUse: ['You have a verified answer, update, or approval request to send to the user'],
       effect: 'write',
       requiresApproval: false,
+      timeoutMs: 30_000,
       inputSchema: {
         type: 'object',
         properties: {

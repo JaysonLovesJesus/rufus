@@ -27,8 +27,8 @@ async function main(argv: string[]): Promise<void> {
   const makeCore = () =>
     new RufusCore({
       workspaceDir: dir,
-      reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'claude-opus-4-5' }),
-      speakerProvider: new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'claude-haiku-4-5' }),
+      reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus' }),
+      speakerProvider: new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'haiku' }),
       sink,
       ...(pythonPath ? { pythonPath } : {}),
       shadow,
@@ -84,8 +84,8 @@ async function main(argv: string[]): Promise<void> {
     const tg = tgToken && tgChatId ? new TelegramChannel({ token: tgToken, chatId: tgChatId }) : undefined;
     const core = new RufusCore({
       workspaceDir: dir,
-      reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'claude-opus-4-5' }),
-      speakerProvider: new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'claude-haiku-4-5' }),
+      reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus' }),
+      speakerProvider: new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'haiku' }),
       sink: tg ?? sink,
       ...(pythonPath ? { pythonPath } : {}),
       shadow,
