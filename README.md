@@ -4,13 +4,13 @@
 
 Most AI bots are just prompts wrapped around a chat box. They burn tokens checking things that don't matter, lose track of what they actually did, and repeat the same mistakes a week later.
 
-Rufus is built around one simple idea: **let deterministic code own reality, let a tiny local model guard the door at `$0`, and only wake the smart AI when real judgment is needed.**
+Rufus is built around one simple idea: **let deterministic code own reality, let a tiny local model guard the door, and only wake the smart AI when real judgment is needed.**
 
 ---
 
 ## How It Works (In 30 Seconds)
 
-1. **Waiting Mode (`$0`, runs locally in milliseconds)**
+1. **Waiting Mode (local, runs in milliseconds)**
    Incoming messages, emails, calendar changes, and files flow into one lossless event stream (keeping exact timestamps, replies, reactions, and deleted flags). A tiny local **SetFit** neural model (`Sentence Transformer + classifier head`) runs right on your laptop in ~10 ms and decides: **`SLEEP`** (ignore) or **`WAKE`** (wake the brain).
    - Every time you skip a nudge, push back, approve an action, or the brain wakes up and goes right back to sleep, it automatically logs a training example — so the bouncer gets smarter around *your* life.
 
@@ -28,7 +28,7 @@ Rufus is built around one simple idea: **let deterministic code own reality, let
    - `stats.json` — automatic usage and failure tracking (flags broken scripts for repair).
 
 4. **A Pure Fresh-Context Speaker**
-   When Rufus messages you, a fast model (e.g. Claude Haiku) receives only **why** he's messaging you (`purpose`), the clean **Receipts** from code, and your personal `VOICE.md` — behind a `$0` truth and formatting gate.
+   When Rufus messages you, a fast model (e.g. Claude Haiku) receives only **why** he's messaging you (`purpose`), the clean **Receipts** from code, and your personal `VOICE.md` — behind a fast code truth and formatting gate.
 
 5. **Flight Recorder (`wakes.jsonl`)**
    Every wake is recorded turn-by-turn so you can inspect why Rufus made any decision, track real outcome metrics (`rufus stats`), and replay golden judgment cases (`rufus eval`).
@@ -57,7 +57,7 @@ pnpm rufus wake "What is on my schedule today?"
 pnpm rufus start
 ```
 
-### Optional: Local SetFit Bouncer (`$0`, ~10 ms on Apple Silicon)
+### Optional: Local SetFit Bouncer (~10 ms on Apple Silicon)
 
 Rufus works out of the box with a built-in zero-dependency prototype classifier. To upgrade to the real local SetFit neural bouncer:
 
