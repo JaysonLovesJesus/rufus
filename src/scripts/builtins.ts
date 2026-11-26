@@ -317,22 +317,14 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
     async (_input, ctx) => {
-      const tools = registry.list();
-      const projDir = path.join(ctx.workspaceDir, 'projects');
-      const projects = await fs
-        .readdir(projDir)
-        .then((xs) => xs.filter((f) => f.endsWith('.md') && !f.startsWith('.')).map((f) => f.replace(/\.md$/, '')).sort())
-        .catch(() => [] as string[]);
       const lastChange = await execFileAsync('git', ['log', '-1', '--pretty=%s'], { cwd: process.cwd(), timeout: 1500 })
         .then((r) => r.stdout.trim())
         .catch(() => undefined);
       return {
         ok: true,
-        summary: `Restarted with ${tools.length} tools and ${projects.length} projects.${lastChange ? ` Latest update: ${lastChange}` : ''}`,
+        summary: `Restarted.${lastChange ? ` Latest update: ${lastChange}` : ''}`,
         data: {
           startedAt: ctx.now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
-          toolCount: tools.length,
-          projects,
           ...(lastChange ? { latestUpdate: lastChange } : {}),
         },
         nextHints: ['send_message'],
