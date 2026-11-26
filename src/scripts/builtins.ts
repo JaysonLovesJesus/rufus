@@ -27,8 +27,8 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
     {
       id: 'send_message',
       version: 1,
-      description: 'Sends a concise natural message voiced by the fast Speaker from your Purpose + the verified Code Receipts.',
-      whenToUse: ['You have a verified answer, update, or approval request to send to the user'],
+      description: 'Sends ONE concise natural message for ONE single purpose/intent, voiced by the fast Speaker from verified Code Receipts. If you have two separate topics or updates, send two separate messages across turns.',
+      whenToUse: ['You have ONE focused purpose/update to send to the user (never cram multiple unrelated topics into one message — use separate turns)'],
       effect: 'write',
       requiresApproval: false,
       timeoutMs: 30_000,
