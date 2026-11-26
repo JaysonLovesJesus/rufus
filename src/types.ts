@@ -601,6 +601,8 @@ export interface StartConfig {
   brain?: 'classic' | 'continuous';
   /** v26: model steps per continuous-brain wake. Default 6, max 10. */
   maxStepsPerWake?: number;
+  /** v26: send a short, $0 "I'm up" snapshot to chat on startup showing what Rufus woke up to (5m cooldown). Default false. */
+  announceStartup?: boolean;
 }
 
 /** Guardrails against piling up prompt rules. */

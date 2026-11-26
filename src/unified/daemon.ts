@@ -1368,4 +1368,35 @@ export class UnifiedDaemon {
       return { ok: true, message: what, status: after.status, committed: !!after.committed };
     });
   }
+
+  /**
+   * Sends a short, $0 "I'm up" check-in to chat on daemon startup showing what Rufus woke up to
+   * (today's schedule, loaded projects, pending items, active missions, and tool count). 5m cooldown prevents crash-loop spam.
+   */
+  async announceStartup(cooldownMs = 5 * 60_000): Promise<string | undefined> {
+    return this.exclusive(async () => {
+      const now = this.now();
+      const state = await loadStartState(this.loop.dir);
+      if (state.lastStartupAt && now.getTime() - Date.parse(state.lastStartupAt) < cooldownMs) return undefined;
+      const anchor = await loadAnchor(this.loop.dir, now);
+      const { current, next } = scheduleNow(anchor, now);
+      const today = anchor.schedule.date === localDate(now) ? anchor.schedule.blocks.filter((b) => b.status !== 'skipped') : [];
+      const pending = await this.loop.pending();
+      const missions = await listMissions(this.loop.dir, { status: ['queued', 'running'] }).catch(() => []);
+      const fs = await import('node:fs/promises');
+      const pathMod = await import('node:path');
+      const projFiles = await fs.readdir(pathMod.join(this.loop.dir, 'projects')).then((xs) => xs.filter((f) => f.endsWith('.md') && !f.startsWith('.')).map((f) => f.replace(/\.md$/, '')).sort()).catch(() => [] as string[]);
+      const lines: string[] = [`I'm up (${this.brain ? 'continuous brain' : 'classic'}, ${this.loop.tools.list().length} tools). Here's what I woke up to:`];
+      if (current) lines.push(`- Right now: ${speakableTitle(current.title, 48)} (${range12(current.start, current.end)})`);
+      else if (next) lines.push(`- Next up: ${speakableTitle(next.title, 48)} at ${range12(next.start, next.end)}`);
+      else lines.push(`- Today's calendar: ${today.length ? `${today.length} block(s)` : 'clear'}`);
+      if (projFiles.length) lines.push(`- Projects loaded (${projFiles.length}): ${projFiles.slice(0, 5).join(', ')}${projFiles.length > 5 ? ` +${projFiles.length - 5} more` : ''}`);
+      lines.push(`- Waiting on you: ${pending.length} item(s)${missions.length ? ` | ${missions.length} background mission(s) running` : ''}`);
+      const text = lines.join('\n');
+      state.lastStartupAt = now.toISOString();
+      await saveStartState(this.loop.dir, state);
+      await this.say(text, false, true, true);
+      return text;
+    });
+  }
 }

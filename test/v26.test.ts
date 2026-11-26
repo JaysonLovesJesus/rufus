@@ -454,4 +454,43 @@ describe('v26 UnifiedDaemon with brain: "continuous"', () => {
     expect(r.brain).toBeUndefined();
     expect(provider.calls.every((c) => c.meta?.flowId !== 'brain')).toBe(true);
   });
+
+  it('announceStartup sends a $0 orientation snapshot and respects the cooldown', async () => {
+    const dir = await tempDir();
+    await mkdir(path.join(dir, 'projects'), { recursive: true });
+    await writeFile(path.join(dir, 'projects', 'alpha.md'), '# Alpha\n', 'utf8');
+    await writeFile(path.join(dir, 'projects', 'beta.md'), '# Beta\n', 'utf8');
+    let t = NOW;
+    const clock = () => t;
+    const chat = chatChannel(clock);
+    const provider = new FakeProvider(() => 'should not be called');
+    const loop = new MasterLoop({ dir, now: clock });
+    const daemon = new UnifiedDaemon({
+      loop,
+      engine: new Engine({ store: dir, provider, flows: [] }),
+      channel: chat,
+      heartbeat: false,
+      calendarSync: false,
+      bubblePauseMs: 0,
+      brain: 'continuous',
+      now: clock,
+    });
+
+    const first = await daemon.announceStartup();
+    expect(first).toContain("I'm up (continuous brain");
+    expect(first).toContain('Projects loaded (2): alpha, beta');
+    expect(first).toContain('Waiting on you: 0 item(s)');
+    expect(chat.sent).toHaveLength(1);
+    expect(provider.calls).toHaveLength(0);
+
+    // Within 5m cooldown: silent
+    t = new Date(t.getTime() + 2 * 60_000);
+    expect(await daemon.announceStartup()).toBeUndefined();
+    expect(chat.sent).toHaveLength(1);
+
+    // Past 5m cooldown: announces again
+    t = new Date(t.getTime() + 6 * 60_000);
+    expect(await daemon.announceStartup()).toContain("I'm up (continuous brain");
+    expect(chat.sent).toHaveLength(2);
+  });
 });

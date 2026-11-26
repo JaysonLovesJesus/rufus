@@ -912,6 +912,9 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
           }
           const sensors = loop.listSensors().map((x) => x.id).join(', ');
           io.out(`Rufus is running (every ${flags['--interval'] ?? config.start?.interval ?? '30s'}; check-ins every ${flags['--checkin'] ?? config.start?.checkinEvery ?? '2h'}). Sensors: ${sensors}. Tools: ${loop.tools.list().map((t) => t.name).join(', ') || 'none'}. ${channel ? 'Talking through your chat.' : 'No chat configured: items print here; answer with rufus decide.'} Ctrl+C to stop.`);
+          if (config.start?.announceStartup) {
+            await daemon.announceStartup().catch((err) => io.err(`startup check-in failed: ${(err as Error).message}`));
+          }
           const stop = new AbortController();
           process.once('SIGINT', () => stop.abort());
           process.once('SIGTERM', () => stop.abort());
