@@ -79,8 +79,22 @@ async function main(argv: string[]): Promise<void> {
 
   if (cmd === 'start') {
     const intervalMs = Number(process.env.RUFUS_HEARTBEAT_MS || 5000);
-    const tgToken = process.env.TELEGRAM_BOT_TOKEN;
-    const tgChatId = process.env.TELEGRAM_CHAT_ID;
+    let tgToken = process.env.TELEGRAM_BOT_TOKEN;
+    let tgChatId = process.env.TELEGRAM_CHAT_ID;
+    if (!tgToken || !tgChatId) {
+      for (const cfgPath of [path.join(dir, 'config.json'), path.join(os.homedir(), '.rufus', 'config.json')]) {
+        try {
+          const cfg = JSON.parse(await fs.readFile(cfgPath, 'utf8')) as { telegram?: { token?: string; chatId?: string | number } };
+          if (cfg.telegram?.token && cfg.telegram?.chatId) {
+            tgToken = cfg.telegram.token;
+            tgChatId = String(cfg.telegram.chatId);
+            break;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
     const tg = tgToken && tgChatId ? new TelegramChannel({ token: tgToken, chatId: tgChatId }) : undefined;
     const core = new RufusCore({
       workspaceDir: dir,
