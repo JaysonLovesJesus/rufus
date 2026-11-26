@@ -41,6 +41,7 @@ def cmd_train(data_path: str, model_dir: str, epochs: int) -> None:
     ds = Dataset.from_list(rows)
     model = SetFitModel.from_pretrained(BASE_MODEL, labels=["SLEEP", "WAKE"])
     args = TrainingArguments(
+        output_dir=os.path.join(model_dir, "_checkpoints"),
         batch_size=8,
         num_epochs=epochs,
         num_iterations=10,

@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Bouncer } from './bouncer/bouncer';
+import { TelegramChannel } from './channels/telegram';
 import { RufusCore } from './daemon';
 import { messageEvent } from './events/ingest';
 import { ClaudeCliProvider } from './providers/claude';
@@ -70,6 +71,45 @@ async function main(argv: string[]): Promise<void> {
     try {
       const res = await core.announceStartup();
       console.log(`Startup complete (${res.wake?.turns ?? 0} turn(s), shadow=${shadow}).`);
+    } finally {
+      await core.close();
+    }
+    return;
+  }
+
+  if (cmd === 'start') {
+    const intervalMs = Number(process.env.RUFUS_HEARTBEAT_MS || 5000);
+    const tgToken = process.env.TELEGRAM_BOT_TOKEN;
+    const tgChatId = process.env.TELEGRAM_CHAT_ID;
+    const tg = tgToken && tgChatId ? new TelegramChannel({ token: tgToken, chatId: tgChatId }) : undefined;
+    const core = new RufusCore({
+      workspaceDir: dir,
+      reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'claude-opus-4-5' }),
+      speakerProvider: new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'claude-haiku-4-5' }),
+      sink: tg ?? sink,
+      ...(pythonPath ? { pythonPath } : {}),
+      shadow,
+    });
+    const initInfo = await core.init();
+    console.log(`Rufus v2 Core running (heartbeat ${intervalMs}ms, shadow=${shadow}, tools=${core.registry.list().length}, custom=${initInfo.loadedTools.length}). Ctrl+C to stop.`);
+    await core.announceStartup().catch((err) => console.error(`startup error: ${(err as Error).message}`));
+    const stop = new AbortController();
+    process.once('SIGINT', () => stop.abort());
+    process.once('SIGTERM', () => stop.abort());
+    try {
+      while (!stop.signal.aborted) {
+        if (tg) {
+          const incoming = await tg.poll().catch(() => []);
+          for (const ev of incoming) {
+            const res = await core.processEvent(ev);
+            console.log(`[${ev.id}] bouncer=${res.decision.label} (${res.decision.backend}) turns=${res.wake?.turns ?? 0}`);
+          }
+        }
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, intervalMs);
+          stop.signal.addEventListener('abort', () => (clearTimeout(t), resolve()), { once: true });
+        });
+      }
     } finally {
       await core.close();
     }
