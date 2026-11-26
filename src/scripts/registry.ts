@@ -195,6 +195,22 @@ export class ToolRegistry {
         timeout: 15_000,
       });
 
+      // Engine-enforced ScriptOutput contract check (never rely solely on the AI's test.mjs)
+      const contractCheck = [
+        `import { run } from './run.mjs';`,
+        `if (typeof run !== 'function') throw new Error('run.mjs must export async function run(input, ctx)');`,
+        ...(checked.manifest.effect === 'read' && (checked.manifest.exampleInput || !(checked.manifest.inputSchema.required?.length))
+          ? [
+              `const out = await run(${JSON.stringify(checked.manifest.exampleInput ?? {})}, { workspaceDir: ${JSON.stringify(path.dirname(this.toolsDir))}, now: new Date(), env: process.env, callTool: async () => ({ ok: false, summary: 'stub' }) });`,
+              `if (!out || typeof out !== 'object' || typeof out.ok !== 'boolean' || typeof out.summary !== 'string') throw new Error('run() violated ScriptOutput contract: must return { ok: boolean, summary: string }');`,
+            ]
+          : []),
+      ].join('\n');
+      await execFileAsync(process.execPath, ['--input-type=module', '-e', contractCheck], {
+        cwd: stagingDir,
+        timeout: 15_000,
+      });
+
       await fs.mkdir(this.toolsDir, { recursive: true });
       await fs.rm(finalDir, { recursive: true, force: true });
       await fs.rename(stagingDir, finalDir);

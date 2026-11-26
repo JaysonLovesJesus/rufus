@@ -5,6 +5,20 @@ import path from 'node:path';
 import type { LosslessEvent, ModelProvider, Receipt, RpgAction, RpgTurnTrace, RpgWakeReport, ToolManifest } from '../types';
 import type { EventStore } from '../events/store';
 import type { ToolRegistry } from '../scripts/registry';
+import { selectRelevantSkills } from '../skills/skills';
+
+function formatLocalTime(d: Date | string): string {
+  const date = typeof d === 'string' ? new Date(d) : d;
+  if (Number.isNaN(date.getTime())) return String(d);
+  return date.toLocaleString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  });
+}
 
 export interface RpgWakeOptions {
   workspaceDir: string;
@@ -142,7 +156,7 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
     .filter((e) => e.source === 'message' && e.id !== opts.trigger.id)
     .slice(-6);
   const recentChatBlock = recentChat.length
-    ? recentChat.map((e) => `- [${e.timestamp}] ${e.kind === 'assistant_sent' ? 'You (Rufus)' : e.actor || 'User'}: ${e.text}`).join('\n')
+    ? recentChat.map((e) => `- [${formatLocalTime(e.timestamp)}] ${e.kind === 'assistant_sent' ? 'You (Rufus)' : e.actor || 'User'}: ${e.text}`).join('\n')
     : '(none)';
   // Retrieve semantically relevant past events once for this wake
   const related = await opts.events.search(opts.trigger.text, topKContext, { excludeIds: [opts.trigger.id] });
@@ -150,7 +164,7 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
     ? related
         .map(
           (r) =>
-            `- [${r.event.timestamp}] (${r.event.source}${r.event.actor ? ` / ${r.event.actor}` : ''}${r.event.deleted ? ' / DELETED' : ''}): ${r.event.text}` +
+            `- [${formatLocalTime(r.event.timestamp)}] (${r.event.source}${r.event.actor ? ` / ${r.event.actor}` : ''}${r.event.deleted ? ' / DELETED' : ''}): ${r.event.text}` +
             (r.event.reactions?.length ? ` [reactions: ${r.event.reactions.map((x) => x.emoji).join(' ')}]` : ''),
         )
         .join('\n')
@@ -172,13 +186,15 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
           .map((e) => `- [${e.timestamp}] (${e.source}${e.actor ? ` / ${e.actor}` : ''}): ${e.text}`)
           .join('\n')}`
       : '';
-    const query = [opts.trigger.text, ...arrivals.map((a) => a.text), ...receipts.slice(-2).map((r) => `${r.summary} ${(r.nextHints ?? []).join(' ')}`)].join(' ');
+    const query = [opts.trigger.text, ...arrivals.map((a) => a.text), ...receipts.slice(-2).map((r) => `${r.summary} ${r.error ?? ''} ${(r.nextHints ?? []).join(' ')}`)].join(' ');
     const tools = await opts.registry.selectForPrompt(query, topKTools);
+    const skillsBlock = await selectRelevantSkills(opts.workspaceDir, query, { topK: 2, maxChars: 1000 });
 
     const prompt = [
-      `Current time: ${now().toISOString()}`,
+      `Current local time: ${formatLocalTime(now())}`,
       `Live Context (schedule, todos, projects):\n${liveContext}`,
-      `Trigger Event:\n[${opts.trigger.timestamp}] (${opts.trigger.source}${opts.trigger.actor ? ` / ${opts.trigger.actor}` : ''}${opts.trigger.deleted ? ' / DELETED' : ''}): ${opts.trigger.text}`,
+      ...(skillsBlock ? [`Relevant Judgment Skills:\n${skillsBlock}`] : []),
+      `Trigger Event:\n[${formatLocalTime(opts.trigger.timestamp)}] (${opts.trigger.source}${opts.trigger.actor ? ` / ${opts.trigger.actor}` : ''}${opts.trigger.deleted ? ' / DELETED' : ''}): ${opts.trigger.text}`,
       ...(arrivalBlock ? [arrivalBlock] : []),
       `Recent Conversation (including what YOU already said — do not repeat yourself):\n${recentChatBlock}`,
       `Relevant Past Events (embedded retrieval):\n${relatedBlock}`,

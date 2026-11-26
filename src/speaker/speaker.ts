@@ -21,7 +21,11 @@ export function verifySpokenReply(text: string, receipts: readonly Receipt[]): s
 
   // 1. Universal $0 truth check against actual Receipt.changes
   const actualChanges = receipts.flatMap((r) => (r.status === 'ok' && r.effect === 'write' ? r.changes : []));
+  const anyFailed = receipts.some((r) => r.status === 'failed' || r.status === 'timed_out' || r.status === 'invalid_input');
   if (actualChanges.length === 0) {
+    if (/^done\b/i.test(s) && anyFailed) {
+      fails.push('opened with "Done" even though a tool failed and 0 writes succeeded');
+    }
     const clauses = s.split(/(?<=[.!?])\s+|\n+/).map((c) => c.trim()).filter(Boolean);
     for (const clause of clauses) {
       if (HEDGE_OR_QUESTION.test(clause)) continue;
@@ -32,7 +36,10 @@ export function verifySpokenReply(text: string, receipts: readonly Receipt[]): s
     }
   }
 
-  // 2. Clean formatting & voice invariants
+  // 2. Clean formatting, local time, conciseness & voice invariants
+  if (/\b\d{1,2}:\d{2}\s*UTC\b/i.test(s)) fails.push('quoted UTC time instead of the user’s local time');
+  const hasList = /^\s*1\.\s+/m.test(s);
+  if (!hasList && s.length > 380) fails.push('message is too long/wordy (keep non-list replies under ~350 chars, 1-3 crisp sentences)');
   if (/—/.test(s)) fails.push('no em-dashes (use a comma, period, or plain hyphen)');
   if (/^(?:great question|awesome question|sure thing|absolutely!|happy to help|certainly!|hi\s+\w+[.!,\s])/i.test(s)) {
     fails.push('sycophantic or generic chatbot opener (lead straight with the answer)');
@@ -100,6 +107,9 @@ export async function renderWithSpeaker(opts: {
     '- Never repeat information you already sent in Recent Messages Below — only share what is new or give a brief, naturally varied acknowledgment.',
     '- Use the Receipts strictly as a fact-check so you never invent or lie — NEVER narrate internal retries, earlier failed attempts, manifest/schema hiccups, or implementation details unless the final outcome actually failed or the user asked.',
     '- Always speak in first person ("I", never third-person "Rufus is...").',
+    '- Keep replies brief and punchy (1-3 crisp sentences unless listing 3+ items).',
+    '- Always use the user’s local time (never UTC).',
+    '- Never open with "Done" if a tool failed or nothing changed.',
     '- When listing 3+ items (or when the user asked "what are the N ...?"), output a clean numbered list with each item on its own line.',
     '- No em-dashes, no "Hi <name>", no generic closers ("Want me to check anything?", "Ready when you are."), no raw JSON.',
     '',

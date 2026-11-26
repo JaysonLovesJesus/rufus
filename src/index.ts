@@ -20,6 +20,7 @@ export { EventStore } from './events/store';
 export { messageEvent, genericEvent } from './events/ingest';
 export { Bouncer } from './bouncer/bouncer';
 export { ClaudeCliProvider, FakeProvider } from './providers/claude';
+export { selectRelevantSkills, type SkillDoc } from './skills/skills';
 export { RufusCore, type DaemonOptions, type ProcessEventResult } from './daemon';
 export { TelegramChannel, type TelegramConfig } from './channels/telegram';
 export {
