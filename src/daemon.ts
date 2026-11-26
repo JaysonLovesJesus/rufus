@@ -99,10 +99,14 @@ export class RufusCore {
     return { loadedTools: disk.loaded, toolErrors: disk.errors };
   }
 
-  /** Processes one incoming event through the $0 Bouncer and (if WAKE) the RPG loop. */
-  async processEvent(event: LosslessEvent): Promise<ProcessEventResult> {
+  /** Processes one incoming event (plus any simultaneous batch/mid-wake arrivals) through the $0 Bouncer and RPG loop. */
+  async processEvent(
+    event: LosslessEvent,
+    opts: { pollIncoming?: () => Promise<LosslessEvent[]>; additionalEvents?: LosslessEvent[] } = {},
+  ): Promise<ProcessEventResult> {
     await this.init();
     await this.events.append(event);
+    for (const extra of opts.additionalEvents ?? []) await this.events.append(extra);
     const decision = await this.bouncer.decide(event);
 
     if (decision.label === 'SLEEP') {
@@ -134,6 +138,8 @@ export class RufusCore {
         maxTurns: this.maxTurnsPerWake,
         now: this.now,
         onReceipt: (r) => this.wakeReceipts.push(r),
+        ...(opts.pollIncoming ? { pollIncoming: opts.pollIncoming } : {}),
+        ...(opts.additionalEvents?.length ? { additionalEvents: opts.additionalEvents } : {}),
       });
     } finally {
       const rufusReacted = this.wakeReceipts.some((r) => r.toolId === 'react_message' && r.status === 'ok');

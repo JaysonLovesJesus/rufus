@@ -114,9 +114,13 @@ async function main(argv: string[]): Promise<void> {
       while (!stop.signal.aborted) {
         if (tg) {
           const incoming = await tg.poll().catch(() => []);
-          for (const ev of incoming) {
-            const res = await core.processEvent(ev);
-            console.log(`[${ev.id}] bouncer=${res.decision.label} (${res.decision.backend}) turns=${res.wake?.turns ?? 0}`);
+          if (incoming.length) {
+            const [first, ...extras] = incoming;
+            const res = await core.processEvent(first!, {
+              additionalEvents: extras,
+              pollIncoming: () => tg.poll().catch(() => []),
+            });
+            console.log(`[${first!.id}${extras.length ? ` +${extras.length}` : ''}] bouncer=${res.decision.label} (${res.decision.backend}) turns=${res.wake?.turns ?? 0}`);
           }
         }
         await new Promise<void>((resolve) => {

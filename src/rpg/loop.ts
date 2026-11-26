@@ -17,6 +17,10 @@ export interface RpgWakeOptions {
   topKContext?: number;
   now?: () => Date;
   onReceipt?: (receipt: Receipt) => void;
+  /** Optional live poller: drains newly arrived events between RPG turns so the consciousness folds them in live. */
+  pollIncoming?: () => Promise<LosslessEvent[]>;
+  /** Extra events that arrived in the same batch as the trigger. */
+  additionalEvents?: LosslessEvent[];
 }
 
 const RPG_SYSTEM = [
@@ -128,6 +132,7 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
   let sleepReason: string | undefined;
 
   const liveContext = await gatherLiveContext(opts.workspaceDir);
+  const arrivals: LosslessEvent[] = [...(opts.additionalEvents ?? [])];
   // Retrieve semantically relevant past events once for this wake
   const related = await opts.events.search(opts.trigger.text, topKContext, { excludeIds: [opts.trigger.id] });
   const relatedBlock = related.length
@@ -143,13 +148,27 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
   let turns = 0;
   for (let turn = 0; turn < maxTurns; turn++) {
     turns = turn + 1;
-    const query = [opts.trigger.text, ...receipts.slice(-2).map((r) => `${r.summary} ${(r.nextHints ?? []).join(' ')}`)].join(' ');
+    // Between turns (while model is OFF), drain any new messages that arrived while working
+    if (opts.pollIncoming) {
+      const fresh = await opts.pollIncoming().catch(() => []);
+      for (const f of fresh) {
+        await opts.events.append(f);
+        arrivals.push(f);
+      }
+    }
+    const arrivalBlock = arrivals.length
+      ? `NEW messages that arrived while you were working (fold these into your current context & plan):\n${arrivals
+          .map((e) => `- [${e.timestamp}] (${e.source}${e.actor ? ` / ${e.actor}` : ''}): ${e.text}`)
+          .join('\n')}`
+      : '';
+    const query = [opts.trigger.text, ...arrivals.map((a) => a.text), ...receipts.slice(-2).map((r) => `${r.summary} ${(r.nextHints ?? []).join(' ')}`)].join(' ');
     const tools = await opts.registry.selectForPrompt(query, topKTools);
 
     const prompt = [
       `Current time: ${now().toISOString()}`,
       `Live Context (schedule, todos, projects):\n${liveContext}`,
       `Trigger Event:\n[${opts.trigger.timestamp}] (${opts.trigger.source}${opts.trigger.actor ? ` / ${opts.trigger.actor}` : ''}${opts.trigger.deleted ? ' / DELETED' : ''}): ${opts.trigger.text}`,
+      ...(arrivalBlock ? [arrivalBlock] : []),
       `Relevant Past Events (embedded retrieval):\n${relatedBlock}`,
       `Receipts So Far (exact ground truth):\n${formatReceiptsForPrompt(receipts)}`,
       `Available Packaged Scripts (top ${topKTools} embedded + core):\n${formatToolsForPrompt(tools)}`,
