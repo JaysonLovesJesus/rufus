@@ -27,6 +27,7 @@ export {
   buildDefaultConnectors,
   type EventConnector,
 } from './events/connectors';
+export { startEventWebhook, type WebhookOptions } from './events/webhook';
 export { Bouncer } from './bouncer/bouncer';
 export { ClaudeCliProvider, FakeProvider } from './providers/claude';
 export { selectRelevantSkills, type SkillDoc } from './skills/skills';
