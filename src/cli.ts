@@ -82,21 +82,23 @@ async function main(argv: string[]): Promise<void> {
     const intervalMs = Number(process.env.RUFUS_HEARTBEAT_MS || 5000);
     let tgToken = process.env.TELEGRAM_BOT_TOKEN;
     let tgChatId = process.env.TELEGRAM_CHAT_ID;
-    if (!tgToken || !tgChatId) {
-      for (const cfgPath of [path.join(dir, 'config.json'), path.join(os.homedir(), '.rufus', 'config.json')]) {
-        try {
-          const cfg = JSON.parse(await fs.readFile(cfgPath, 'utf8')) as { telegram?: { token?: string; chatId?: string | number } };
-          if (cfg.telegram?.token && cfg.telegram?.chatId) {
-            tgToken = cfg.telegram.token;
-            tgChatId = String(cfg.telegram.chatId);
-            break;
-          }
-        } catch {
-          /* ignore */
+    let stt: { command: string; args: string[] } | undefined;
+    for (const cfgPath of [path.join(dir, 'config.json'), path.join(os.homedir(), '.rufus', 'config.json')]) {
+      try {
+        const cfg = JSON.parse(await fs.readFile(cfgPath, 'utf8')) as {
+          telegram?: { token?: string; chatId?: string | number; transcribe?: { command: string; args: string[] } };
+          voice?: { stt?: { command: string; args: string[] } };
+        };
+        if ((!tgToken || !tgChatId) && cfg.telegram?.token && cfg.telegram?.chatId) {
+          tgToken = cfg.telegram.token;
+          tgChatId = String(cfg.telegram.chatId);
         }
+        if (!stt) stt = cfg.voice?.stt ?? cfg.telegram?.transcribe;
+      } catch {
+        /* ignore */
       }
     }
-    const tg = tgToken && tgChatId ? new TelegramChannel({ token: tgToken, chatId: tgChatId }) : undefined;
+    const tg = tgToken && tgChatId ? new TelegramChannel({ token: tgToken, chatId: tgChatId, ...(stt ? { stt } : {}) }) : undefined;
     const core = new RufusCore({
       workspaceDir: dir,
       reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus' }),

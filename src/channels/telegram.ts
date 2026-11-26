@@ -1,20 +1,55 @@
+import { execFile } from 'node:child_process';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import type { LosslessEvent, MessageSink } from '../types';
 import { messageEvent } from '../events/ingest';
+
+const execFileAsync = promisify(execFile);
 
 export interface TelegramConfig {
   token: string;
   chatId: string;
+  stt?: { command: string; args: string[] };
 }
 
-/** Minimal zero-dependency Telegram Bot API channel (poll + send). */
+/** Minimal zero-dependency Telegram Bot API channel (lossless text + voice + media poll, send, edit, react). */
 export class TelegramChannel implements MessageSink {
   private readonly base: string;
+  private readonly fileBase: string;
   private readonly chatId: string;
+  private readonly stt?: { command: string; args: string[] };
   private offset = 0;
 
   constructor(cfg: TelegramConfig) {
     this.base = `https://api.telegram.org/bot${cfg.token}`;
+    this.fileBase = `https://api.telegram.org/file/bot${cfg.token}`;
     this.chatId = String(cfg.chatId);
+    if (cfg.stt) this.stt = cfg.stt;
+  }
+
+  private async transcribeVoice(fileId: string): Promise<string> {
+    if (!this.stt) return '[voice note — no local transcriber configured]';
+    const infoRes = await fetch(`${this.base}/getFile?file_id=${encodeURIComponent(fileId)}`);
+    if (!infoRes.ok) return '[voice note — failed to fetch file info]';
+    const info = (await infoRes.json()) as { ok?: boolean; result?: { file_path?: string } };
+    const remotePath = info.result?.file_path;
+    if (!remotePath) return '[voice note — missing file path]';
+    const audioRes = await fetch(`${this.fileBase}/${remotePath}`);
+    if (!audioRes.ok) return '[voice note — failed to download audio]';
+    const ext = path.extname(remotePath) || '.ogg';
+    const tmpFile = path.join(os.tmpdir(), `rufus-voice-${Date.now()}${ext}`);
+    try {
+      await fs.writeFile(tmpFile, Buffer.from(await audioRes.arrayBuffer()));
+      const args = this.stt.args.map((a) => a.replace(/\{file\}/g, tmpFile));
+      const { stdout } = await execFileAsync(this.stt.command, args, { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 });
+      return stdout.trim() || '[voice note — empty transcript]';
+    } catch (err) {
+      return `[voice note — transcription failed: ${err instanceof Error ? err.message : String(err)}]`;
+    } finally {
+      await fs.rm(tmpFile, { force: true }).catch(() => undefined);
+    }
   }
 
   async send(text: string): Promise<{ messageId?: string }> {
@@ -62,9 +97,14 @@ export class TelegramChannel implements MessageSink {
           message_id: number;
           date: number;
           text?: string;
+          caption?: string;
+          voice?: { file_id: string; duration?: number };
+          audio?: { file_id: string; duration?: number };
+          photo?: Array<{ file_id: string }>;
+          document?: { file_id: string; file_name?: string };
           chat: { id: number };
           from?: { first_name?: string; username?: string };
-          reply_to_message?: { message_id: number; text?: string; from?: { first_name?: string; username?: string } };
+          reply_to_message?: { message_id: number; text?: string; caption?: string; from?: { first_name?: string; username?: string } };
         };
       }>;
     };
@@ -73,18 +113,31 @@ export class TelegramChannel implements MessageSink {
     for (const u of data.result) {
       this.offset = Math.max(this.offset, u.update_id + 1);
       const m = u.message;
-      if (!m?.text || String(m.chat.id) !== this.chatId) continue;
+      if (!m || String(m.chat.id) !== this.chatId) continue;
+
+      let text = m.text?.trim() || '';
+      let isVoice = false;
+      if (!text && (m.voice?.file_id || m.audio?.file_id)) {
+        isVoice = true;
+        text = await this.transcribeVoice((m.voice?.file_id ?? m.audio?.file_id)!);
+      } else if (!text) {
+        const tag = m.photo ? '[photo]' : m.document ? `[document: ${m.document.file_name || 'file'}]` : '[message]';
+        text = m.caption?.trim() ? `${tag} ${m.caption.trim()}` : tag;
+      }
+
+      const replyText = m.reply_to_message?.text || m.reply_to_message?.caption;
       const ev = messageEvent({
         id: `tg_${m.message_id}`,
         channel: 'telegram',
         actor: m.from?.first_name || m.from?.username || 'owner',
-        text: m.text,
+        text,
         timestamp: new Date(m.date * 1000).toISOString(),
         ...(m.reply_to_message ? { replyTo: `tg_${m.reply_to_message.message_id}` } : {}),
         metadata: {
           messageId: m.message_id,
           chatId: m.chat.id,
-          ...(m.reply_to_message?.text ? { replyToText: m.reply_to_message.text } : {}),
+          ...(isVoice ? { voice: true } : {}),
+          ...(replyText ? { replyToText: replyText } : {}),
         },
       });
       ev.kind = 'owner_direct';
