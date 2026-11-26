@@ -188,10 +188,11 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
       : '';
     const query = [opts.trigger.text, ...arrivals.map((a) => a.text), ...receipts.slice(-2).map((r) => `${r.summary} ${r.error ?? ''} ${(r.nextHints ?? []).join(' ')}`)].join(' ');
     const tools = await opts.registry.selectForPrompt(query, topKTools);
-    const skillsBlock = await selectRelevantSkills(opts.workspaceDir, query, { topK: 2, maxChars: 1000 });
+    const skillsBlock = await selectRelevantSkills(opts.workspaceDir, query, { topK: 2 });
 
     const prompt = [
       `Current local time: ${formatLocalTime(now())}`,
+      `Workspace path: ${opts.workspaceDir}`,
       `Live Context (schedule, todos, projects):\n${liveContext}`,
       ...(skillsBlock ? [`Relevant Judgment Skills:\n${skillsBlock}`] : []),
       `Trigger Event:\n[${formatLocalTime(opts.trigger.timestamp)}] (${opts.trigger.source}${opts.trigger.actor ? ` / ${opts.trigger.actor}` : ''}${opts.trigger.deleted ? ' / DELETED' : ''}): ${opts.trigger.text}`,

@@ -142,7 +142,7 @@ describe('Milestone 1: Packaged Script Standard & Text-Based RPG Loop', () => {
 
     const reasoning = new FakeProvider((_req, idx) => {
       if (idx === 0) return JSON.stringify({ thought: 'Archive the files', toolId: 'files.archive', input: { names: ['a', 'b', 'c'] } });
-      if (idx === 1) return JSON.stringify({ thought: 'Tell user it needs approval', toolId: 'send_message', input: { intent: 'Tell user archiving requires approval.' } });
+      if (idx === 1) return JSON.stringify({ thought: 'Tell user it needs approval', toolId: 'send_message', input: { facts: ['Archiving those 3 files requires your approval first.'] } });
       return JSON.stringify({ thought: 'Done', toolId: 'sleep', input: { reason: 'Waiting on approval' } });
     });
 

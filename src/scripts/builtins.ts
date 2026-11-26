@@ -23,29 +23,33 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
     {
       id: 'send_message',
       version: 1,
-      description: 'Renders a natural message from exact wake receipts using the fast speaker model and sends it to the user.',
-      whenToUse: ['You have a verified answer, update, or approval request to send to the user'],
+      description: 'Voices an exact list of verified facts into a concise natural message via the fast speaker model and sends it to the user.',
+      whenToUse: ['You have 1-3 verified facts or a question to send to the user'],
       effect: 'write',
       requiresApproval: false,
       timeoutMs: 30_000,
       inputSchema: {
         type: 'object',
         properties: {
-          intent: { type: 'string', description: 'What factual information or question to communicate.' },
+          facts: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Exact verified facts to communicate (1-3 tight bullets; never include internal retries or already-sent info).',
+          },
         },
-        required: ['intent'],
+        required: ['facts'],
         additionalProperties: false,
       },
-      exampleInput: { intent: 'Share the 3 events on today’s calendar.' },
+      exampleInput: { facts: ['Chapel is at 7:45 AM.', 'Study is at 12:00 PM.'] },
     },
     async (input, ctx) => {
-      const intent = String(input.intent ?? '').trim();
+      const facts = Array.isArray(input.facts) ? input.facts.map((x) => String(x).trim()).filter(Boolean) : [];
       const recentSent = deps.getRecentSent ? await deps.getRecentSent().catch(() => []) : [];
       const rendered = await renderWithSpeaker({
         workspaceDir: ctx.workspaceDir,
         provider: deps.speakerProvider,
         ...(deps.speakerModel ? { model: deps.speakerModel } : {}),
-        intent,
+        facts,
         receipts: deps.getWakeReceipts(),
         ...(recentSent.length ? { recentSent } : {}),
       });
@@ -66,7 +70,7 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
     {
       id: 'edit_message',
       version: 1,
-      description: 'Edits a previously sent message in place (instead of sending a duplicate correction message).',
+      description: 'Edits a previously sent message in place using an exact updated list of facts.',
       whenToUse: ['You noticed an omission or typo in a message you just sent and have its messageId from the receipt'],
       effect: 'write',
       requiresApproval: false,
@@ -75,20 +79,21 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
         type: 'object',
         properties: {
           messageId: { type: 'string', description: 'The messageId returned by send_message' },
-          intent: { type: 'string', description: 'The complete corrected information to render into the edited message' },
+          facts: { type: 'array', items: { type: 'string' }, description: 'The complete corrected facts to voice into the edited message' },
         },
-        required: ['messageId', 'intent'],
+        required: ['messageId', 'facts'],
         additionalProperties: false,
       },
     },
     async (input, ctx) => {
       if (!deps.sink.edit) return { ok: false, summary: 'This channel does not support editing messages.', error: 'edit not supported' };
       const messageId = String(input.messageId).trim();
+      const facts = Array.isArray(input.facts) ? input.facts.map((x) => String(x).trim()).filter(Boolean) : [];
       const rendered = await renderWithSpeaker({
         workspaceDir: ctx.workspaceDir,
         provider: deps.speakerProvider,
         ...(deps.speakerModel ? { model: deps.speakerModel } : {}),
-        intent: String(input.intent ?? '').trim(),
+        facts,
         receipts: deps.getWakeReceipts(),
       });
       await deps.sink.edit(messageId, rendered.text);

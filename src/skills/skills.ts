@@ -17,12 +17,11 @@ export interface SkillDoc {
 export async function selectRelevantSkills(
   workspaceDir: string,
   query: string,
-  opts: { topK?: number; minScore?: number; maxChars?: number; embedder?: Embedder } = {},
+  opts: { topK?: number; minScore?: number; embedder?: Embedder } = {},
 ): Promise<string> {
   const skillsDir = path.join(workspaceDir, 'skills');
   const topK = opts.topK ?? 2;
   const minScore = opts.minScore ?? 0.08;
-  const maxChars = opts.maxChars ?? 1200;
   const embedder = opts.embedder ?? createLocalEmbedder();
 
   let files: string[];
@@ -49,6 +48,5 @@ export async function selectRelevantSkills(
   const picked = topKBySimilarity(qVec, docs, topK).filter((r) => r.score >= minScore);
   if (!picked.length) return '';
 
-  const joined = picked.map((p) => p.item.body).join('\n\n');
-  return joined.length > maxChars ? `${joined.slice(0, maxChars - 1).trimEnd()}…` : joined;
+  return picked.map((p) => p.item.body).join('\n\n');
 }

@@ -84,43 +84,30 @@ export async function renderWithSpeaker(opts: {
   workspaceDir: string;
   provider: ModelProvider;
   model?: string;
-  intent: string;
+  facts: readonly string[];
   receipts: readonly Receipt[];
   recentSent?: readonly string[];
 }): Promise<{ text: string; violations: string[]; rewritten: boolean }> {
   const voice = await loadVoiceGuide(opts.workspaceDir);
-  const receiptBlock = opts.receipts.length
-    ? opts.receipts
-        .map(
-          (r, i) =>
-            `${i + 1}. [${r.toolId} | ${r.effect} | ${r.status}] ${r.summary}` +
-            (r.changes.length ? ` | changes: ${r.changes.join('; ')}` : '') +
-            (r.data !== undefined ? ` | data: ${typeof r.data === 'string' ? r.data : JSON.stringify(r.data)}` : ''),
-        )
-        .join('\n')
-    : '(none — no tools ran before this message)';
+  const factsBlock = opts.facts.map((f, i) => `${i + 1}. ${f}`).join('\n');
 
   const system = [
-    'You are the Speaker. Turn the Intent into one crisp, natural message in the voice below.',
-    'Rules:',
-    '- Communicate ONLY what the user actually cares about (guided by the Intent).',
-    '- Never repeat information you already sent in Recent Messages Below — only share what is new or give a brief, naturally varied acknowledgment.',
-    '- Use the Receipts strictly as a fact-check so you never invent or lie — NEVER narrate internal retries, earlier failed attempts, manifest/schema hiccups, or implementation details unless the final outcome actually failed or the user asked.',
-    '- Always speak in first person ("I", never third-person "Rufus is...").',
-    '- Keep replies brief and punchy (1-3 crisp sentences unless listing 3+ items).',
-    '- Always use the user’s local time (never UTC).',
-    '- Never open with "Done" if a tool failed or nothing changed.',
-    '- When listing 3+ items (or when the user asked "what are the N ...?"), output a clean numbered list with each item on its own line.',
-    '- No em-dashes, no "Hi <name>", no generic closers ("Want me to check anything?", "Ready when you are."), no raw JSON.',
+    'You are the Speaker. Your ONLY job is to phrase the exact Facts below in the Voice Guide.',
+    'Hard Rules:',
+    '- Phrase ONLY the Facts listed below. NEVER invent, add, or embellish any claim not in the Facts.',
+    '- Keep it tight: 1-2 short, natural sentences (unless the Facts contain a 3+ item list, in which case use a clean numbered list, one item per line).',
+    '- Never repeat information already covered in Recent Messages Below.',
+    '- Always speak in first person ("I"). Never quote UTC times. Never open with "Done" unless a Fact explicitly says an action completed.',
+    '- No em-dashes, no "Hi <name>", no generic closers ("Want me to...?"), no raw JSON.',
     '',
     'Voice Guide:',
     voice,
   ].join('\n');
 
   const recentBlock = opts.recentSent?.length
-    ? `\n\nMessages you ALREADY sent recently (do not repeat facts already covered here):\n${opts.recentSent.map((m, i) => `${i + 1}. ${m}`).join('\n')}`
+    ? `\n\nMessages you ALREADY sent recently (do not repeat these facts):\n${opts.recentSent.map((m, i) => `${i + 1}. ${m}`).join('\n')}`
     : '';
-  const prompt = `Intent to communicate:\n${opts.intent}\n\nImmutable Receipts from this wake:\n${receiptBlock}${recentBlock}\n\nWrite ONLY the final message to send.`;
+  const prompt = `Exact Facts to voice (say ONLY these — nothing extra):\n${factsBlock}${recentBlock}\n\nWrite ONLY the final message.`;
 
   let text = normalizeMultiline(await opts.provider.complete({ system, prompt, ...(opts.model ? { model: opts.model } : {}) }));
   let violations = verifySpokenReply(text, opts.receipts);
