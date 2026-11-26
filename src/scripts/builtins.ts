@@ -16,6 +16,7 @@ export interface BuiltinDeps {
   getWakeReceipts: () => readonly Receipt[];
   getRecentSent?: () => Promise<string[]>;
   onSent: (text: string) => void;
+  onFact?: (fact: { topic: string; text: string }) => Promise<void>;
   onSleep: (reason: string) => void;
 }
 
@@ -245,6 +246,34 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
         data: { id, testOutput: res.testOutput },
         nextHints: [id],
       };
+    },
+    { alwaysVisible: true },
+  );
+
+  await registry.registerInline(
+    {
+      id: 'facts.save',
+      version: 1,
+      description: 'Saves a factual note about the user, people, contacts, dates, or projects into the embedded knowledge store (NOT a skill).',
+      whenToUse: ['User shares a fact, nickname, contact detail, date, or personal context to remember (e.g. "Alex is my brother", "flight is Dec 10")'],
+      effect: 'write',
+      requiresApproval: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          topic: { type: 'string', description: 'Short topic tag (e.g. "contact", "travel", "project")' },
+          fact: { type: 'string', description: 'Clear 1-2 sentence factual statement' },
+        },
+        required: ['topic', 'fact'],
+        additionalProperties: false,
+      },
+      exampleInput: { topic: 'contact', fact: 'Alex is my brother.' },
+    },
+    async (input) => {
+      const topic = String(input.topic).trim();
+      const text = String(input.fact).trim();
+      if (deps.onFact) await deps.onFact({ topic, text });
+      return { ok: true, summary: `Saved fact (${topic}): ${text}`, changes: [`fact_saved:${topic}`] };
     },
     { alwaysVisible: true },
   );

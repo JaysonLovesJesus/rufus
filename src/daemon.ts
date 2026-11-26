@@ -103,6 +103,11 @@ export class RufusCore {
           genericEvent({ source: 'message', kind: 'assistant_sent', actor: 'rufus', text, timestamp: this.now().toISOString() }),
         );
       },
+      onFact: async ({ topic, text }) => {
+        await this.events.append(
+          genericEvent({ source: 'fact', kind: topic, actor: 'rufus', text, timestamp: this.now().toISOString() }),
+        );
+      },
       onSleep: () => undefined,
     });
     const disk = await this.registry.loadFromDisk();
