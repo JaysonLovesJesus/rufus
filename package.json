@@ -1,7 +1,7 @@
 {
   "name": "rufus",
   "version": "0.1.0",
-  "description": "A personal AI chief of staff powered by a fast local SetFit bouncer, packaged scripts, and a turn-based RPG consciousness loop.",
+  "description": "A personal AI chief of staff where code owns reality and AI owns judgment.",
   "license": "MIT",
   "type": "module",
   "private": true,

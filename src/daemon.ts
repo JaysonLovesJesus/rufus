@@ -219,5 +219,7 @@ export class RufusCore {
 
   async close(): Promise<void> {
     await this.bouncer.close();
+    (this.reasoningProvider as { close?: () => void }).close?.();
+    (this.speakerProvider as { close?: () => void }).close?.();
   }
 }
