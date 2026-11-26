@@ -60,12 +60,18 @@ import { curateMemoryDream, describeDream, formatMemoryForPrompt, loadMarkdownMe
 import { listSkills, loadSkill } from './skills/skills';
 import { demoInput, demoProvider, triageDraft } from '../examples/triage-draft.flow';
 import { formatBenchmark, runStrategyBenchmark } from './engine/strategy-benchmark';
+import { formatSetupReport, runSetup, type SetupEnv } from './unified/setup';
 
 const PRIMARY_USAGE = `rufus - your AI + Code + Human chief of staff
 
 Usage: rufus [--dir <workspace>] <command>      (workspace: ~/.rufus, or $RUFUS_HOME)
 
 Primary commands:
+  setup [--non-interactive] [--check]
+                               self-onboarding: detects claude / codex / gemini, voice tools and Beeper Desktop,
+                               writes config.json if missing and copies the starter Layer 3 (SOUL.md, USER.md,
+                               MEMORY.md, taste.mjs, boundaries.mjs, frameworks/) without overwriting anything.
+                               --check = readiness checklist only (config, provider, Layer 3 code imports and runs)
   start [--once] [--interval <30s>] [--checkin <2h>] [--channel telegram|beeper]
                                the one daemon: senses your apps and inbox.jsonl, plans, executes, verifies, and texts
                                you what needs you as plain text (urgent now, the rest batched into check-ins).
@@ -240,6 +246,8 @@ export interface MainOptions {
   fetch?: typeof fetch;
   /** Injectable for tests: the clock. */
   now?: () => Date;
+  /** Injectable for tests: environment variables `rufus setup` detects with (PATH). Default `process.env`. */
+  env?: SetupEnv;
 }
 
 function describeStartTick(r: StartTickReport): string[] {
@@ -298,6 +306,8 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   const allowOverlap = bool('--allow-overlap');
   const showAll = bool('--all');
   const verbose = bool('--verbose');
+  const nonInteractive = bool('--non-interactive');
+  const checkOnly = bool('--check');
   let dir = process.env.RUFUS_HOME ?? path.join(os.homedir(), '.rufus');
   const flags: Record<string, string | undefined> = {};
   for (const flag of ['--dir', '--checkin', '--reply', '--limit', '--interval', '--scope', '--sample', '--layer', '--older-than', '--max-unused', '--channel', '--flow', '--step', '--provider', '--me', '--ignore', '--source', '--since', '--half-life', '--model', '--count', '--mode', '--priority', '--horizon', '--notes', '--date', '--output', '--data', '--context', '--hours', '--out']) {
@@ -317,6 +327,19 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
   if (cmd === 'benchmark') {
     const result = runStrategyBenchmark();
     return io.out(asJson ? JSON.stringify(result, null, 2) : formatBenchmark(result, { verbose }));
+  }
+  // v25b: setup runs before the store is initialized, so a fresh workspace gets the detected config.json, not a blank one.
+  if (cmd === 'setup') {
+    const interactive = !nonInteractive && !checkOnly && process.stdin.isTTY === true;
+    const rl = interactive ? (await import('node:readline/promises')).createInterface({ input: process.stdin, output: process.stdout }) : undefined;
+    try {
+      const report = await runSetup({ dir, nonInteractive: !interactive, checkOnly, env: options.env, fetch: options.fetch, ...(rl ? { ask: (q: string) => rl.question(q) } : {}) });
+      for (const line of formatSetupReport(report)) io.out(line);
+      if (!report.check.ok) process.exitCode = 1;
+    } finally {
+      rl?.close();
+    }
+    return;
   }
 
   const store = new FileStore(dir);

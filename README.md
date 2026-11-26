@@ -20,6 +20,32 @@ Around all five pieces runs **[one Master Loop](#the-one-master-loop-v11)**: `Se
 
 **The one primary path is [`rufus start`](#one-daemon-rufus-start-v12)**: a single daemon that senses your apps, works the loop with real tools, and texts you only what needs you, in plain text you answer with `1`, `2` or `edit: ...`. `rufus now` is the one-screen status.
 
+### Get started in one command: `rufus setup` (v25b)
+
+```sh
+git clone <this repo> && cd rufus && pnpm install
+pnpm rufus setup              # detect, write config.json, copy the starter Layer 3, print a readiness checklist
+pnpm rufus setup --check      # validate only: writes nothing, exits 1 when something needs fixing
+pnpm rufus start
+```
+
+`setup` detects the provider CLIs on your PATH (`claude`, then `codex`, then `gemini`), local voice tools (`say`, `ffmpeg`, `whisper-cli`) and whether Beeper Desktop's API answers on `127.0.0.1:23373`. When there is no `config.json` it writes one from what it found (asking for your default provider and quiet hours in a terminal; `--non-interactive` takes the defaults). Claude is always configured as `claude -p ... --tools ""`, so the Claude CLI never runs its own tools or stops on its own permission prompts: Rufus owns the tools, behind Verify, Earned Trust and the audit log.
+
+It then copies the starter **Layer 3** from [`templates/layer3/`](templates/layer3) into your workspace. Both steps only add what is missing: an existing `config.json` (and its secrets) and every file you have edited are never overwritten, so re-running `setup` is always safe and restores anything you deleted.
+
+| File | What it is |
+| --- | --- |
+| `SOUL.md`, `USER.md`, `MEMORY.md` | your chief of staff's identity, who you are (style, people, boundaries, setup), active projects and settled decisions |
+| `taste.mjs` | `verifyDraft(text, ctx)`: blocks flattering openers, leaked internal paths (`src/...`, `.ts`, `.json`) and "want me to look it up?" punts |
+| `boundaries.mjs` | `canActNow(ctx)`: quiet hours, and always ask first on `money` and `login` |
+| `frameworks/operator` | ship side projects on your own; `verify.mjs` blocks a "done" report without passing code checks |
+| `frameworks/decisions` | the CEO Decision Packet; `verify.mjs` blocks asks missing options, tradeoffs, a recommendation or next steps |
+| `frameworks/triage` | react vs. reply vs. ignore |
+| `frameworks/research` | answer it yourself; `verify.mjs` blocks punts and uncited answers |
+| `frameworks/voice` | spoken cadence; `verify.mjs` blocks markdown, URLs, file paths and more than three sentences |
+
+Every `.mjs` is plain, dependency-free JavaScript: edit the rules to your own taste. `setup --check` imports each one in a fresh Node process and calls it once, so a typo shows up as `[x] taste.mjs: does not load: ...` before it can reach a message. In code: `runSetup({ dir, nonInteractive, checkOnly, templateDir, env })`, `detectEnvironment()` and `checkWorkspace(dir)`.
+
 ### Run 100% on Google Gemini
 
 No Claude needed. Put a key in your environment (`export GEMINI_API_KEY=...`; it is sent in the `x-goog-api-key` header, never in a URL) and use this `config.json` in your workspace:
