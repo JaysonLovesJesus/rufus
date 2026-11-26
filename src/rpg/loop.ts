@@ -32,6 +32,8 @@ export interface RpgWakeOptions {
   topKContext?: number;
   now?: () => Date;
   onReceipt?: (receipt: Receipt) => void;
+  /** Optional callback whenever wake context (arrivals + related events) is updated. */
+  onWakeContext?: (ctx: { trigger: LosslessEvent; arrivals: readonly LosslessEvent[]; relatedEvents: readonly LosslessEvent[] }) => void;
   /** Optional live poller: drains newly arrived events between RPG turns so the consciousness folds them in live. */
   pollIncoming?: () => Promise<LosslessEvent[]>;
   /** Extra events that arrived in the same batch as the trigger. */
@@ -161,6 +163,8 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
     : '(none)';
   // Retrieve semantically relevant past events once for this wake
   const related = await opts.events.search(opts.trigger.text, topKContext, { excludeIds: [opts.trigger.id] });
+  const relatedEvents = related.map((r) => r.event);
+  opts.onWakeContext?.({ trigger: opts.trigger, arrivals, relatedEvents });
   const relatedBlock = related.length
     ? related
         .map(
@@ -181,6 +185,7 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
         await opts.events.append(f);
         arrivals.push(f);
       }
+      if (fresh.length) opts.onWakeContext?.({ trigger: opts.trigger, arrivals, relatedEvents });
     }
     const arrivalBlock = arrivals.length
       ? `NEW messages that arrived while you were working (fold these into your current context & plan):\n${arrivals

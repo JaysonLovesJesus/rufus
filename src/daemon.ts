@@ -9,6 +9,7 @@ import { EventStore } from './events/store';
 import { runRpgWake } from './rpg/loop';
 import { registerBuiltins } from './scripts/builtins';
 import { ToolRegistry } from './scripts/registry';
+import type { SpeakerWakeContext } from './speaker/speaker';
 
 export interface DaemonOptions {
   workspaceDir: string;
@@ -49,8 +50,9 @@ export class RufusCore {
   private readonly maxTurnsPerWake: number;
   private readonly now: () => Date;
   private wakeReceipts: Receipt[] = [];
-  private wakeTrigger?: LosslessEvent;
+  private wakeContext?: SpeakerWakeContext;
   private activeSink?: MessageSink;
+  private wakeQueue: Promise<unknown> = Promise.resolve();
   private initialized = false;
 
   constructor(opts: DaemonOptions) {
@@ -98,7 +100,7 @@ export class RufusCore {
       sink,
       getActiveSink: () => this.activeSink ?? sink,
       getWakeReceipts: () => this.wakeReceipts,
-      getWakeTrigger: () => this.wakeTrigger,
+      getWakeContext: () => this.wakeContext,
       getRecentSent: async () =>
         (await this.events.recent(25))
           .filter((e) => e.source === 'message' && e.kind === 'assistant_sent')
@@ -119,8 +121,18 @@ export class RufusCore {
     return { loadedTools: disk.loaded, toolErrors: disk.errors };
   }
 
-  /** Processes one incoming event (plus any simultaneous batch/mid-wake arrivals) through the $0 Bouncer and RPG loop. */
+  /** Processes one incoming event through the Bouncer and RPG loop (strictly serialized: ONE wake at a time). */
   async processEvent(
+    event: LosslessEvent,
+    opts: { pollIncoming?: () => Promise<LosslessEvent[]>; additionalEvents?: LosslessEvent[]; sinkOverride?: MessageSink } = {},
+  ): Promise<ProcessEventResult> {
+    const run = () => this.processEventSerial(event, opts);
+    const next = this.wakeQueue.then(run, run);
+    this.wakeQueue = next.then(() => undefined, () => undefined);
+    return next;
+  }
+
+  private async processEventSerial(
     event: LosslessEvent,
     opts: { pollIncoming?: () => Promise<LosslessEvent[]>; additionalEvents?: LosslessEvent[]; sinkOverride?: MessageSink } = {},
   ): Promise<ProcessEventResult> {
@@ -141,7 +153,7 @@ export class RufusCore {
     }
 
     this.wakeReceipts = [];
-    this.wakeTrigger = event;
+    this.wakeContext = { trigger: event, arrivals: opts.additionalEvents ?? [] };
     this.activeSink = opts.sinkOverride;
     // Instant $0 status reaction: ⚡ while awake & working, cleared when back to sleep (unless Rufus chose his own reaction)
     const msgId = !this.shadow && !opts.sinkOverride && event.metadata?.messageId !== undefined ? String(event.metadata.messageId) : undefined;
@@ -160,12 +172,15 @@ export class RufusCore {
         maxTurns: this.maxTurnsPerWake,
         now: this.now,
         onReceipt: (r) => this.wakeReceipts.push(r),
+        onWakeContext: (ctx) => {
+          this.wakeContext = ctx;
+        },
         ...(opts.pollIncoming ? { pollIncoming: opts.pollIncoming } : {}),
         ...(opts.additionalEvents?.length ? { additionalEvents: opts.additionalEvents } : {}),
       });
     } finally {
       this.activeSink = undefined;
-      this.wakeTrigger = undefined;
+      this.wakeContext = undefined;
       const rufusReacted = this.wakeReceipts.some((r) => r.toolId === 'react_message' && r.status === 'ok');
       if (msgId && this.realSink.react && !rufusReacted) {
         await this.realSink.react(msgId, null).catch(() => undefined);

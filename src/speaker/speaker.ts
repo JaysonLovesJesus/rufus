@@ -81,24 +81,24 @@ async function loadVoiceGuide(workspaceDir: string): Promise<string> {
   }
 }
 
-export function selectReceiptsForSpeaker(receipts: readonly Receipt[], receiptTurns?: readonly number[]): Receipt[] {
-  if (receiptTurns?.length) {
-    const picked = receiptTurns
-      .map((n) => receipts[n - 1])
-      .filter((r): r is Receipt => !!r && r.toolId !== 'send_message' && r.toolId !== 'edit_message' && r.toolId !== 'sleep');
-    if (picked.length) return picked;
-  }
-  const meaningful = receipts.filter((r) => r.toolId !== 'send_message' && r.toolId !== 'edit_message' && r.toolId !== 'sleep');
-  const okOnes = meaningful.filter((r) => r.status === 'ok' || r.status === 'pending_approval');
-  if (okOnes.length) return okOnes;
-  return meaningful.length ? [meaningful[meaningful.length - 1]!] : [];
+export interface SpeakerWakeContext {
+  trigger?: LosslessEvent;
+  arrivals?: readonly LosslessEvent[];
+  relatedEvents?: readonly LosslessEvent[];
+}
+
+function formatEventLine(e: LosslessEvent): string {
+  const ts = new Date(e.timestamp);
+  const when = Number.isNaN(ts.getTime())
+    ? e.timestamp
+    : ts.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  return `- [${when}] (${e.source}/${e.kind}${e.actor ? ` | ${e.actor}` : ''}): ${e.text.slice(0, 320)}`;
 }
 
 /**
- * Pure fresh-context fast model (Haiku) speaker.
- * Code owns the Facts (clean, final Receipts — never failed retries or stale old messages).
- * Opus owns the Purpose (1 short line: why to send this message).
- * Haiku owns the Voice (VOICE.md) + $0 universal truth & formatting gate.
+ * Fresh-context fast model (Haiku) speaker.
+ * Code passes the full structured Wake Context + all Receipts from this wake.
+ * Opus passes the short Purpose; Haiku voices it via VOICE.md + deterministic truth gate.
  */
 export async function renderWithSpeaker(opts: {
   workspaceDir: string;
@@ -106,13 +106,23 @@ export async function renderWithSpeaker(opts: {
   model?: string;
   purpose: string;
   receipts: readonly Receipt[];
-  receiptTurns?: readonly number[];
-  trigger?: LosslessEvent;
+  wakeContext?: SpeakerWakeContext;
 }): Promise<{ text: string; violations: string[]; rewritten: boolean }> {
   const voice = await loadVoiceGuide(opts.workspaceDir);
-  const selected = selectReceiptsForSpeaker(opts.receipts, opts.receiptTurns);
-  const receiptBlock = selected.length
-    ? selected
+
+  const ctxLines: string[] = [];
+  if (opts.wakeContext?.trigger) ctxLines.push(`Trigger:\n${formatEventLine(opts.wakeContext.trigger)}`);
+  if (opts.wakeContext?.arrivals?.length) {
+    ctxLines.push(`Arrived mid-wake:\n${opts.wakeContext.arrivals.map(formatEventLine).join('\n')}`);
+  }
+  if (opts.wakeContext?.relatedEvents?.length) {
+    ctxLines.push(`Relevant past events:\n${opts.wakeContext.relatedEvents.map(formatEventLine).join('\n')}`);
+  }
+  const wakeContextBlock = ctxLines.length ? ctxLines.join('\n\n') : '(none)';
+
+  const meaningful = opts.receipts.filter((r) => r.toolId !== 'send_message' && r.toolId !== 'edit_message' && r.toolId !== 'sleep');
+  const receiptBlock = meaningful.length
+    ? meaningful
         .map(
           (r, i) =>
             `${i + 1}. [${r.toolId} | ${r.status}] ${r.summary}` +
@@ -123,25 +133,23 @@ export async function renderWithSpeaker(opts: {
         .join('\n')
     : '(none — no tools ran before this message)';
 
-  const triggerFact = opts.trigger
-    ? `0. [trigger | ${opts.trigger.source}/${opts.trigger.kind}${opts.trigger.actor ? ` | ${opts.trigger.actor}` : ''}] ${opts.trigger.text.slice(0, 260)}`
-    : '';
-  const allFacts = [triggerFact, ...(selected.length ? [receiptBlock] : [])].filter(Boolean).join('\n') || '(none)';
-
   const system = [
-    'You are the Speaker. Voice the Purpose below using ONLY the verified Facts from Code.',
+    'You are the Speaker. Voice the Purpose below for the user using ONLY the real Wake Context and Receipts from Code.',
     'Hard Rules:',
-    '- Honor the Purpose directly (never drop the main point, e.g., that you restarted or answered the question).',
-    '- Use ONLY the Facts below — never invent or claim any change not in `changes`.',
-    '- Keep it tight: 1-2 short, natural sentences (unless listing 3+ items, in which case use a clean numbered list, one item per line).',
-    '- First person only ("I"). Never quote UTC times. Never open with "Done" unless a write succeeded.',
-    '- No em-dashes, no "Hi <name>", no generic closers ("Want me to...?"), no raw JSON.',
+    '- Honor the Purpose directly.',
+    '- Never invent facts or claim any change that did not actually happen in the Receipts.',
+    '- First person only ("I"). Never quote UTC times.',
     '',
     'Voice Guide:',
     voice,
   ].join('\n');
 
-  const prompt = `Purpose of this message:\n${opts.purpose}\n\nVerified Facts from Code:\n${allFacts}\n\nWrite ONLY the final message.`;
+  const prompt = [
+    `Purpose of this message:\n${opts.purpose}`,
+    `Wake Context (with real timestamps):\n${wakeContextBlock}`,
+    `Receipts from This Wake:\n${receiptBlock}`,
+    'Write ONLY the final message.',
+  ].join('\n\n');
 
   let text = normalizeMultiline(await opts.provider.complete({ system, prompt, ...(opts.model ? { model: opts.model } : {}) }));
   let violations = verifySpokenReply(text, opts.receipts);

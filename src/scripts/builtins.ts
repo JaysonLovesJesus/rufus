@@ -2,8 +2,8 @@ import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import type { LosslessEvent, MessageSink, ModelProvider, Receipt, ToolManifest } from '../types';
-import { renderWithSpeaker } from '../speaker/speaker';
+import type { MessageSink, ModelProvider, Receipt, ToolManifest } from '../types';
+import { renderWithSpeaker, type SpeakerWakeContext } from '../speaker/speaker';
 import type { ToolRegistry } from './registry';
 
 const execFileAsync = promisify(execFile);
@@ -15,7 +15,7 @@ export interface BuiltinDeps {
   sink: MessageSink;
   getActiveSink?: () => MessageSink;
   getWakeReceipts: () => readonly Receipt[];
-  getWakeTrigger?: () => LosslessEvent | undefined;
+  getWakeContext?: () => SpeakerWakeContext | undefined;
   getRecentSent?: () => Promise<string[]>;
   onSent: (text: string) => void;
   searchMemory?: (query: string, opts?: { source?: string; limit?: number }) => Promise<Array<{ event: { id: string; timestamp: string; source: string; kind: string; actor?: string; text: string; deleted?: boolean; reactions?: Array<{ emoji: string; actor?: string }> }; score: number }>>;
@@ -38,30 +38,23 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
       inputSchema: {
         type: 'object',
         properties: {
-          purpose: { type: 'string', description: 'Short 3-8 word factual reason for this message (e.g. "announce restart", "confirm rule saved"). Never include styling/formatting instructions.' },
-          receiptTurns: {
-            type: 'array',
-            items: { type: 'number' },
-            description: 'Optional 1-based turn numbers of the Receipts containing the facts to voice (defaults to all successful Receipts from this wake).',
-          },
+          purpose: { type: 'string', description: 'Short factual reason for this message (e.g. "announce restart", "answer ticket confirmation question").' },
         },
         required: ['purpose'],
         additionalProperties: false,
       },
-      exampleInput: { purpose: 'Notify user I restarted and share the latest update.', receiptTurns: [1] },
+      exampleInput: { purpose: 'Notify user I restarted and share the latest update.' },
     },
     async (input, ctx) => {
       const purpose = String(input.purpose ?? '').trim();
-      const receiptTurns = Array.isArray(input.receiptTurns) ? input.receiptTurns.map(Number).filter((n) => Number.isInteger(n) && n > 0) : undefined;
-      const trigger = deps.getWakeTrigger?.();
+      const wakeContext = deps.getWakeContext?.();
       const rendered = await renderWithSpeaker({
         workspaceDir: ctx.workspaceDir,
         provider: deps.speakerProvider,
         ...(deps.speakerModel ? { model: deps.speakerModel } : {}),
         purpose,
         receipts: deps.getWakeReceipts(),
-        ...(receiptTurns?.length ? { receiptTurns } : {}),
-        ...(trigger ? { trigger } : {}),
+        ...(wakeContext ? { wakeContext } : {}),
       });
       const activeSink = deps.getActiveSink ? deps.getActiveSink() : deps.sink;
       const sent = await activeSink.send(rendered.text);
@@ -81,7 +74,7 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
     {
       id: 'edit_message',
       version: 1,
-      description: 'Edits a previously sent message in place using a Purpose + verified Code Receipts.',
+      description: 'Edits a previously sent message in place using a Purpose + the current wake context and Receipts.',
       whenToUse: ['You noticed an omission or typo in a message you just sent and have its messageId from the receipt'],
       effect: 'write',
       requiresApproval: false,
@@ -91,26 +84,26 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
         properties: {
           messageId: { type: 'string', description: 'The messageId returned by send_message' },
           purpose: { type: 'string', description: 'The corrected purpose for this message' },
-          receiptTurns: { type: 'array', items: { type: 'number' }, description: 'Optional 1-based Receipt turn numbers' },
         },
         required: ['messageId', 'purpose'],
         additionalProperties: false,
       },
     },
     async (input, ctx) => {
-      if (!deps.sink.edit) return { ok: false, summary: 'This channel does not support editing messages.', error: 'edit not supported' };
+      const activeSink = deps.getActiveSink ? deps.getActiveSink() : deps.sink;
+      if (!activeSink.edit) return { ok: false, summary: 'This channel does not support editing messages.', error: 'edit not supported' };
       const messageId = String(input.messageId).trim();
       const purpose = String(input.purpose ?? '').trim();
-      const receiptTurns = Array.isArray(input.receiptTurns) ? input.receiptTurns.map(Number).filter((n) => Number.isInteger(n) && n > 0) : undefined;
+      const wakeContext = deps.getWakeContext?.();
       const rendered = await renderWithSpeaker({
         workspaceDir: ctx.workspaceDir,
         provider: deps.speakerProvider,
         ...(deps.speakerModel ? { model: deps.speakerModel } : {}),
         purpose,
         receipts: deps.getWakeReceipts(),
-        ...(receiptTurns?.length ? { receiptTurns } : {}),
+        ...(wakeContext ? { wakeContext } : {}),
       });
-      await deps.sink.edit(messageId, rendered.text);
+      await activeSink.edit(messageId, rendered.text);
       return {
         ok: true,
         summary: `Edited message ${messageId} in place.`,
