@@ -37,11 +37,15 @@ export class TelegramChannel implements MessageSink {
     if (!res.ok) throw new Error(`Telegram editMessageText failed (${res.status}): ${await res.text()}`);
   }
 
-  async typing(): Promise<void> {
-    await fetch(`${this.base}/sendChatAction`, {
+  async react(messageId: string, emoji: string | null): Promise<void> {
+    await fetch(`${this.base}/setMessageReaction`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: this.chatId, action: 'typing' }),
+      body: JSON.stringify({
+        chat_id: this.chatId,
+        message_id: Number(messageId),
+        reaction: emoji ? [{ type: 'emoji', emoji }] : [],
+      }),
     }).catch(() => undefined);
   }
 

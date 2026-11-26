@@ -101,6 +101,38 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
 
   await registry.registerInline(
     {
+      id: 'react_message',
+      version: 1,
+      description: 'Reacts to a user message with a single emoji (e.g. 👍, 🔥, 🫡, 🤔, ⚡) instead of or alongside texting.',
+      whenToUse: ['User said something brief like "ok", "thanks", "cool" where an emoji reaction is cleaner than a text reply'],
+      effect: 'write',
+      requiresApproval: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          messageId: { type: 'string', description: 'The messageId from the trigger event metadata' },
+          emoji: { type: 'string', description: 'A standard Telegram reaction emoji (e.g. 👍, 🔥, ❤️, 🫡, 🤔, ⚡, 🎉)' },
+        },
+        required: ['messageId', 'emoji'],
+        additionalProperties: false,
+      },
+    },
+    async (input) => {
+      if (!deps.sink.react) return { ok: false, summary: 'This channel does not support emoji reactions.', error: 'react not supported' };
+      const messageId = String(input.messageId).trim();
+      const emoji = String(input.emoji).trim();
+      await deps.sink.react(messageId, emoji);
+      return {
+        ok: true,
+        summary: `Reacted with ${emoji} on message ${messageId}.`,
+        changes: [`reacted:${messageId}:${emoji}`],
+      };
+    },
+    { alwaysVisible: true },
+  );
+
+  await registry.registerInline(
+    {
       id: 'tools.list_all',
       version: 1,
       description: 'Lists every registered packaged script (id, effect, approval requirement, description).',

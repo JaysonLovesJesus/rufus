@@ -117,13 +117,10 @@ export class RufusCore {
     }
 
     this.wakeReceipts = [];
-    // Show continuous "typing..." status indicator while awake (not idle)
-    let typingTimer: NodeJS.Timeout | undefined;
-    if (!this.shadow && this.realSink.typing) {
-      const pulse = () => void this.realSink.typing?.().catch(() => undefined);
-      pulse();
-      typingTimer = setInterval(pulse, 4000);
-      typingTimer.unref?.();
+    // Instant $0 status reaction: 👀 while awake & working, cleared when back to sleep (unless Rufus chose his own reaction)
+    const msgId = !this.shadow && event.metadata?.messageId !== undefined ? String(event.metadata.messageId) : undefined;
+    if (msgId && this.realSink.react) {
+      await this.realSink.react(msgId, '👀').catch(() => undefined);
     }
     let wake: RpgWakeReport;
     try {
@@ -139,7 +136,10 @@ export class RufusCore {
         onReceipt: (r) => this.wakeReceipts.push(r),
       });
     } finally {
-      if (typingTimer) clearInterval(typingTimer);
+      const rufusReacted = this.wakeReceipts.some((r) => r.toolId === 'react_message' && r.status === 'ok');
+      if (msgId && this.realSink.react && !rufusReacted) {
+        await this.realSink.react(msgId, null).catch(() => undefined);
+      }
     }
 
     // Automatic teacher->student label logging for SetFit (skip system startup events)
