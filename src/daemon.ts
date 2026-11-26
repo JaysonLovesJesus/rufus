@@ -7,6 +7,7 @@ import { recordWake } from './eval/flight-recorder';
 import { genericEvent } from './events/ingest';
 import { EventStore } from './events/store';
 import { runRpgWake } from './rpg/loop';
+import { ApprovalStore } from './scripts/approvals';
 import { registerBuiltins } from './scripts/builtins';
 import { ToolRegistry } from './scripts/registry';
 import type { SpeakerWakeContext } from './speaker/speaker';
@@ -40,6 +41,7 @@ export class RufusCore {
   readonly workspaceDir: string;
   readonly events: EventStore;
   readonly registry: ToolRegistry;
+  readonly approvals: ApprovalStore;
   readonly bouncer: Bouncer;
   readonly shadow: boolean;
   private readonly reasoningProvider: ModelProvider;
@@ -60,6 +62,7 @@ export class RufusCore {
     const embedder = opts.pythonPath ? createSemanticEmbedder({ pythonPath: opts.pythonPath }) : undefined;
     this.events = new EventStore({ workspaceDir: opts.workspaceDir, ...(embedder ? { embedder } : {}) });
     this.registry = new ToolRegistry({ toolsDir: path.join(opts.workspaceDir, 'tools') });
+    this.approvals = new ApprovalStore(opts.workspaceDir);
     this.bouncer = new Bouncer({
       workspaceDir: opts.workspaceDir,
       ...(opts.pythonPath ? { pythonPath: opts.pythonPath } : {}),
@@ -95,6 +98,7 @@ export class RufusCore {
 
     await registerBuiltins({
       registry: this.registry,
+      approvals: this.approvals,
       speakerProvider: this.speakerProvider,
       ...(this.speakerModel ? { speakerModel: this.speakerModel } : {}),
       sink,
@@ -110,6 +114,14 @@ export class RufusCore {
         void this.events.append(
           genericEvent({ source: 'message', kind: 'assistant_sent', actor: 'rufus', text, timestamp: this.now().toISOString() }),
         );
+      },
+      onApprovalDecision: async (decision, toolId) => {
+        await this.bouncer.recordExample({
+          text: `approval:${toolId}`,
+          label: decision === 'approved' ? 'WAKE' : 'SLEEP',
+          source: decision === 'approved' ? 'approval' : 'pushback',
+          at: this.now().toISOString(),
+        });
       },
       searchMemory: (query, searchOpts) =>
         this.events.search(query, searchOpts?.limit ?? 8, {
@@ -169,6 +181,7 @@ export class RufusCore {
         ...(this.reasoningModel ? { reasoningModel: this.reasoningModel } : {}),
         registry: this.registry,
         events: this.events,
+        approvals: this.approvals,
         maxTurns: this.maxTurnsPerWake,
         now: this.now,
         onReceipt: (r) => this.wakeReceipts.push(r),

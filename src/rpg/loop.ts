@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { LosslessEvent, ModelProvider, Receipt, RpgAction, RpgTurnTrace, RpgWakeReport, ToolManifest } from '../types';
 import type { EventStore } from '../events/store';
+import type { ApprovalStore } from '../scripts/approvals';
 import type { ToolRegistry } from '../scripts/registry';
 import { selectRelevantSkills } from '../skills/skills';
 
@@ -27,6 +28,7 @@ export interface RpgWakeOptions {
   reasoningModel?: string;
   registry: ToolRegistry;
   events: EventStore;
+  approvals?: ApprovalStore;
   maxTurns?: number;
   topKTools?: number;
   topKContext?: number;
@@ -130,6 +132,18 @@ async function gatherLiveContext(workspaceDir: string): Promise<string> {
   } catch {
     /* no projects dir */
   }
+  // 4. Pending approvals awaiting owner verbal/direct confirmation
+  try {
+    const pending = JSON.parse(await fs.readFile(path.join(workspaceDir, 'approvals.json'), 'utf8')) as Array<{ id: string; toolId: string; input: Record<string, unknown> }>;
+    if (Array.isArray(pending) && pending.length) {
+      parts.push(
+        `Pending Approvals (call approvals.approve if user says yes, or approvals.deny if user says no):\n` +
+          pending.map((a) => `- ${a.id}: ${a.toolId}(${JSON.stringify(a.input).slice(0, 180)})`).join('\n'),
+      );
+    }
+  } catch {
+    /* no pending approvals */
+  }
   return parts.length ? parts.join('\n') : '(none)';
 }
 
@@ -221,10 +235,29 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
     const action = parseRpgAction(raw);
 
     // Model is now OFF. Engine executes the single chosen tool deterministically.
-    const receipt = await opts.registry.call(action.toolId, action.input, {
-      workspaceDir: opts.workspaceDir,
-      now: now(),
-    });
+    const autoApproved = opts.approvals ? await opts.approvals.isAutoAllowed(action.toolId) : false;
+    const blocked = opts.approvals ? await opts.approvals.isNeverAllowed(action.toolId) : false;
+    const receipt = blocked
+      ? {
+          toolId: action.toolId,
+          effect: 'write' as const,
+          status: 'failed' as const,
+          durationMs: 0,
+          summary: `Blocked by permissions.json (neverAllow): ${action.toolId}.`,
+          changes: [],
+          error: 'neverAllow',
+          at: now().toISOString(),
+        }
+      : await opts.registry.call(action.toolId, action.input, {
+          workspaceDir: opts.workspaceDir,
+          now: now(),
+          ...(autoApproved ? { approved: true } : {}),
+        });
+    if (receipt.status === 'pending_approval' && opts.approvals) {
+      const saved = await opts.approvals.enqueue(action.toolId, action.input, now());
+      receipt.summary = `Pending user approval (${saved.id}): ${action.toolId}. Ask the user for verbal/text confirmation.`;
+      receipt.data = { approvalId: saved.id, toolId: action.toolId, input: action.input };
+    }
     receipts.push(receipt);
     trace.push({ turn: turns, ...(action.thought ? { thought: action.thought } : {}), toolId: action.toolId, input: action.input, receipt });
     opts.onReceipt?.(receipt);

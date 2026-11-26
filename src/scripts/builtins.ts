@@ -4,12 +4,14 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { MessageSink, ModelProvider, Receipt, ToolManifest } from '../types';
 import { renderWithSpeaker, type SpeakerWakeContext } from '../speaker/speaker';
+import type { ApprovalStore } from './approvals';
 import type { ToolRegistry } from './registry';
 
 const execFileAsync = promisify(execFile);
 
 export interface BuiltinDeps {
   registry: ToolRegistry;
+  approvals?: ApprovalStore;
   speakerProvider: ModelProvider;
   speakerModel?: string;
   sink: MessageSink;
@@ -18,6 +20,7 @@ export interface BuiltinDeps {
   getWakeContext?: () => SpeakerWakeContext | undefined;
   getRecentSent?: () => Promise<string[]>;
   onSent: (text: string) => void;
+  onApprovalDecision?: (decision: 'approved' | 'denied', toolId: string) => Promise<void>;
   searchMemory?: (query: string, opts?: { source?: string; limit?: number }) => Promise<Array<{ event: { id: string; timestamp: string; source: string; kind: string; actor?: string; text: string; deleted?: boolean; reactions?: Array<{ emoji: string; actor?: string }> }; score: number }>>;
   onSleep: (reason: string) => void;
 }
@@ -319,6 +322,84 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
       const content = `---\ntriggers: ${String(input.triggers).trim()}\n---\n# ${String(input.title).trim()}\n${String(input.rule).trim()}\n`;
       await fs.writeFile(path.join(dir, `${id}.md`), content, 'utf8');
       return { ok: true, summary: `Saved skill skills/${id}.md.`, changes: [`skill_saved:${id}`] };
+    },
+    { alwaysVisible: true },
+  );
+
+  await registry.registerInline(
+    {
+      id: 'approvals.approve',
+      version: 1,
+      description: 'Executes a pending approval-gated action after the user verbally/directly says yes (e.g. "yes", "go ahead", "do it"). Code-verified: only works on direct owner messages/voice.',
+      whenToUse: ['There is a pending approval in Live Context and the user directly confirmed or approved it'],
+      effect: 'write',
+      requiresApproval: false,
+      timeoutMs: 120_000,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          approvalId: { type: 'string', description: 'Optional pending approval id (defaults to the most recent pending approval)' },
+          alwaysAllow: { type: 'boolean', description: 'Set true ONLY if the user asked to always allow this tool in the future' },
+        },
+        additionalProperties: false,
+      },
+    },
+    async (input, ctx) => {
+      if (!deps.approvals) return { ok: false, summary: 'Approval store not configured.', error: 'no approval store' };
+      const trigger = deps.getWakeContext?.()?.trigger;
+      if (!trigger || trigger.kind !== 'owner_direct') {
+        return {
+          ok: false,
+          summary: 'Refused: approvals can only be granted directly by the owner (never by external messages or emails).',
+          error: 'owner_direct required',
+        };
+      }
+      const id = typeof input.approvalId === 'string' && input.approvalId.trim() ? input.approvalId.trim() : undefined;
+      const pending = await deps.approvals.take(id);
+      if (!pending) return { ok: false, summary: 'No matching pending approval found.', error: 'no pending approval' };
+      if (input.alwaysAllow === true) {
+        await deps.approvals.allowAlways(pending.toolId);
+      }
+      const execReceipt = await registry.call(pending.toolId, pending.input, {
+        workspaceDir: ctx.workspaceDir,
+        now: ctx.now,
+        approved: true,
+      });
+      await deps.onApprovalDecision?.('approved', pending.toolId);
+      return {
+        ok: execReceipt.status === 'ok',
+        summary: `Approved & ran ${pending.toolId}: ${execReceipt.summary}${input.alwaysAllow ? ' (saved to alwaysAllow)' : ''}`,
+        changes: [...execReceipt.changes, ...(input.alwaysAllow ? [`always_allow:${pending.toolId}`] : [])],
+        data: execReceipt.data,
+        ...(execReceipt.error ? { error: execReceipt.error } : {}),
+      };
+    },
+    { alwaysVisible: true },
+  );
+
+  await registry.registerInline(
+    {
+      id: 'approvals.deny',
+      version: 1,
+      description: 'Cancels a pending approval-gated action when the user says no / skip / cancel.',
+      whenToUse: ['There is a pending approval in Live Context and the user declined or cancelled it'],
+      effect: 'meta',
+      requiresApproval: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          approvalId: { type: 'string', description: 'Optional pending approval id (defaults to the most recent pending approval)' },
+        },
+        additionalProperties: false,
+      },
+    },
+    async (input) => {
+      if (!deps.approvals) return { ok: false, summary: 'Approval store not configured.', error: 'no approval store' };
+      const id = typeof input.approvalId === 'string' && input.approvalId.trim() ? input.approvalId.trim() : undefined;
+      const pending = await deps.approvals.take(id);
+      if (!pending) return { ok: false, summary: 'No matching pending approval found.', error: 'no pending approval' };
+      await deps.onApprovalDecision?.('denied', pending.toolId);
+      return { ok: true, summary: `Cancelled pending approval ${pending.id} (${pending.toolId}).` };
     },
     { alwaysVisible: true },
   );
