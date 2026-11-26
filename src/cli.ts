@@ -43,6 +43,8 @@ import { formatLoopReport, formatLoopRun, MasterLoop, type Sensor, type SignalHa
 import { appendSignal, inboxSensor, scheduleBlockHandler } from './engine/loop-builtins';
 import { configuredChannels } from './channels/select';
 import { initSoul } from './soul/soul';
+import { writeSelfMap } from './brain/self-map';
+import { formatLayer3EvalReport, runLayer3Eval } from './eval/layer3-eval';
 import { buildTools, formatTools, type ToolRegistry } from './tools/tools';
 import { registerMcpTools } from './tools/mcp-client';
 import type { RufusConfig } from './types';
@@ -911,6 +913,12 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
             return;
           }
           const sensors = loop.listSensors().map((x) => x.id).join(', ');
+          await writeSelfMap(dir, {
+            brain: config.start?.brain ?? 'classic',
+            tools: loop.tools.list().map((t) => t.name),
+            sensors: loop.listSensors().map((x) => x.id),
+            ...(now ? { now: now() } : {}),
+          }).catch(() => undefined);
           io.out(`Rufus is running (every ${flags['--interval'] ?? config.start?.interval ?? '30s'}; check-ins every ${flags['--checkin'] ?? config.start?.checkinEvery ?? '2h'}). Sensors: ${sensors}. Tools: ${loop.tools.list().map((t) => t.name).join(', ') || 'none'}. ${channel ? 'Talking through your chat.' : 'No chat configured: items print here; answer with rufus decide.'} Ctrl+C to stop.`);
           if (config.start?.announceStartup) {
             await daemon.announceStartup().catch((err) => io.err(`startup check-in failed: ${(err as Error).message}`));
@@ -1116,6 +1124,16 @@ export async function main(argv: string[], io: Io = consoleIo, options: MainOpti
       } finally {
         await closeMcp();
       }
+      return;
+    }
+
+    case 'eval': {
+      const live = args.includes('--live');
+      const now = options.now?.() ?? new Date();
+      const provider = live ? engine.provider : undefined;
+      const report = await runLayer3Eval({ dir, live, ...(provider ? { provider } : {}), now });
+      for (const line of formatLayer3EvalReport(report)) io.out(line);
+      if (!report.ok) process.exitCode = 1;
       return;
     }
 

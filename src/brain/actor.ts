@@ -6,6 +6,7 @@ import { detectUnbackedActionClaims, honestCorrection, VERIFIER_RETRY_PROMPT, ty
 import type { MasterLoop } from '../engine/loop';
 import { formatMemoryForPrompt, loadMarkdownMemory } from '../memory/markdown-memory';
 import { checkLayer3Boundary, layer3RetryPrompt, matchLayer3Units, relevantProjectsSection, runLayer3Prepare, runLayer3Verify } from '../skills/runner';
+import { readSelfMap } from './self-map';
 import { relevantSkillsSection, SKILL_LIST_TOOL, SKILL_READ_TOOL } from '../skills/skills';
 import { buildPersona, loadSoul, withPersona } from '../soul/soul';
 import { MISSION_START_TOOL } from '../tools/mission-tools';
@@ -343,7 +344,7 @@ export class ContinuousBrain {
   }
 
   private note(text: string): void {
-    this.workingNotes.push(oneLine(text, 600));
+    this.workingNotes.push(clip(text.trim(), MAX_TOOL_RESULT));
     if (this.workingNotes.length > KEEP_NOTES) this.workingNotes.splice(0, this.workingNotes.length - KEEP_NOTES);
   }
 
@@ -598,8 +599,12 @@ export class ContinuousBrain {
 
     const parts: string[] = [];
     if (o.board) parts.push(`Live board (exact data gathered by code):\n${o.board}`);
-    const projects = await relevantProjectsSection(this.dir, o.query || '*', 1800).catch(() => '');
+    const projects = await relevantProjectsSection(this.dir, o.query || '*', 4000).catch(() => '');
     if (projects && !o.board) parts.push(projects);
+    if (o.query && /\b(?:rufus|engine|layer\s*[1-4]|yourself|how do you work|why did you|your (?:code|brain|rules|tools|memory)|self[- ]?aware)\b/i.test(o.query)) {
+      const selfMap = await readSelfMap(this.dir).catch(() => '');
+      if (selfMap) parts.push(selfMap);
+    }
     if (o.prepared) parts.push(o.prepared);
     if (!o.board) {
       const history = await loadChatHistory(this.dir, this.historyTurns).catch(() => []);

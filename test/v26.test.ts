@@ -13,6 +13,11 @@ import {
   memoryWriteTool,
   parseBrainStep,
   MAX_STEPS_PER_WAKE,
+  relevantProjectsSection,
+  runLayer3Prepare,
+  runLayer3Eval,
+  writeSelfMap,
+  readSelfMap,
   type AiRequest,
   type BrainEvent,
   type IncomingMessage,
@@ -492,5 +497,50 @@ describe('v26 UnifiedDaemon with brain: "continuous"', () => {
     t = new Date(t.getTime() + 6 * 60_000);
     expect(await daemon.announceStartup()).toContain("I'm up (continuous brain");
     expect(chat.sent).toHaveLength(2);
+  });
+
+  it('deep Layer 3: full project index, radar.mjs ground truth, SELF.md, and Layer 3 replay eval', async () => {
+    const dir = await tempDir();
+    await mkdir(path.join(dir, 'projects'), { recursive: true });
+    for (const name of ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta']) {
+      await writeFile(path.join(dir, 'projects', `${name}.md`), `# Project: ${name}\nStatus: active.\n`, 'utf8');
+    }
+    const projSection = await relevantProjectsSection(dir, 'what are the 6 projects?');
+    expect(projSection).toContain('All active projects (6): 1. alpha, 2. beta, 3. delta, 4. epsilon, 5. gamma, 6. zeta');
+
+    // radar.mjs runs automatically in runLayer3Prepare
+    await writeFile(path.join(dir, 'radar.mjs'), `export function collectRadar() { return 'Live Radar: 6 repos clean.'; }\n`, 'utf8');
+    const prep = await runLayer3Prepare({ dir, query: 'status', now: NOW });
+    expect(prep.context).toContain('Live Radar: 6 repos clean.');
+
+    // SELF.md captures live architecture
+    const selfText = await writeSelfMap(dir, { brain: 'continuous', tools: ['files.read', 'web.search'], sensors: ['inbox'] });
+    expect(selfText).toContain('Continuous Living Brain');
+    expect(selfText).toContain('radar.mjs');
+    expect(await readSelfMap(dir)).toContain('Active tools (2)');
+
+    // Layer 3 replay eval verifies badReply caught and idealReply passes
+    await writeFile(
+      path.join(dir, 'taste.mjs'),
+      `export function verifyDraft(text) { const fails = []; if (/cut off|grab them tomorrow/i.test(text)) fails.push('no excuses'); return { ok: fails.length === 0, problems: fails }; }\n`,
+      'utf8',
+    );
+    await mkdir(path.join(dir, 'evals'), { recursive: true });
+    await writeFile(
+      path.join(dir, 'evals', 'cases.json'),
+      JSON.stringify([
+        {
+          id: 'no-excuses',
+          input: 'what are the 6 projects?',
+          badReply: 'Two got cut off in my read, I will grab them tomorrow.',
+          idealReply: 'Here are all six:\n1. alpha\n2. beta',
+        },
+      ]),
+      'utf8',
+    );
+    const evalReport = await runLayer3Eval({ dir, now: NOW });
+    expect(evalReport.ok).toBe(true);
+    expect(evalReport.badCaught).toBe(1);
+    expect(evalReport.idealPassed).toBe(1);
   });
 });

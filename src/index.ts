@@ -640,6 +640,7 @@ export {
   LAYER3_RETRY_PREFIX,
   TASTE_FILE,
   BOUNDARIES_FILE,
+  RADAR_FILE,
   PREPARE_FILE,
   RUN_FILE,
   VERIFY_FILE,
@@ -672,3 +673,13 @@ export {
   type BrainWakeReport,
   type ContinuousBrainOptions,
 } from './brain/actor';
+export { buildSelfMap, writeSelfMap, readSelfMap, SELF_MAP_FILE, type SelfMapOptions } from './brain/self-map';
+export {
+  loadLayer3EvalCases,
+  runLayer3Eval,
+  formatLayer3EvalReport,
+  EVALS_FILE,
+  type Layer3EvalCase,
+  type Layer3EvalCaseResult,
+  type Layer3EvalReport,
+} from './eval/layer3-eval';

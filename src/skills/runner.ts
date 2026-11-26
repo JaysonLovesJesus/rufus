@@ -23,12 +23,13 @@ import { listLayer3Units, layer3UnitDir, matchSkills, parseSkillMarkdown, scoreS
 
 export const TASTE_FILE = 'taste.mjs';
 export const BOUNDARIES_FILE = 'boundaries.mjs';
+export const RADAR_FILE = 'radar.mjs';
 export const PREPARE_FILE = 'prepare.mjs';
 export const RUN_FILE = 'run.mjs';
 export const VERIFY_FILE = 'verify.mjs';
 export const PROJECTS_DIR = 'projects';
 export const DEFAULT_LAYER3_TIMEOUT_MS = 5000;
-export const DEFAULT_PREPARE_CHARS = 3000;
+export const DEFAULT_PREPARE_CHARS = 6000;
 export const DEFAULT_PROJECTS_CHARS = 2000;
 export const LAYER3_RETRY_PREFIX = 'LAYER 3 VERIFIER REJECTED YOUR DRAFT:';
 
@@ -254,8 +255,26 @@ const asContext = (out: unknown): string => {
 export async function runLayer3Prepare(opts: Layer3PrepareOptions): Promise<{ context: string; notes: string[] }> {
   const notes: string[] = [];
   const parts: string[] = [];
-  const units = opts.skills ?? (await matchLayer3Units(opts.dir, opts.query));
   const timeoutMs = opts.timeoutMs ?? DEFAULT_LAYER3_TIMEOUT_MS;
+  // Always run workspace radar.mjs first if present: structured $0 ground truth on every turn.
+  try {
+    const radarFn = hook(await loadLayer3Module(RADAR_FILE, opts.dir), ['collectRadar', 'prepare']);
+    if (radarFn) {
+      const ctx: Layer3PrepareContext = {
+        dir: opts.dir,
+        query: opts.query,
+        channel: opts.channel ?? 'chat',
+        now: opts.now,
+        unit: { name: 'radar', kind: 'framework' },
+        callReadOnlyTool: readOnlyToolCaller(opts.tools, opts.dir, opts.now),
+      };
+      const text = asContext(await withTimeout(() => radarFn(ctx), timeoutMs, RADAR_FILE));
+      if (text) parts.push(`### Live Radar (code-gathered ground truth)\n${text}`);
+    }
+  } catch (err) {
+    notes.push(`${RADAR_FILE} failed: ${oneLine(message(err))}`);
+  }
+  const units = opts.skills ?? (await matchLayer3Units(opts.dir, opts.query));
   for (const unit of units) {
     const rel = unitHookPath(opts.dir, unit, PREPARE_FILE);
     if (!rel) continue;
@@ -414,6 +433,8 @@ export async function relevantProjectsSection(dir: string, query: string, maxCha
       return '';
     }
     const found: Array<{ name: string; score: number; summary: string }> = [];
+    const allNames: string[] = [];
+    const wantsAll = all || /\b(?:projects?|board|portfolio|all of them)\b/i.test(query);
     for (const f of entries.slice(0, 200)) {
       const file = path.join(root, f);
       if (!inside(root, file)) continue;
@@ -437,20 +458,22 @@ export async function relevantProjectsSection(dir: string, query: string, maxCha
       if (CLOSED_STATUS.test(status.trim())) continue;
       const name = (typeof meta.name === 'string' && meta.name) || (typeof meta.title === 'string' && meta.title) || f.replace(/\.md$/, '');
       const heading = /^#\s+(.+)$/m.exec(body)?.[1]?.trim();
+      allNames.push(heading ? heading.replace(/^Project:\s*/i, '').trim() : name);
       const firstLine = body.split('\n').find((l) => l.trim() && !l.startsWith('#'))?.trim() ?? '';
       const description = (typeof meta.description === 'string' && meta.description) || firstLine;
       const triggers = Array.isArray(meta.triggers) ? meta.triggers : typeof meta.triggers === 'string' ? meta.triggers.split(',').map((t) => t.trim()) : [];
-      const score = all ? 10 : Math.max(scoreSkill({ name, description, triggers }, query), heading ? scoreSkill({ name: heading, description: '', triggers: [] }, query) : 0);
+      const score = wantsAll ? 10 : Math.max(scoreSkill({ name, description, triggers }, query), heading ? scoreSkill({ name: heading, description: '', triggers: [] }, query) : 0);
       if (score < 2) continue;
       const summary = body.replace(/^#.*$/gm, '').replace(/\n{2,}/g, '\n').trim();
       found.push({ name, score, summary });
     }
     if (!found.length) return '';
+    const indexLine = allNames.length ? `All active projects (${allNames.length}): ${allNames.map((n, i) => `${i + 1}. ${n}`).join(', ')}` : '';
     found.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
-    const top = found.slice(0, 3);
-    const each = Math.max(200, Math.floor(maxChars / top.length) - 60);
+    const top = found.slice(0, wantsAll ? 8 : 4);
+    const each = Math.max(240, Math.floor((maxChars - indexLine.length) / top.length) - 40);
     const parts = top.map((p) => `### ${p.name}\n${p.summary.length > each ? `${p.summary.slice(0, each - 1).trimEnd()}…` : p.summary}`);
-    return `## Active projects that fit this (projects/*.md)\n${parts.join('\n\n')}`;
+    return `## Active projects that fit this (projects/*.md)\n${indexLine}\n\n${parts.join('\n\n')}`;
   } catch {
     return '';
   }
