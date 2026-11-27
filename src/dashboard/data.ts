@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { readSensesFile, type SenseHealthEntry } from '../events/health';
 import type { WatchItem } from '../events/watches';
 import { RECENTLY_CLOSED_MS, ROOT_GAP_ID, isDone, type Gap } from '../gaps/store';
+import { CreditTracker } from '../providers/credits';
+import { findLocalLlmModel } from '../providers/local';
 import { isRealChange } from '../rpg/outcome';
 import { ApprovalStore, type PendingApproval } from '../scripts/approvals';
 import type { LosslessEvent, Receipt, ToolManifest } from '../types';
@@ -598,10 +600,46 @@ export class DashboardData {
     const lastWake = wakes[wakes.length - 1];
     const activeLive = live?.status === 'awake' ? live : undefined;
 
+    // Credits & 3-tier provider status (read-only) + wake efficiency telemetry.
+    const creditTracker = new CreditTracker(this.dir);
+    const creditState = await creditTracker.load();
+    const claudeLimit = await creditTracker.activeLimit('claude-cli:opus', now);
+    const recentTurns = wakes.slice(-100).map((w) => w.turns || 0).filter((n) => n > 0).sort((a, b) => a - b);
+    const medianTurns = recentTurns.length ? recentTurns[Math.floor(recentTurns.length * 0.5)]! : 0;
+    const decWake = recentDecisions.filter((d) => d.label === 'WAKE').length;
+    const decSleep = recentDecisions.filter((d) => d.label === 'SLEEP').length;
+    const bouncerSleepPct = decWake + decSleep > 0 ? Math.round((100 * decSleep) / (decWake + decSleep)) : undefined;
+    const standingGaps = gaps.filter((g) => g.standing && !isDone(g)).length;
+    const localModel = findLocalLlmModel(this.dir);
+    const cap5h = creditState.calibrated5hUsd ?? 15;
+    const cap7d = creditState.calibrated7dUsd ?? 100;
+    const used5h = creditState.usage
+      .filter((u) => nowMs - Date.parse(u.at) <= 5 * 3600_000)
+      .reduce((s, u) => s + (u.costUsd || 0), 0);
+    const used7d = creditState.usage
+      .filter((u) => nowMs - Date.parse(u.at) <= 7 * DAY_MS)
+      .reduce((s, u) => s + (u.costUsd || 0), 0);
+    const left5hPct = claudeLimit ? 0 : Math.max(0, Math.min(100, Math.round((1 - used5h / cap5h) * 100)));
+    const left7dPct = Math.max(0, Math.min(100, Math.round((1 - used7d / cap7d) * 100)));
+
     return {
       now: now.toISOString(),
       workspace: path.basename(this.dir),
       daemon: { up: daemonUp, port: this.daemonPort },
+      credits: {
+        primary: 'claude-cli:opus',
+        pausedUntil: claudeLimit?.resetsAt,
+        resetLabel: claudeLimit?.resetLabel,
+        limitWindow: claudeLimit?.window,
+        left5hPct,
+        left7dPct,
+        localModel: localModel ? path.basename(localModel) : undefined,
+      },
+      telemetry: {
+        medianTurns,
+        bouncerSleepPct,
+        standingGaps,
+      },
       outline,
       live: activeLive
         ? {
@@ -775,7 +813,7 @@ export class DashboardData {
       slept: w.slept,
       acted: w.acted,
       sleepReason: w.sleepReason,
-      error: w.error ? trim(w.error, 400) : undefined,
+      error: w.error ? trim(w.error.replace(/\/(?:Users|home)\/[^/\s]+\//g, '~/'), 400) : undefined,
       ending: DashboardData.ending(w),
       costUsd: costOf(w),
       modelCalls: Array.isArray(w.modelCalls) ? w.modelCalls.length : undefined,

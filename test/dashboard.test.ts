@@ -89,6 +89,10 @@ describe('dashboard', () => {
     expect(snap.anatomy.senses.length).toBeGreaterThan(0);
     expect(snap.gaps.map((g: { id: string }) => g.id)).toEqual(expect.arrayContaining(['gap_root', 'gap_plants']));
     expect(snap.wakes.map((w: { wakeId: string }) => w.wakeId)).toContain(wake.wakeId);
+    expect(snap.credits).toBeDefined();
+    expect(typeof snap.credits.left5hPct).toBe('number');
+    expect(snap.telemetry).toBeDefined();
+    expect(typeof snap.telemetry.medianTurns).toBe('number');
   });
 
   it('serves one wake for playback, and 404 for an unknown one', async () => {

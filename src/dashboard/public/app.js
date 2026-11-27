@@ -300,6 +300,69 @@
     return undefined;
   }
 
+  function humanizeLabel(raw) {
+    const s = clean(raw || '');
+    const reset = /resets?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i.exec(s);
+    if (/5-hour limit|weekly limit|rate[ -]?limit/i.test(s)) {
+      return reset ? `Resume after Claude limit resets (${reset[1]})` : 'Resume after AI rate limit resets';
+    }
+    return s.replace(/\/(?:Users|home)\/[^/\s]+\//g, '~/');
+  }
+
+  function renderTelemetry(snap) {
+    const host = $('#telemetry');
+    if (!host) return;
+    host.replaceChildren();
+    const c = snap.credits || {};
+    const t = snap.telemetry || {};
+    const a = snap.anatomy || {};
+    const b = a.bouncer || {};
+    const trust = a.trust || {};
+
+    // Card 1: Intelligence & Credits
+    const paused = !!c.pausedUntil;
+    const creditVal = paused ? `Paused · resets ${c.resetLabel || 'soon'}` : `Claude · ${c.left5hPct ?? 100}% left (5h)`;
+    const backups = [c.localModel ? 'Local Qwen 3B' : null, 'Zero-AI'].filter(Boolean).join(' → ');
+    const card1 = el('div', { class: 't-card' },
+      el('div', { class: 't-kicker' }, 'Intelligence & Credits', el('span', { class: `t-dot${paused ? ' warn' : ''}` })),
+      el('div', { class: 't-val' }, creditVal),
+      el('div', { class: 't-sub' }, paused ? `Backups: Gemini → ${backups}` : `7d ~${c.left7dPct ?? 100}% left · backups: ${backups}`),
+      el('div', { class: 't-bar' }, el('i', { class: paused ? 'warn' : '', style: `width:${paused ? 100 : (c.left5hPct ?? 100)}%` })),
+    );
+
+    // Card 2: Bouncer Shield
+    const pct = t.bouncerSleepPct;
+    const card2 = el('div', { class: 't-card' },
+      el('div', { class: 't-kicker' }, 'Bouncer Shield', el('span', { class: 't-dot sense' })),
+      el('div', { class: 't-val' }, pct !== undefined ? `${pct}% filtered at $0` : `${b.model === 'setfit' ? 'SetFit active' : 'Prototype'}`),
+      el('div', { class: 't-sub' }, `${b.model === 'setfit' ? 'Local SetFit' : 'Prototype'} · ${fmtNum(b.examples || 0)} labels${b.lastMs ? ` · ${Math.round(b.lastMs)}ms` : ''}`),
+      el('div', { class: 't-bar' }, el('i', { class: 'sense', style: `width:${pct ?? 60}%` })),
+    );
+
+    // Card 3: Wake Efficiency
+    const med = t.medianTurns || 1;
+    const acted = a.desk?.acted24h ?? 0;
+    const wakes = a.desk?.wakes24h ?? 0;
+    const card3 = el('div', { class: 't-card' },
+      el('div', { class: 't-kicker' }, 'Wake Efficiency', el('span', { class: 't-dot wake' })),
+      el('div', { class: 't-val' }, `${plural(med, 'turn')} median`),
+      el('div', { class: 't-sub' }, `${fmtNum(acted)} acted / ${fmtNum(wakes)} wakes (24h) · ${fmtNum(a.tools?.total || 0)} tools`),
+      el('div', { class: 't-bar' }, el('i', { class: 'wake', style: `width:${Math.max(15, Math.min(100, Math.round((1 / Math.max(1, med)) * 100)))}%` })),
+    );
+
+    // Card 4: Trust & Self-Optimization
+    const held = snap.approvals?.length ?? 0;
+    const standing = t.standingGaps ?? 0;
+    const card4 = el('div', { class: 't-card' },
+      el('div', { class: 't-kicker' }, 'Trust & Self-Opt', el('span', { class: `t-dot${held ? ' warn' : ''}` })),
+      el('div', { class: 't-val' }, held ? `${plural(held, 'draft')} awaiting yes` : 'All actions gated'),
+      el('div', { class: 't-sub' }, `${trust.act_quietly || 0} quiet · ${trust.draft || 0} ask · ${standing} self-opt gaps`),
+      el('div', { class: 't-bar' }, el('i', { class: held ? 'warn' : '', style: 'width:100%' })),
+    );
+
+    host.append(card1, card2, card3, card4);
+  }
+
   function renderHeader() {
     const snap = state.snap;
     const now = Date.parse(snap.now) || Date.now();
@@ -334,7 +397,7 @@
       st.append(live.since ? el('span', { class: 'soft' }, ` since ${fmtWhen(live.since, now)}. `) : '. ');
       if (next?.at) {
         st.append('Next wake ', el('span', { class: 'num' }, fmtWhen(next.at, now)), ', ', el('span', { class: 'num', 'data-in': next.at }, fmtIn(Date.parse(next.at) - Date.now())), '.');
-        sub.append(el('span', null, el('span', { class: 'soft' }, 'To: '), short(clean(next.label), 150)));
+        sub.append(el('span', null, el('span', { class: 'soft' }, 'To: '), short(humanizeLabel(next.label), 140)));
       } else {
         st.append(el('span', { class: 'soft' }, 'Nothing scheduled to wake him.'));
       }
@@ -350,6 +413,7 @@
     $('#themeBtn').innerHTML = icon;
     $('#themeBtn').setAttribute('aria-label', document.documentElement.dataset.theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme');
     document.title = live.status === 'awake' ? 'Rufus · awake' : 'Rufus · asleep';
+    renderTelemetry(snap);
   }
   const SUN = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.3"/><g stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/></g></svg>';
   const MOON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 10.1A5.6 5.6 0 0 1 5.9 2.8a5.6 5.6 0 1 0 7.3 7.3Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>';
@@ -474,7 +538,8 @@
       parent.append(s('path', { d: 'M-3,-3.2 L1.6,0 L-3,3.2', class: 'p-edge', transform: `translate(${m.x.toFixed(1)},${m.y.toFixed(1)}) rotate(${ang.toFixed(1)})`, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
     },
     node(parent, part, stage, x, y, label, opts = {}) {
-      const grp = s('g', { class: `p-node ${stage}`, 'data-part': String(part), tabindex: '0', role: 'button', 'aria-label': `${label.name}: ${(label.meta || []).join(', ')}. Open details.` });
+      const metaText = (label?.meta || []).map((m) => (typeof m === 'string' ? m : m?.text || '')).filter(Boolean).join(', ');
+      const grp = s('g', { class: `p-node ${stage}`, 'data-part': String(part), tabindex: '0', role: 'button', 'aria-label': `${label.name}: ${metaText}. Open details.` });
       if (opts.marker !== false) {
         grp.append(s('circle', { class: 'halo', cx: x, cy: y, r: opts.halo ?? 15 }), s('circle', { class: 'dot', cx: x, cy: y, r: opts.r ?? 5.5 }));
       }
@@ -632,7 +697,7 @@
 
       // --- 1 Senses, 2 Memory, 3 Bouncer
       this.drawSenses(root, g, snap, true);
-      this.drawMemory(root, g, snap, { x: xM, y: g.memTop - 34, anchor: 'middle' });
+      this.drawMemory(root, g, snap, { x: xM, y: g.memTop - 48, anchor: 'middle' });
       const bouncer = this.node(root, 3, 'sense', xB, yC, { x: xB, y: yC - (g.compact ? 88 : 66), anchor: 'middle', no: '03', name: 'Bouncer', meta: m.bouncer }, { marker: false });
       bouncer.append(
         s('path', { class: 'gate-bar', d: `M${xB - 5},${yC - 28} H${xB + 5} M${xB},${yC - 28} V${yC - 7} M${xB - 5},${yC - 7} H${xB + 5}` }),
@@ -648,8 +713,8 @@
       this.node(root, 7, 'wake', P.trust[0], P.trust[1], { x: cx(P.trust[0] + 16), y: g.compact ? yC + 26 : yC - 40, anchor: 'start', no: '07', name: 'Trust gate', meta: m.trust });
       this.node(root, 9, 'wake', P.tools[0], P.tools[1], { x: cx(P.tools[0] + 18), y: P.tools[1] + 28, anchor: 'start', no: '09', name: 'Tools', meta: m.tools });
       this.node(root, 8, 'wake', P.repeat[0], P.repeat[1], { x: cx(P.repeat[0] - 14), y: P.repeat[1] + (g.compact ? 44 : 22), anchor: 'end', no: '08', name: 'Repeat', meta: m.repeat }, { r: 3.5, halo: 11 });
-      this.drawLadder(root, P.trust[0] + 16, g.compact ? yC + 66 : yC + 30, snap, g.compact);
-      this.node(root, 10, 'sleep', xS, yC, { x: xS, y: yC - 56, anchor: 'middle', no: '10', name: 'Sleep', meta: m.sleep }, { r: 7, halo: 18 });
+      this.drawLadder(root, P.trust[0] + 12, g.compact ? yC + 74 : yC + 34, snap, true);
+      this.node(root, 10, 'sleep', xS, yC, { x: xS, y: yC - 66, anchor: 'middle', no: '10', name: 'Sleep', meta: m.sleep }, { r: 7, halo: 18 });
       this.drawCenter(root, xR, yC, snap);
     },
 
