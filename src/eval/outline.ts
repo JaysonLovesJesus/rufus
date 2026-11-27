@@ -933,7 +933,7 @@ export async function runOutlineChecks(): Promise<OutlineCheck[]> {
           t === 0
             ? { gap: gapId, toolId: 'demo.thread', input: {} }
             : t === 1
-              ? { gap: ROOT, toolId: 'watch.set', input: { kind: 'timer', label: 'look around for gaps', minutesFromNow: 30 } }
+              ? { gap: ROOT, toolId: 'watch.set', input: { kind: 'timer', label: 'look around for gaps', minutesFromNow: 30, waitsOn: 'time', waitsFor: 'next check window', expect: 'New events or work arrive' } }
               : SLEEP,
       },
       { maxTurns: 4 },
@@ -960,9 +960,9 @@ export async function runOutlineChecks(): Promise<OutlineCheck[]> {
           t === 0
             ? SLEEP
             : t === 1
-              ? { gap: gapId, toolId: 'watch.set', input: { kind: 'timer', label: 'chase the owner', minutesFromNow: 5, gapId } }
+              ? { gap: gapId, toolId: 'watch.set', input: { kind: 'timer', label: 'chase the owner', minutesFromNow: 5, gapId, waitsOn: 'owner', waitsFor: 'owner reply', expect: 'Owner answers or confirms next step' } }
               : t === 2
-                ? { gap: ROOT, toolId: 'watch.set', input: { kind: 'timer', label: 'look around for gaps', minutesFromNow: 30, gapId: ROOT } }
+                ? { gap: ROOT, toolId: 'watch.set', input: { kind: 'timer', label: 'look around for gaps', minutesFromNow: 30, gapId: ROOT, waitsOn: 'time', waitsFor: 'next check window', expect: 'New events or work arrive' } }
                 : SLEEP,
       },
       { maxTurns: 6 },
