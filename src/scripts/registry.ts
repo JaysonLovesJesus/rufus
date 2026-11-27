@@ -247,7 +247,15 @@ export class ToolRegistry {
    */
   async formatForDesk(shown: readonly ToolManifest[], approvals?: ApprovalStore): Promise<string> {
     const callable = this.list().filter((m) => !m.internal);
-    const index = `Every tool id (${callable.length}; any of them can be called, not only those shown): ${callable.map((m) => m.id).join(', ')}`;
+    const shownIds = new Set(shown.map((m) => m.id));
+    const brief = (desc: string) => {
+      const first = desc.split(/(?<=[.!?])\s+/)[0] ?? desc;
+      return first.length > 72 ? `${first.slice(0, 71).trimEnd()}…` : first;
+    };
+    const other = callable.filter((m) => !shownIds.has(m.id));
+    const index =
+      `Every tool id (${callable.length}; any of them can be called, not only those shown): ${callable.map((m) => m.id).join(', ')}` +
+      (other.length ? `\nOther tools (1-line summary): ${other.map((m) => `${m.id} (${brief(m.description)})`).join(' | ')}` : '');
     const blocks: string[] = [];
     for (const t of shown) {
       const entry = this.tools.get(t.id);

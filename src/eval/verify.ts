@@ -145,6 +145,47 @@ export async function verifyAllParts(opts: { workspaceDir: string; pythonPath?: 
     }
     return { passed: passed > 0 && failed.length === 0, detail: failed.length ? `${passed} passed, failed: ${failed.join(', ')}` : `${passed}/${passed} passing` };
   });
+  await live(9, 'Toolset health: turns per wake and tool reliability', async () => {
+    const raw = await fs.readFile(path.join(dir, 'wakes.jsonl'), 'utf8').catch(() => '');
+    const wakes = raw
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .slice(-200)
+      .map((l) => {
+        try {
+          return JSON.parse(l) as { turns?: number; trace?: Array<{ toolId?: string; receipt?: { status?: string } }> };
+        } catch {
+          return null;
+        }
+      })
+      .filter((w): w is NonNullable<typeof w> => !!w);
+    const turns = wakes.map((w) => w.turns ?? w.trace?.length ?? 0).sort((a, b) => a - b);
+    const p50 = turns.length ? turns[Math.floor(turns.length * 0.5)]! : 0;
+    const p90 = turns.length ? turns[Math.floor(turns.length * 0.9)]! : 0;
+    const counts = new Map<string, { ok: number; total: number }>();
+    const bigrams = new Map<string, number>();
+    for (const w of wakes) {
+      const seq = (w.trace ?? []).map((t) => t.toolId).filter((id): id is string => !!id && id !== 'sleep');
+      for (const t of w.trace ?? []) {
+        if (!t.toolId) continue;
+        const c = counts.get(t.toolId) ?? { ok: 0, total: 0 };
+        c.total++;
+        if (t.receipt?.status === 'ok') c.ok++;
+        counts.set(t.toolId, c);
+      }
+      for (let i = 0; i + 1 < seq.length; i++) {
+        const k = `${seq[i]}->${seq[i + 1]}`;
+        bigrams.set(k, (bigrams.get(k) ?? 0) + 1);
+      }
+    }
+    const topChain = [...bigrams.entries()].sort((a, b) => b[1] - a[1])[0];
+    const flaky = [...counts.entries()].filter(([, c]) => c.total >= 3 && c.ok / c.total < 0.6).map(([id, c]) => `${id}(${c.ok}/${c.total})`);
+    return {
+      passed: wakes.length > 0 && p50 <= 3 && p90 <= 6,
+      detail: `last ${wakes.length} wakes: median ${p50} turn(s), p90 ${p90}${topChain ? ` | top chain: ${topChain[0]} (${topChain[1]}x)` : ''}${flaky.length ? ` | flaky: ${flaky.join(', ')}` : ''}`,
+    };
+  });
 
   // 10. Sleep (live invariant)
   await live(10, 'Every live gap has a next move in motion', async () => {

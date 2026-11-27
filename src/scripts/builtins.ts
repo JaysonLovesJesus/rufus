@@ -211,8 +211,8 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
       defaultTrust: 'act_quietly',
       // It touches only Rufus's own state or the owner himself, and can be undone or corrected.
       reversible: true,
-      // Speaking instead of texting is its own action, on its own rung of the ladder.
-      actions: ['talk.voice_note'],
+      // Speaking instead of texting, and optional follow-up wait/watch in the same turn, go through the ladder on their own rungs.
+      actions: ['talk.voice_note', 'gaps.update', 'watch.set'],
       timeoutMs: 60_000,
       inputSchema: {
         type: 'object',
@@ -222,6 +222,21 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
             type: 'string',
             enum: ['text', 'voice'],
             description: 'text (default), or voice: a voice note in your own spoken voice with the words as its caption. Your call, when hearing it lands better than reading (e.g. he sent you a voice note).',
+          },
+          wait: {
+            type: 'object',
+            description: 'Optional shortcut: in the SAME turn after sending, mark this gap waiting and/or schedule its next-move timer (saves 1-2 Decide turns).',
+            properties: {
+              waitingOn: { type: 'string', description: 'Who/what the gap now waits on (e.g. "owner: his reply")' },
+              label: { type: 'string', description: 'Short watch label (defaults to waitingOn or purpose)' },
+              minutesFromNow: { type: 'number', description: 'Minutes until the next-move timer fires' },
+              fireAt: { type: 'string', description: 'ISO timestamp for the next-move timer' },
+              waitsOn: { type: 'string', enum: ['owner', 'person', 'job', 'time'] },
+              waitsFor: { type: 'string' },
+              expect: { type: 'string' },
+              atOwnerFree: { type: 'boolean' },
+            },
+            additionalProperties: false,
           },
         },
         required: ['purpose'],
@@ -271,10 +286,44 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
       await Promise.resolve(deps.onSent(rendered.text, messageId)).catch((err: unknown) =>
         console.error(`logging a sent message failed: ${err instanceof Error ? err.message : String(err)}`),
       );
+      const changes = ['sent_message_to_user'];
+      const notes: string[] = [];
+      const wait = input.wait && typeof input.wait === 'object' ? (input.wait as Record<string, unknown>) : undefined;
+      if (wait && ctx.gapId) {
+        if (typeof wait.waitingOn === 'string' && wait.waitingOn.trim()) {
+          const upd = await step(ctx, 'gaps.update', { gapId: ctx.gapId, status: 'waiting', waitingOn: wait.waitingOn.trim() });
+          if (upd.status === 'ok') {
+            changes.push(...upd.changes);
+            notes.push(`gap marked waiting`);
+          } else {
+            notes.push(`waiting update failed: ${upd.summary}`);
+          }
+        }
+        if (wait.minutesFromNow !== undefined || wait.fireAt !== undefined) {
+          const wIn: Record<string, unknown> = {
+            kind: 'timer',
+            gapId: ctx.gapId,
+            label: typeof wait.label === 'string' && wait.label.trim() ? wait.label.trim() : typeof wait.waitingOn === 'string' && wait.waitingOn.trim() ? wait.waitingOn.trim() : purpose.slice(0, 120),
+            ...(wait.minutesFromNow !== undefined ? { minutesFromNow: wait.minutesFromNow } : {}),
+            ...(wait.fireAt !== undefined ? { fireAt: wait.fireAt } : {}),
+            ...(wait.waitsOn !== undefined ? { waitsOn: wait.waitsOn } : {}),
+            ...(wait.waitsFor !== undefined ? { waitsFor: wait.waitsFor } : {}),
+            ...(wait.expect !== undefined ? { expect: wait.expect } : {}),
+            ...(wait.atOwnerFree !== undefined ? { atOwnerFree: wait.atOwnerFree } : {}),
+          };
+          const set = await step(ctx, 'watch.set', wIn);
+          if (set.status === 'ok') {
+            changes.push(...set.changes);
+            notes.push(`watch set`);
+          } else {
+            notes.push(`watch failed: ${set.summary}`);
+          }
+        }
+      }
       return {
         ok: true,
-        summary: `Sent message to the owner (${rendered.text.length} chars${messageId ? `, messageId=${messageId}` : ''}${rendered.rewritten ? ', rewritten by truth gate' : ''}${voiceFallback}).`,
-        changes: ['sent_message_to_user'],
+        summary: `Sent message to the owner (${rendered.text.length} chars${messageId ? `, messageId=${messageId}` : ''}${rendered.rewritten ? ', rewritten by truth gate' : ''}${voiceFallback})${notes.length ? `; ${notes.join(', ')}` : ''}.`,
+        changes,
         data: { ...(messageId ? { messageId } : {}), text: rendered.text, rewritten: rendered.rewritten, remainingViolations: rendered.violations },
       };
     },
@@ -359,6 +408,22 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
       // Only Rufus's own messages can be edited; the owner's ids sit next to Rufus's on the Desk.
       if ((await deps.messageAuthor?.(messageId)) === 'owner') {
         return { ok: false, summary: `Refused: message ${messageId} is the owner's, not one Rufus sent. Use the messageId of your own message (marked "You (Rufus)" on the Desk, or in the send_message receipt).`, error: 'not_own_message' };
+      }
+      // Avoid editing the same message over and over in one wake when nothing new was observed since the last edit.
+      const prior = deps.getWakeReceipts();
+      let lastEditIdx = -1;
+      for (let i = prior.length - 1; i >= 0; i--) {
+        if (prior[i]?.toolId === 'edit_message' && prior[i]?.status === 'ok' && prior[i]?.changes.includes(`edited_message:${messageId}`)) {
+          lastEditIdx = i;
+          break;
+        }
+      }
+      if (lastEditIdx >= 0 && !prior.slice(lastEditIdx + 1).some((r) => r.status === 'ok' && r.toolId !== 'edit_message' && r.toolId !== 'send_message')) {
+        return {
+          ok: false,
+          summary: `Refused: you already edited message ${messageId} in this wake and no new facts arrived since. Move on or sleep.`,
+          error: 'repeat_edit_without_new_facts',
+        };
       }
       const purpose = String(input.purpose ?? '').trim();
       const wakeContext = deps.getWakeContext?.();

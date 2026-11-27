@@ -924,6 +924,48 @@ export async function runOutlineChecks(): Promise<OutlineCheck[]> {
     }
   });
 
+  await run(9, 'send_message can mark a gap waiting and set its next move in one turn', async () => {
+    let gapId = '';
+    const s = await scratch(
+      {
+        decide: (t) =>
+          t === 0
+            ? {
+                gap: gapId,
+                toolId: 'send_message',
+                input: {
+                  purpose: 'Ask the owner to confirm the time',
+                  wait: {
+                    waitingOn: 'owner: confirm the time',
+                    minutesFromNow: 60,
+                    waitsOn: 'owner',
+                    waitsFor: 'owner reply',
+                    expect: 'Owner confirms the time',
+                  },
+                },
+              }
+            : t === 1
+              ? { gap: ROOT, toolId: 'watch.set', input: { kind: 'timer', label: 'look around for gaps', minutesFromNow: 30, waitsOn: 'time', waitsFor: 'next check window', expect: 'New events or work arrive' } }
+              : SLEEP,
+        speaker: () => 'Does 3 PM work for you?',
+      },
+      { maxTurns: 4 },
+    );
+    try {
+      gapId = (await ownerGap(s.core, 'Confirm meeting time')).id;
+      const res = await s.core.processEvent(owner('Schedule it and check with me.'));
+      const g = await s.core.gaps.get(gapId);
+      const w = (await s.core.watches.active()).find((x) => x.gapId === gapId);
+      const passed = s.sent.length === 1 && g?.status === 'waiting' && !!w && res.wake?.slept === true && (res.wake?.turns ?? 99) <= 3;
+      return {
+        passed,
+        detail: `sent=${s.sent.length}, gap=${g?.status}, watch=${w ? w.id : 'none'}, turns=${res.wake?.turns}, slept=${res.wake?.slept}`,
+      };
+    } finally {
+      await s.cleanup();
+    }
+  });
+
   // ---------------- 10. Sleep ----------------
   await run(10, "A started thread is its gap's next move", async () => {
     let gapId = '';
