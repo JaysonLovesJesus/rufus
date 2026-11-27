@@ -89,9 +89,9 @@ export function buildProviderSet(opts: { workspaceDir: string; credits?: CreditT
     'local',
   ];
   const triageSpecs = cfg.triage ?? [
-    'local',
     `claude:${process.env.RUFUS_TRIAGE_MODEL || 'haiku'}`,
     'gemini',
+    'local',
   ];
 
   const makeChain = (specs: string[], extra: { timeoutMs?: number; effort?: string } = {}): FallbackProvider => {

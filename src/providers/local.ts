@@ -59,9 +59,14 @@ export class LocalLlamaProvider implements ModelProvider {
 
   async completeWithStats(req: ModelRequest): Promise<{ text: string; stats: ModelCallStats }> {
     const started = Date.now();
-    const formattedPrompt = req.system?.trim()
-      ? `<|im_start|>system\n${req.system.trim()}<|im_end|>\n<|im_start|>user\n${req.prompt.trim()}<|im_end|>\n<|im_start|>assistant\n`
-      : `<|im_start|>user\n${req.prompt.trim()}<|im_end|>\n<|im_start|>assistant\n`;
+    const isGemma = /gemma/i.test(path.basename(this.modelPath));
+    const sys = req.system?.trim() ?? '';
+    const usr = req.prompt.trim();
+    const formattedPrompt = isGemma
+      ? `<start_of_turn>user\n${sys ? `${sys}\n\n` : ''}${usr}<end_of_turn>\n<start_of_turn>model\n`
+      : sys
+        ? `<|im_start|>system\n${sys}<|im_end|>\n<|im_start|>user\n${usr}<|im_end|>\n<|im_start|>assistant\n`
+        : `<|im_start|>user\n${usr}<|im_end|>\n<|im_start|>assistant\n`;
     const args = [
       '-m',
       this.modelPath,
@@ -83,8 +88,9 @@ export class LocalLlamaProvider implements ModelProvider {
         timeout: this.timeoutMs,
         maxBuffer: 8 * 1024 * 1024,
       });
-      // Strip any trailing [end of text] / llama.cpp interactive prompt markers.
+      // Strip any trailing [end of text] / <end_of_turn> / llama.cpp interactive prompt markers.
       const text = stdout
+        .replace(/<end_of_turn>\s*$/i, '')
         .replace(/\[end of text\]\s*$/i, '')
         .replace(/\n>\s*$/, '')
         .trim();

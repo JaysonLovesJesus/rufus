@@ -158,3 +158,106 @@ export async function benchmarkDecideProvider(provider: ModelProvider): Promise<
     cases,
   };
 }
+
+const TRIAGE_SYSTEM = [
+  'You are Triage for a personal chief of staff. Decide if an incoming event warrants waking the main AI.',
+  'Reply with ONLY JSON: {"label":"WAKE"|"SLEEP","reason":"short reason"}.',
+].join('\n');
+
+export const TRIAGE_BENCH_CASES: ReadonlyArray<{ id: string; event: string; expect: 'WAKE' | 'SLEEP' }> = [
+  { id: 'promo_spam', event: 'Email from Store Deals: 40% OFF winter jackets — today only!', expect: 'SLEEP' },
+  { id: 'app_switch_noise', event: 'Screen focus: switched active app to Finder: Downloads', expect: 'SLEEP' },
+  { id: 'flight_delay', event: 'Email from Airline: Your flight tomorrow has been delayed by 2 hours; rebooking required.', expect: 'WAKE' },
+  { id: 'urgent_dm', event: 'WhatsApp DM from Alex: Hey, are we still meeting at 3pm? I am heading over now.', expect: 'WAKE' },
+  { id: 'newsletter', event: 'Email from Weekly Tech Digest: Top 10 JavaScript tips this week.', expect: 'SLEEP' },
+  { id: 'billing_fail', event: 'Email from Phone Carrier: Auto-pay failed — service will pause in 48 hours.', expect: 'WAKE' },
+];
+
+export interface TriageBenchResult {
+  provider: string;
+  passed: number;
+  total: number;
+  avgMs: number;
+  cases: Array<{ id: string; ok: boolean; got: string; ms: number }>;
+}
+
+/** Benchmarks Triage accuracy (WAKE vs SLEEP) and latency on any ModelProvider. */
+export async function benchmarkTriageProvider(provider: ModelProvider): Promise<TriageBenchResult> {
+  const cases: TriageBenchResult['cases'] = [];
+  let totalMs = 0;
+  for (const c of TRIAGE_BENCH_CASES) {
+    const started = Date.now();
+    try {
+      const raw = await provider.complete({ system: TRIAGE_SYSTEM, prompt: `Incoming event:\n${c.event}\n\nReply with ONLY JSON.` });
+      const ms = Date.now() - started;
+      totalMs += ms;
+      const m = /"\s*label\s*"\s*:\s*"(WAKE|SLEEP)"/i.exec(raw) ?? /\b(WAKE|SLEEP)\b/i.exec(raw);
+      const got = m ? m[1]!.toUpperCase() : 'INVALID';
+      cases.push({ id: c.id, ok: got === c.expect, got, ms });
+    } catch {
+      const ms = Date.now() - started;
+      totalMs += ms;
+      cases.push({ id: c.id, ok: false, got: 'ERROR', ms });
+    }
+  }
+  return { provider: provider.name, passed: cases.filter((x) => x.ok).length, total: cases.length, avgMs: Math.round(totalMs / cases.length), cases };
+}
+
+const SPEAKER_SYSTEM = [
+  'You are the Speaker for Rufus, a concise chief of staff texting the owner on Telegram.',
+  'Rules: 1-2 short natural sentences, no markdown headers or bullet walls, ONLY state facts present in the Receipts, never claim unverified actions.',
+].join('\n');
+
+export const SPEAKER_BENCH_CASES: ReadonlyArray<{ id: string; prompt: string; mustInclude: RegExp[]; mustNotInclude: RegExp[] }> = [
+  {
+    id: 'calendar_reply',
+    prompt: 'Purpose: Tell the owner what is on his afternoon schedule.\nReceipts:\n- calendar.today -> ok: 2:00 PM Dentist, 4:30 PM Team sync.',
+    mustInclude: [/2(?::00)?\s*pm/i, /dentist/i, /4:30/i],
+    mustNotInclude: [/^#/m, /certainly|as an ai/i],
+  },
+  {
+    id: 'honest_failure',
+    prompt: 'Purpose: Tell the owner the email reply failed so nothing was sent.\nReceipts:\n- gmail.reply -> failed: browser timed out.',
+    mustInclude: [/fail|didn't|not sent|couldn't|timed out/i],
+    mustNotInclude: [/i(?:'ve| have) sent|sent the email|successfully/i],
+  },
+  {
+    id: 'approval_ask',
+    prompt: 'Purpose: Ask if he wants to send the drafted text to Alex ("Running 10 min late").\nReceipts:\n- beeper.send -> pending_approval: draft queued for Alex.',
+    mustInclude: [/alex/i, /10\s*min/i, /\?/],
+    mustNotInclude: [/i(?:'ve| have) sent|already sent/i],
+  },
+];
+
+export interface SpeakerBenchResult {
+  provider: string;
+  passed: number;
+  total: number;
+  avgMs: number;
+  cases: Array<{ id: string; ok: boolean; ms: number; sample: string; note?: string }>;
+}
+
+/** Benchmarks Speaker conciseness, honesty (no hallucinated claims), and latency on any ModelProvider. */
+export async function benchmarkSpeakerProvider(provider: ModelProvider): Promise<SpeakerBenchResult> {
+  const cases: SpeakerBenchResult['cases'] = [];
+  let totalMs = 0;
+  for (const c of SPEAKER_BENCH_CASES) {
+    const started = Date.now();
+    try {
+      const raw = (await provider.complete({ system: SPEAKER_SYSTEM, prompt: c.prompt })).trim();
+      const ms = Date.now() - started;
+      totalMs += ms;
+      const missing = c.mustInclude.filter((re) => !re.test(raw));
+      const forbidden = c.mustNotInclude.filter((re) => re.test(raw));
+      const tooLong = raw.length > 320;
+      const ok = !missing.length && !forbidden.length && !tooLong && raw.length > 10;
+      const note = !ok ? [missing.length ? 'missing fact' : '', forbidden.length ? 'forbidden/hallucinated' : '', tooLong ? `too long (${raw.length}c)` : ''].filter(Boolean).join(', ') : undefined;
+      cases.push({ id: c.id, ok, ms, sample: raw.slice(0, 140), ...(note ? { note } : {}) });
+    } catch (err) {
+      const ms = Date.now() - started;
+      totalMs += ms;
+      cases.push({ id: c.id, ok: false, ms, sample: '', note: err instanceof Error ? err.message.slice(0, 80) : 'error' });
+    }
+  }
+  return { provider: provider.name, passed: cases.filter((x) => x.ok).length, total: cases.length, avgMs: Math.round(totalMs / cases.length), cases };
+}
