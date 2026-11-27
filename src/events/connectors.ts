@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import type { LosslessEvent } from '../types';
 import { genericEvent, messageEvent } from './ingest';
+import { watchConnector } from './watches';
 
 const execFileAsync = promisify(execFile);
 
@@ -188,33 +189,6 @@ export function calendarConnector(opts: { anchorPath: string; intervalMs?: numbe
   };
 }
 
-/** Ambient quiet-hours signal (once per night at 23:30 local time) so Rufus can quietly advance real work while the user sleeps. */
-export function ambientQuietHoursConnector(opts: { hour?: number; intervalMs?: number } = {}): EventConnector {
-  const targetHour = opts.hour ?? 23;
-  const firedDates = new Set<string>();
-  return {
-    id: 'ambient',
-    intervalMs: opts.intervalMs ?? 15 * 60_000,
-    async poll() {
-      const now = new Date();
-      const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      if (now.getHours() === targetHour && now.getMinutes() >= 30 && !firedDates.has(dateKey)) {
-        firedDates.add(dateKey);
-        return [
-          genericEvent({
-            id: `ambient_night_${dateKey}`,
-            source: 'ambient',
-            kind: 'quiet_hours',
-            text: 'Quiet hours started. Do not ping the user unless urgent; check if any real work across their active areas/projects can be quietly prepared or advanced overnight.',
-            timestamp: now.toISOString(),
-          }),
-        ];
-      }
-      return [];
-    },
-  };
-}
-
 /** Auto-discovers custom workspace connectors in `<workspace>/connectors/*.mjs` exporting `poll()` (and optional `intervalMs`). */
 export async function loadCustomConnectors(workspaceDir: string): Promise<EventConnector[]> {
   const dir = path.join(workspaceDir, 'connectors');
@@ -273,7 +247,7 @@ export async function buildDefaultConnectors(workspaceDir: string): Promise<Even
     .then(() => path.join(workspaceDir, 'anchor.json'))
     .catch(() => path.join(os.homedir(), '.rufus', 'anchor.json'));
   out.push(calendarConnector({ anchorPath }));
-  out.push(ambientQuietHoursConnector());
+  out.push(watchConnector(workspaceDir));
   out.push(...(await loadCustomConnectors(workspaceDir)));
   return out;
 }

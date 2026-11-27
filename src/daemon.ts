@@ -6,6 +6,8 @@ import { createSemanticEmbedder } from './embed';
 import { recordWake } from './eval/flight-recorder';
 import { genericEvent } from './events/ingest';
 import { EventStore } from './events/store';
+import { WatchStore } from './events/watches';
+import { GapStore } from './gaps/store';
 import { runRpgWake } from './rpg/loop';
 import { ApprovalStore } from './scripts/approvals';
 import { registerBuiltins } from './scripts/builtins';
@@ -42,6 +44,8 @@ export class RufusCore {
   readonly events: EventStore;
   readonly registry: ToolRegistry;
   readonly approvals: ApprovalStore;
+  readonly gaps: GapStore;
+  readonly watches: WatchStore;
   readonly bouncer: Bouncer;
   readonly shadow: boolean;
   private readonly reasoningProvider: ModelProvider;
@@ -55,6 +59,8 @@ export class RufusCore {
   private wakeContext?: SpeakerWakeContext;
   private activeSink?: MessageSink;
   private wakeQueue: Promise<unknown> = Promise.resolve();
+  private newBouncerExamples = 0;
+  private retraining = false;
   private initialized = false;
 
   constructor(opts: DaemonOptions) {
@@ -63,6 +69,8 @@ export class RufusCore {
     this.events = new EventStore({ workspaceDir: opts.workspaceDir, ...(embedder ? { embedder } : {}) });
     this.registry = new ToolRegistry({ toolsDir: path.join(opts.workspaceDir, 'tools') });
     this.approvals = new ApprovalStore(opts.workspaceDir);
+    this.gaps = new GapStore(opts.workspaceDir);
+    this.watches = new WatchStore(opts.workspaceDir);
     this.bouncer = new Bouncer({
       workspaceDir: opts.workspaceDir,
       ...(opts.pythonPath ? { pythonPath: opts.pythonPath } : {}),
@@ -99,6 +107,10 @@ export class RufusCore {
     await registerBuiltins({
       registry: this.registry,
       approvals: this.approvals,
+      gaps: this.gaps,
+      watches: this.watches,
+      brainProvider: this.reasoningProvider,
+      ...(this.reasoningModel ? { brainModel: this.reasoningModel } : {}),
       speakerProvider: this.speakerProvider,
       ...(this.speakerModel ? { speakerModel: this.speakerModel } : {}),
       sink,
@@ -177,9 +189,6 @@ export class RufusCore {
         .then(() => sink.markRead!(chatId, msgId))
         .catch((err) => console.error(`markRead failed for message ${msgId}: ${err instanceof Error ? err.message : String(err)}`));
     }
-    if (msgId && this.realSink.react) {
-      await this.realSink.react(msgId, '⚡').catch(() => undefined);
-    }
     let wake: RpgWakeReport;
     try {
       wake = await runRpgWake({
@@ -190,6 +199,8 @@ export class RufusCore {
         registry: this.registry,
         events: this.events,
         approvals: this.approvals,
+        gaps: this.gaps,
+        watches: this.watches,
         maxTurns: this.maxTurnsPerWake,
         now: this.now,
         onReceipt: (r) => this.wakeReceipts.push(r),
@@ -202,10 +213,6 @@ export class RufusCore {
     } finally {
       this.activeSink = undefined;
       this.wakeContext = undefined;
-      const rufusReacted = this.wakeReceipts.some((r) => r.toolId === 'react_message' && r.status === 'ok');
-      if (msgId && this.realSink.react && !rufusReacted) {
-        await this.realSink.react(msgId, null).catch(() => undefined);
-      }
     }
 
     // Record full RPG Flight Recorder transcript (`wakes.jsonl`)
@@ -223,8 +230,27 @@ export class RufusCore {
       trace: wake.trace,
     }).catch(() => undefined);
 
-    // Automatic teacher->student label logging for SetFit (skip system startup events)
-    if (event.source !== 'system' && event.kind !== 'owner_direct') {
+    // Also record Rufus's own real actions into Event Log so long-term semantic recall remembers what he did
+    const nonChatActions = wake.trace
+      .filter((t) => t.receipt.status === 'ok' && t.toolId !== 'sleep' && t.toolId !== 'send_message' && t.toolId !== 'edit_message')
+      .map((t) => `${t.toolId}: ${t.receipt.summary}`);
+    if (nonChatActions.length) {
+      await this.events
+        .append(
+          genericEvent({
+            id: `self_${wake.wakeId}`,
+            source: 'self',
+            kind: 'actions',
+            actor: 'rufus',
+            text: nonChatActions.join(' | ').slice(0, 600),
+            timestamp: this.now().toISOString(),
+          }),
+        )
+        .catch(() => undefined);
+    }
+
+    // Automatic teacher->student label logging for SetFit + periodic non-blocking auto-retrain
+    if (event.source !== 'system' && event.kind !== 'owner_direct' && event.source !== 'watch') {
       const featureText = Bouncer.eventToFeatureText(event);
       await this.bouncer.recordExample({
         text: featureText,
@@ -232,6 +258,17 @@ export class RufusCore {
         source: wake.acted ? 'opus_acted' : 'opus_sleep',
         at: this.now().toISOString(),
       });
+      this.newBouncerExamples++;
+      if (this.newBouncerExamples >= 40 && !this.retraining) {
+        this.newBouncerExamples = 0;
+        this.retraining = true;
+        void this.bouncer
+          .trainSetFit({ epochs: 1 })
+          .catch(() => undefined)
+          .finally(() => {
+            this.retraining = false;
+          });
+      }
     }
 
     if (this.shadow) {
