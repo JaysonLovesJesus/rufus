@@ -39,7 +39,10 @@ export async function decodeToFloat32Pcm(audioPath: string, ffmpegPath = process
   return new Float32Array(aligned.buffer, aligned.byteOffset, Math.floor(aligned.byteLength / 4));
 }
 
-/** Transcribes one audio file locally with Parakeet via transcribe.cpp (Metal on Apple Silicon). */
+/** Chunk size (45s at 16 kHz) so long voice memos transcribe cleanly without overflowing Parakeet's encoder window. */
+const CHUNK_SAMPLES = 45 * 16_000;
+
+/** Transcribes one audio file locally with Parakeet via transcribe.cpp (Metal on Apple Silicon), auto-chunking long audio. */
 export async function transcribeWithParakeet(audioPath: string, modelPath = findParakeetModel()): Promise<{ text: string; durationMs: number; modelPath: string }> {
   if (!modelPath) throw new Error('No local Parakeet .gguf model found (set RUFUS_PARAKEET_MODEL or download to ~/.t3/userdata/speech/models/)');
   const started = Date.now();
@@ -47,8 +50,14 @@ export async function transcribeWithParakeet(audioPath: string, modelPath = find
   if (!pcm.length) return { text: '', durationMs: Date.now() - started, modelPath };
   const model = await TranscribeModel.load(modelPath);
   try {
-    const res = await model.transcribe(pcm);
-    const text = (res.text ?? '').replace(/\s+/g, ' ').trim();
+    const parts: string[] = [];
+    for (let offset = 0; offset < pcm.length; offset += CHUNK_SAMPLES) {
+      const slice = offset === 0 && pcm.length <= CHUNK_SAMPLES ? pcm : pcm.subarray(offset, Math.min(pcm.length, offset + CHUNK_SAMPLES));
+      const res = await model.transcribe(slice);
+      const chunk = (res.text ?? '').replace(/\s+/g, ' ').trim();
+      if (chunk) parts.push(chunk);
+    }
+    const text = parts.join(' ').replace(/\s+/g, ' ').trim();
     return { text, durationMs: Date.now() - started, modelPath };
   } finally {
     model.dispose();
