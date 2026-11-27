@@ -158,7 +158,7 @@ export class SenseHealth {
       this.recentContent.set(id, seen);
       for (const [k, t] of seen) if (nowMs - t > 24 * HOUR_MS) seen.delete(k);
       const key = createHash('sha1').update(`${ev.source}\0${ev.kind}\0${ev.actor ?? ''}\0${ev.threadId ?? ''}\0${ev.text}`).digest('hex');
-      if (seen.has(key)) b.duplicates++;
+      if (seen.has(key) && ev.kind !== 'focus') b.duplicates++;
       seen.set(key, nowMs);
       b.events++;
       e.lastEventAt = ev.timestamp;
