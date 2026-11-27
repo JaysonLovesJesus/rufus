@@ -301,12 +301,15 @@
   }
 
   function humanizeLabel(raw) {
-    const s = clean(raw || '');
-    const reset = /resets?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i.exec(s);
-    if (/5-hour limit|weekly limit|rate[ -]?limit/i.test(s)) {
-      return reset ? `Resume after Claude limit resets (${reset[1]})` : 'Resume after AI rate limit resets';
+    const s = clean(raw || '').replace(/\/(?:Users|home)\/[^/\s]+\//g, '~/');
+    const reset = /(?:resets?\s+(?:at\s+)?|parked until\s+)(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i.exec(s);
+    if (/5-hour limit|weekly limit|rate[ -]?limit|All providers failed|parked until/i.test(s)) {
+      return reset ? `Resume after Claude limit resets (${reset[1]})` : 'Resume when AI provider is back';
     }
-    return s.replace(/\/(?:Users|home)\/[^/\s]+\//g, '~/');
+    if (/^Resume:\s*the last wake ended before these gaps had a next move/i.test(s)) {
+      return 'Quick return for gaps from the previous wake';
+    }
+    return s;
   }
 
   function renderTelemetry(snap) {
@@ -319,46 +322,74 @@
     const b = a.bouncer || {};
     const trust = a.trust || {};
 
+    const mkCard = ({ kicker, dotCls, val, sub, pct, barCls, part, title }) =>
+      el(
+        'button',
+        { class: 't-card', type: 'button', title: title || sub, onclick: () => openNodeSheet(part) },
+        el('div', { class: 't-kicker' }, kicker, el('span', { class: `t-dot${dotCls ? ` ${dotCls}` : ''}` })),
+        el('div', { class: 't-val' }, val),
+        el('div', { class: 't-sub', title: sub }, sub),
+        el('div', { class: 't-bar', role: 'progressbar', 'aria-valuenow': String(pct), 'aria-valuemin': '0', 'aria-valuemax': '100' }, el('i', { class: barCls || '', style: `width:${pct}%` })),
+      );
+
     // Card 1: Intelligence & Credits
     const paused = !!c.pausedUntil;
     const creditVal = paused ? `Paused · resets ${c.resetLabel || 'soon'}` : `Claude · ${c.left5hPct ?? 100}% left (5h)`;
-    const backups = [c.localModel ? 'Local Qwen 3B' : null, 'Zero-AI'].filter(Boolean).join(' → ');
-    const card1 = el('div', { class: 't-card' },
-      el('div', { class: 't-kicker' }, 'Intelligence & Credits', el('span', { class: `t-dot${paused ? ' warn' : ''}` })),
-      el('div', { class: 't-val' }, creditVal),
-      el('div', { class: 't-sub' }, paused ? `Backups: Gemini → ${backups}` : `7d ~${c.left7dPct ?? 100}% left · backups: ${backups}`),
-      el('div', { class: 't-bar' }, el('i', { class: paused ? 'warn' : '', style: `width:${paused ? 100 : (c.left5hPct ?? 100)}%` })),
-    );
+    const backups = ['Gemini', c.localModel ? 'Local Qwen 3B' : null, 'Zero-AI'].filter(Boolean).join(' → ');
+    const card1 = mkCard({
+      kicker: 'Intelligence & Credits',
+      dotCls: paused ? 'warn' : '',
+      val: creditVal,
+      sub: paused ? `Backups: ${backups}` : `7d ~${c.left7dPct ?? 100}% left · backups: ${backups}`,
+      pct: paused ? 100 : (c.left5hPct ?? 100),
+      barCls: paused ? 'warn' : '',
+      part: 6,
+      title: 'Inspect Decide & credit status',
+    });
 
-    // Card 2: Bouncer Shield
+    // Card 2: Bouncer Shield (uses SetFit median ms, never a triage spike)
     const pct = t.bouncerSleepPct;
-    const card2 = el('div', { class: 't-card' },
-      el('div', { class: 't-kicker' }, 'Bouncer Shield', el('span', { class: 't-dot sense' })),
-      el('div', { class: 't-val' }, pct !== undefined ? `${pct}% filtered at $0` : `${b.model === 'setfit' ? 'SetFit active' : 'Prototype'}`),
-      el('div', { class: 't-sub' }, `${b.model === 'setfit' ? 'Local SetFit' : 'Prototype'} · ${fmtNum(b.examples || 0)} labels${b.lastMs ? ` · ${Math.round(b.lastMs)}ms` : ''}`),
-      el('div', { class: 't-bar' }, el('i', { class: 'sense', style: `width:${pct ?? 60}%` })),
-    );
+    const msText = t.setfitMs !== undefined ? ` · ~${t.setfitMs}ms` : '';
+    const card2 = mkCard({
+      kicker: 'Bouncer Shield',
+      dotCls: 'sense',
+      val: pct !== undefined ? `${pct}% filtered at $0` : `${b.model === 'setfit' ? 'SetFit active' : 'Prototype'}`,
+      sub: `${b.model === 'setfit' ? 'Local SetFit' : 'Prototype'} · ${fmtNum(b.examples || 0)} labels${msText}`,
+      pct: pct ?? 60,
+      barCls: 'sense',
+      part: 3,
+      title: 'Inspect local Bouncer model',
+    });
 
     // Card 3: Wake Efficiency
     const med = t.medianTurns || 1;
     const acted = a.desk?.acted24h ?? 0;
     const wakes = a.desk?.wakes24h ?? 0;
-    const card3 = el('div', { class: 't-card' },
-      el('div', { class: 't-kicker' }, 'Wake Efficiency', el('span', { class: 't-dot wake' })),
-      el('div', { class: 't-val' }, `${plural(med, 'turn')} median`),
-      el('div', { class: 't-sub' }, `${fmtNum(acted)} acted / ${fmtNum(wakes)} wakes (24h) · ${fmtNum(a.tools?.total || 0)} tools`),
-      el('div', { class: 't-bar' }, el('i', { class: 'wake', style: `width:${Math.max(15, Math.min(100, Math.round((1 / Math.max(1, med)) * 100)))}%` })),
-    );
+    const cleanNote = t.cleanSleepPct !== undefined ? ` · ${t.cleanSleepPct}% clean` : '';
+    const card3 = mkCard({
+      kicker: 'Wake Efficiency',
+      dotCls: 'wake',
+      val: `${plural(med, 'turn')} median`,
+      sub: `${fmtNum(acted)} acted / ${fmtNum(wakes)} wakes (24h)${cleanNote}`,
+      pct: Math.max(15, Math.min(100, Math.round((1 / Math.max(1, med)) * 100))),
+      barCls: 'wake',
+      part: 5,
+      title: 'Inspect Desk & wake efficiency',
+    });
 
     // Card 4: Trust & Self-Optimization
     const held = snap.approvals?.length ?? 0;
     const standing = t.standingGaps ?? 0;
-    const card4 = el('div', { class: 't-card' },
-      el('div', { class: 't-kicker' }, 'Trust & Self-Opt', el('span', { class: `t-dot${held ? ' warn' : ''}` })),
-      el('div', { class: 't-val' }, held ? `${plural(held, 'draft')} awaiting yes` : 'All actions gated'),
-      el('div', { class: 't-sub' }, `${trust.act_quietly || 0} quiet · ${trust.draft || 0} ask · ${standing} self-opt gaps`),
-      el('div', { class: 't-bar' }, el('i', { class: held ? 'warn' : '', style: 'width:100%' })),
-    );
+    const card4 = mkCard({
+      kicker: 'Trust & Self-Opt',
+      dotCls: held ? 'warn' : '',
+      val: held ? `${plural(held, 'draft')} awaiting yes` : 'All actions gated',
+      sub: `${trust.act_quietly || 0} quiet · ${trust.draft || 0} ask · ${standing} self-opt gaps`,
+      pct: 100,
+      barCls: held ? 'warn' : '',
+      part: 7,
+      title: 'Inspect Trust Ladder & approvals',
+    });
 
     host.append(card1, card2, card3, card4);
   }
@@ -402,7 +433,15 @@
         st.append(el('span', { class: 'soft' }, 'Nothing scheduled to wake him.'));
       }
       const lw = snap.wakes[0];
-      if (lw) sub.append(el('span', { class: 'machine' }, `last wake: ${triggerWords(lw.trigger).toLowerCase()} · ${plural(lw.turns, 'move')}${lw.sent ? ` · said ${lw.sent}` : ''}${lw.ending !== 'sleep' ? ` · ${endingWord(lw.ending)}` : ''}`));
+      if (lw) {
+        sub.append(
+          el(
+            'button',
+            { class: 'machine link-btn', type: 'button', onclick: () => openWake(lw.wakeId), title: 'Open last wake in playback' },
+            `last wake: ${triggerWords(lw.trigger).toLowerCase()} · ${plural(lw.turns, 'move')}${lw.sent ? ` · said ${lw.sent}` : ''}${lw.ending !== 'sleep' ? ` · ${endingWord(lw.ending)}` : ''} →`,
+          ),
+        );
+      }
     }
 
     const needCount = ownerNeeds(snap);
@@ -1072,6 +1111,10 @@
   }
 
   function openNodeSheet(part) {
+    if (state.sheet?.kind === 'node' && state.sheet.part === Number(part)) {
+      closeSheet();
+      return;
+    }
     if (state.player) {
       state.player.destroy();
       state.player = undefined;
@@ -1623,32 +1666,48 @@
     const served = servingGap();
     const order = { open: 0, waiting: 1, proposed: 2, closed: 3, dropped: 4 };
 
+    const gf = state.gapFilter || 'all';
+    const gq = (state.gapQuery || '').trim().toLowerCase();
+    const matchesGap = (g) => {
+      if (g.id === 'gap_root') return true;
+      const done = g.status === 'closed' || g.status === 'dropped';
+      if (gf === 'life' && (g.standing || done)) return false;
+      if (gf === 'selfopt' && !g.standing) return false;
+      if (gf === 'proposed' && g.status !== 'proposed') return false;
+      if (gf === 'done' && !done) return false;
+      if (gq && !`${g.title} ${g.target} ${g.reality} ${g.id}`.toLowerCase().includes(gq)) return false;
+      return true;
+    };
+
     const gapRow = (g) => {
       const done = g.status === 'closed' || g.status === 'dropped';
       const isRoot = g.id === 'gap_root';
+      const isStanding = !!g.standing;
       const head = el(
         'div',
-        { class: 'gap-head' },
+        { class: 'gap-head', title: g.id },
         el('span', { class: `gap-mark ${isRoot ? 'root' : g.status}`, 'aria-hidden': 'true' }),
         el('span', { class: 'gap-title' }, g.title),
-        isRoot ? el('span', { class: 'pill quiet' }, 'never closes') : el('span', { class: `pill ${g.status}` }, GAP_STATUS[g.status] ?? g.status),
+        isRoot
+          ? el('span', { class: 'pill quiet' }, 'never closes')
+          : isStanding
+            ? el('span', { class: 'pill standing' }, 'standing')
+            : el('span', { class: `pill ${g.status}` }, GAP_STATUS[g.status] ?? g.status),
         !isRoot && !done && g.due && Number.isFinite(Date.parse(g.due)) ? dueChip(g.due, now) : null,
-        !isRoot ? el('span', { class: 'pill quiet' }, done ? `${g.status} ${fmtAgo(now - Date.parse(g.updatedAt))}` : g.source === 'owner' ? 'you asked' : 'he spotted it') : null,
+        !isRoot ? el('span', { class: 'pill quiet' }, isStanding ? 'never closes' : done ? `${g.status} ${fmtAgo(now - Date.parse(g.updatedAt))}` : g.source === 'owner' ? 'you asked' : 'he spotted it') : null,
       );
-      const clampBox = (cls, text) => {
-        const span = el('span', { class: `${cls} clamp` }, clean(text));
-        return span;
-      };
+      const clampBox = (cls, text) => el('span', { class: `${cls} clamp` }, clean(text));
       const tvr = el('div', { class: 'tvr' });
       tvr.append(el('span', { class: 'k' }, 'Want'), clampBox('want', g.target), el('span', { class: 'k' }, 'Now'), clampBox('now', g.reality));
       if (g.waitingOn) tvr.append(el('span', { class: 'k' }, 'Waits on'), el('span', { class: 'now' }, clean(g.waitingOn)));
-      if (!done) {
+      if (!done && !isStanding) {
         const moves = isRoot ? [...g.next, ...snap.looseWatches.map((w) => ({ ...w, loose: true }))] : g.next;
         const list = el('ul', { class: 'next-moves' });
         if (!moves.length) list.append(el('li', { class: 'none' }, el('span', { class: 'when' }, 'none'), el('span', { class: 'what' }, 'No next move in motion. Code schedules a quick return at the end of a wake.')));
         for (const mv of moves.slice(0, 4)) {
+          const nice = humanizeLabel(mv.label);
           const when = mv.kind === 't3_thread' ? [el('span', null, 'when thread ends')] : mv.fireAt ? [fmtWhen(mv.fireAt, now), ' ', el('span', { class: 'cd', 'data-in': mv.fireAt }, fmtIn(Date.parse(mv.fireAt) - Date.now()))] : ['–'];
-          list.append(el('li', { title: clean(mv.label) }, el('span', { class: 'when' }, when), el('span', { class: 'what' }, short(clean(mv.label), 220))));
+          list.append(el('li', { title: nice }, el('span', { class: 'when' }, when), el('span', { class: 'what' }, short(nice, 180))));
         }
         if (moves.length > 4) list.append(el('li', null, el('span', { class: 'when' }, ''), el('span', { class: 'what' }, `and ${moves.length - 4} more`)));
         tvr.append(el('span', { class: 'k' }, 'Next'), list);
@@ -1679,10 +1738,26 @@
       return row;
     };
 
+    const hasMatch = (g) => matchesGap(g) || childrenOf(g.id).some(hasMatch);
     const build = (g, depth) => {
       const li = el('li', null, gapRow(g));
-      const kids = childrenOf(g.id).sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-      if (kids.length && depth < 6) li.append(el('ul', null, kids.map((k) => build(k, depth + 1))));
+      const allKids = childrenOf(g.id)
+        .filter(hasMatch)
+        .sort((a, b) => Number(!!a.standing) - Number(!!b.standing) || (order[a.status] ?? 9) - (order[b.status] ?? 9) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+      if (g.id === 'gap_root' && gf === 'all' && !gq) {
+        const lifeKids = allKids.filter((k) => !k.standing);
+        const standKids = allKids.filter((k) => k.standing);
+        const ul = el('ul', null, lifeKids.map((k) => build(k, depth + 1)));
+        if (standKids.length) {
+          const totalStand = gaps.filter((x) => x.standing).length;
+          const open = !!state.showStanding;
+          const btn = el('button', { class: 'selfopt-toggle', type: 'button', onclick: () => ((state.showStanding = !state.showStanding), renderGaps()) }, `${open ? '▾' : '▸'} ${plural(totalStand, 'standing self-optimization gap')}`);
+          ul.append(el('li', null, btn, ...(open ? standKids.map((k) => build(k, depth + 1)) : [])));
+        }
+        li.append(ul);
+      } else if (allKids.length && depth < 6) {
+        li.append(el('ul', null, allKids.map((k) => build(k, depth + 1))));
+      }
       return li;
     };
     const tree = el('ul', { class: 'gap-tree' }, root ? build(root, 0) : null);
@@ -1703,8 +1778,16 @@
     for (const a of snap.approvals) {
       items.push(el('div', { class: 'need' }, el('span', { class: 'kind' }, 'Held for your yes'), el('span', { class: 'what', title: a.toolId }, `${capFirst(toolWords(a.toolId))}${a.gapId && snap.gapTitles[a.gapId] ? ` for “${short(snap.gapTitles[a.gapId], 60)}”` : ''}`), el('span', { class: 'detail' }, short(prettyInput(a.input), 260)), el('span', { class: 'ago' }, `asked ${fmtAgo(now - Date.parse(a.createdAt))}`)));
     }
+    const jumpGap = (gapId) => {
+      const target = document.querySelector(`[data-gap-row="${gapId}"]`);
+      if (!target) return;
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.remove('flash');
+      void target.offsetWidth;
+      target.classList.add('flash');
+    };
     for (const g of snap.gaps.filter((x) => x.status === 'proposed')) {
-      items.push(el('div', { class: 'need' }, el('span', { class: 'kind' }, 'Gap waiting for your yes'), el('span', { class: 'what' }, g.title), el('span', { class: 'detail serif' }, short(clean(g.target), 240)), el('span', { class: 'ago' }, `he spotted it ${fmtAgo(now - Date.parse(g.createdAt))}`)));
+      items.push(el('div', { class: 'need clickable', tabindex: '0', role: 'button', onclick: () => jumpGap(g.id), onkeydown: (e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), jumpGap(g.id)) }, el('span', { class: 'kind' }, 'Gap waiting for your yes'), el('span', { class: 'what' }, g.title), el('span', { class: 'detail serif' }, short(clean(g.target), 220)), el('span', { class: 'ago' }, `he spotted it ${fmtAgo(now - Date.parse(g.createdAt))} · click to jump →`)));
     }
     for (const h of brokenSenses(snap)) {
       items.push(el('div', { class: 'need' }, el('span', { class: 'kind fail' }, 'A sense isn’t working'), el('span', { class: 'what' }, CONNECTOR_LABEL[h.id] ?? capFirst(h.id)), el('span', { class: 'detail' }, short(clean(h.problem ?? ''), 200)), h.lastSuccessAt ? el('span', { class: 'ago' }, `last worked ${fmtAgo(now - Date.parse(h.lastSuccessAt))}`) : null));
@@ -1908,7 +1991,14 @@
     const now = Date.parse(snap.now) || Date.now();
     const list = $('#wakeList');
     const all = snap.wakes;
-    const shown = state.wakeFilter === 'acted' ? all.filter((w) => w.acted || w.sent) : all;
+    const wq = (state.wakeQuery || '').trim().toLowerCase();
+    const byMode =
+      state.wakeFilter === 'acted'
+        ? all.filter((w) => w.acted || w.sent)
+        : state.wakeFilter === 'crashed'
+          ? all.filter((w) => w.ending && w.ending !== 'sleep')
+          : all;
+    const shown = wq ? byMode.filter((w) => `${w.trigger?.text || ''} ${w.firstSent || ''} ${w.ending || ''}`.toLowerCase().includes(wq)) : byMode;
     const items = shown.slice(0, state.wakeLimit).map((w) => {
       const moves = el('span', { class: 'w-moves', 'aria-label': `${w.turns} moves` });
       for (const mv of w.moves.slice(0, 30)) {
@@ -1938,9 +2028,9 @@
   function renderFoot() {
     const snap = state.snap;
     $('#foot').replaceChildren(
-      el('span', null, `Read-only view of the ${snap.workspace} workspace`),
-      el('span', null, `Daemon ${snap.daemon.up ? 'answering' : 'not answering'} on port ${snap.daemon.port}`),
-      el('span', null, 'Updates live as files change'),
+      el('span', null, `Read-only view of ${snap.workspace} · 127.0.0.1`),
+      el('span', null, `Daemon ${snap.daemon.up ? 'answering' : 'not answering'} on :${snap.daemon.port}`),
+      el('span', null, 'Shortcuts: 1–9, 0 inspect · / search gaps · t theme · Esc close'),
     );
   }
 
@@ -1984,6 +2074,28 @@
         renderTimeline();
       });
     }
+    for (const b of document.querySelectorAll('#gapFilter button')) {
+      b.addEventListener('click', () => {
+        state.gapFilter = b.dataset.gfilter;
+        for (const o of document.querySelectorAll('#gapFilter button')) o.setAttribute('aria-checked', String(o === b));
+        renderGaps();
+      });
+    }
+    const gapSearch = $('#gapSearch');
+    if (gapSearch) {
+      gapSearch.addEventListener('input', () => {
+        state.gapQuery = gapSearch.value;
+        renderGaps();
+      });
+    }
+    const wakeSearch = $('#wakeSearch');
+    if (wakeSearch) {
+      wakeSearch.addEventListener('input', () => {
+        state.wakeQuery = wakeSearch.value;
+        state.wakeLimit = 24;
+        renderWakeList();
+      });
+    }
     for (const b of document.querySelectorAll('#wakeFilter button')) {
       b.addEventListener('click', () => {
         state.wakeFilter = b.dataset.filter;
@@ -1992,6 +2104,20 @@
         renderWakeList();
       });
     }
+    document.addEventListener('keydown', (e) => {
+      if (e.target && ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
+        if (e.key === 'Escape') e.target.blur();
+        return;
+      }
+      if (e.key === '/' && gapSearch) {
+        e.preventDefault();
+        gapSearch.focus();
+      } else if (e.key === 't' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        $('#themeBtn')?.click();
+      } else if (/^[0-9]$/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        openNodeSheet(e.key === '0' ? 10 : Number(e.key));
+      }
+    });
     let rt;
     window.addEventListener('resize', () => {
       clearTimeout(rt);

@@ -19,6 +19,11 @@ import type { LosslessEvent, Receipt, ToolManifest } from '../types';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUTLINE_PATH = path.resolve(HERE, '..', '..', 'docs', 'OUTLINE.md');
+/** Strips local home directory usernames from user-facing dashboard strings. */
+function redactPaths(s: string): string {
+  return s.replace(/\/(?:Users|home)\/[^/\s]+\//g, '~/');
+}
+
 /** The daemon's default turn cap per wake (RufusCore.maxTurnsPerWake). */
 export const TURN_CAP = 25;
 const DAY_MS = 24 * 60 * 60_000;
@@ -609,6 +614,13 @@ export class DashboardData {
     const decWake = recentDecisions.filter((d) => d.label === 'WAKE').length;
     const decSleep = recentDecisions.filter((d) => d.label === 'SLEEP').length;
     const bouncerSleepPct = decWake + decSleep > 0 ? Math.round((100 * decSleep) / (decWake + decSleep)) : undefined;
+    const setfitTimes = recentDecisions
+      .filter((d) => d.backend === 'setfit' && typeof d.durationMs === 'number' && Number.isFinite(d.durationMs))
+      .map((d) => d.durationMs!)
+      .sort((a, b) => a - b);
+    const setfitMs = setfitTimes.length ? Math.round(setfitTimes[Math.floor(setfitTimes.length * 0.5)]!) : undefined;
+    const crashed24h = wakes24.filter((w) => DashboardData.ending(w) === 'crashed').length;
+    const cleanSleepPct = wakes24.length ? Math.round((100 * wakes24.filter((w) => DashboardData.ending(w) === 'sleep').length) / wakes24.length) : undefined;
     const standingGaps = gaps.filter((g) => g.standing && !isDone(g)).length;
     const localModel = findLocalLlmModel(this.dir);
     const cap5h = creditState.calibrated5hUsd ?? 15;
@@ -638,6 +650,9 @@ export class DashboardData {
       telemetry: {
         medianTurns,
         bouncerSleepPct,
+        setfitMs,
+        crashed24h,
+        cleanSleepPct,
         standingGaps,
       },
       outline,
@@ -690,7 +705,7 @@ export class DashboardData {
         repeat: { cap: TURN_CAP, longest24h: wakes24.reduce((n, w) => Math.max(n, w.turns || 0), 0) },
         tools: { total: tools.total, builtin: tools.builtin, custom: tools.custom, broken: tools.broken, skills: skills.length, skillNames: skills },
         sleep: {
-          next: next ? { at: next.fireAt, label: trim(next.label, 200), gapId: next.gapId } : undefined,
+          next: next ? { at: next.fireAt, label: redactPaths(trim(next.label, 200)), gapId: next.gapId } : undefined,
           timers: timers.length,
           threads: threads.length,
           ended24h: Object.fromEntries((['sleep', 'cap', 'safety', 'crashed', 'unreadable'] as const).map((k) => [k, wakes24.filter((w) => DashboardData.ending(w) === k).length])),
@@ -702,25 +717,26 @@ export class DashboardData {
         title: g.title,
         source: g.source,
         status: g.status,
-        target: trim(g.target, 900),
-        reality: trim(g.reality, 900),
+        standing: g.standing === true,
+        target: redactPaths(trim(g.target, 900)),
+        reality: redactPaths(trim(g.reality, 900)),
         waitingOn: g.waitingOn,
         due: g.due,
         // What was already tried for this gap (code's work log), newest last.
-        log: (Array.isArray(g.log) ? g.log : []).slice(-3).map((e) => ({ at: e.at, toolId: e.toolId, status: e.status, result: trim(e.result, 160), wakeId: e.wakeId })),
+        log: (Array.isArray(g.log) ? g.log : []).slice(-3).map((e) => ({ at: e.at, toolId: e.toolId, status: e.status, result: redactPaths(trim(e.result, 160)), wakeId: e.wakeId })),
         createdAt: g.createdAt,
         updatedAt: g.updatedAt,
         next: watches
           .filter((w) => w.gapId === g.id || !!w.gapIds?.includes(g.id))
-          .map((w) => ({ id: w.id, kind: w.kind, label: trim(w.label, 400), fireAt: w.fireAt, threadId: w.threadId }))
+          .map((w) => ({ id: w.id, kind: w.kind, label: redactPaths(trim(w.label, 400)), fireAt: w.fireAt, threadId: w.threadId }))
           .sort((a, b) => (a.fireAt ? Date.parse(a.fireAt) : Infinity) - (b.fireAt ? Date.parse(b.fireAt) : Infinity)),
       })),
       gapTitles: Object.fromEntries(gaps.map((g) => [g.id, g.title])),
       looseWatches: watches
         .filter((w) => !w.gapId || !gapIds.has(w.gapId))
-        .map((w) => ({ id: w.id, kind: w.kind, label: trim(w.label, 400), fireAt: w.fireAt, threadId: w.threadId })),
+        .map((w) => ({ id: w.id, kind: w.kind, label: redactPaths(trim(w.label, 400)), fireAt: w.fireAt, threadId: w.threadId })),
       approvals: approvals.map((a) => ({ id: a.id, toolId: a.toolId, input: trimDeep(a.input ?? {}), gapId: a.gapId, createdAt: a.createdAt })),
-      recentEvents: events.slice(-60).map((e) => ({ id: e.id, source: e.source, kind: e.kind, sense: senseOf(e), at: e.timestamp, actor: e.actor, text: trim(e.text, 160) })),
+      recentEvents: events.slice(-60).map((e) => ({ id: e.id, source: e.source, kind: e.kind, sense: senseOf(e), at: e.timestamp, actor: e.actor, text: redactPaths(trim(e.text, 160)) })),
       recentDecisions: decisions.slice(-60).map((d) => ({ eventId: d.eventId, at: d.at, label: d.label, backend: d.backend, reason: d.reason, durationMs: d.durationMs })),
       wakes: wakes.slice(-150).reverse().map((w) => DashboardData.wakeSummary(w)),
       recentMoves: wakes
@@ -838,8 +854,8 @@ export class DashboardData {
         status: r.status,
         effect: r.effect,
         durationMs: r.durationMs,
-        summary: trim(r.summary, 1200),
-        error: r.error,
+        summary: redactPaths(trim(r.summary, 1200)),
+        error: r.error ? redactPaths(r.error) : undefined,
         nextHints: r.nextHints,
         at: r.at,
         sentText: t.toolId === 'send_message' && typeof data?.text === 'string' ? data.text : undefined,

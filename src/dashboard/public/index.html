@@ -10,29 +10,38 @@
   <script src="/app.js" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="topbar" id="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#glance">Rufus</a>
+      <span class="daemon" id="daemon"></span>
+      <span class="privacy-pill" title="Bound strictly to 127.0.0.1 — read-only view, never mutates your workspace">Local · Read-only</span>
+      <nav class="jump-nav" aria-label="Jump to section">
+        <a href="#stage">Anatomy</a>
+        <a href="#gapsSec">Gaps</a>
+        <a href="#needsSec">Needs you</a>
+        <a href="#history">History</a>
+      </nav>
+      <span class="spacer"></span>
+      <span class="clock" id="clock"></span>
+      <button class="needs-chip" id="needsChip" type="button" hidden></button>
+      <button class="theme-btn" id="themeBtn" type="button" aria-label="Switch theme" title="Toggle theme (t)"></button>
+    </div>
+  </div>
   <div class="page">
     <header class="glance" id="glance">
-      <div class="meta">
-        <span class="brand">Rufus</span>
-        <span class="daemon" id="daemon"></span>
-        <span class="privacy-pill" title="Bound strictly to 127.0.0.1 — read-only view, never mutates your workspace">Local · Read-only</span>
-        <span class="clock" id="clock"></span>
-        <span class="spacer"></span>
-        <button class="needs-chip" id="needsChip" type="button" hidden></button>
-        <button class="theme-btn" id="themeBtn" type="button" aria-label="Switch theme"></button>
-      </div>
       <h1 class="statement" id="statement" aria-live="polite">Reading the workspace…</h1>
       <p class="substatement" id="substatement"></p>
       <div class="telemetry" id="telemetry" aria-label="Live system telemetry"></div>
     </header>
 
-    <main>
+    <main id="main">
       <section class="stage" id="stage">
         <figure class="plate" id="plate">
           <figcaption class="plate-caption">
             <span class="plate-no">Plate I</span>
             <span class="plate-title">The working parts of Rufus, live</span>
-            <span class="plate-hint" id="plateHint">Select a part to read what it does.</span>
+            <span class="plate-hint" id="plateHint">Click a part or press 1–9, 0 to inspect · Esc closes</span>
           </figcaption>
           <svg id="plateSvg" class="plate-svg" role="group" aria-label="Anatomy of Rufus: senses, memory, bouncer, gaps, desk, decide, trust gate, repeat, tools and sleep"></svg>
         </figure>
@@ -40,18 +49,33 @@
       </section>
 
       <section class="lower">
-        <div class="col col-gaps">
-          <div class="sec-head">
-            <h2>What he’s working toward</h2>
-            <p class="sec-note" id="gapNote"></p>
+        <div class="col col-gaps" id="gapsSec">
+          <div class="sec-head row">
+            <div>
+              <h2>What he’s working toward</h2>
+              <p class="sec-note" id="gapNote"></p>
+            </div>
+            <div class="toolbar">
+              <div class="seg small" role="radiogroup" aria-label="Filter gaps" id="gapFilter">
+                <button type="button" role="radio" data-gfilter="all" aria-checked="true">All</button>
+                <button type="button" role="radio" data-gfilter="life">Life</button>
+                <button type="button" role="radio" data-gfilter="selfopt">Self-Opt</button>
+                <button type="button" role="radio" data-gfilter="proposed">Proposed</button>
+                <button type="button" role="radio" data-gfilter="done">Done</button>
+              </div>
+              <input class="search-box" id="gapSearch" type="search" placeholder="Filter gaps… (/)" aria-label="Filter gaps">
+            </div>
           </div>
           <div id="gapTree" class="gap-tree"></div>
         </div>
-        <div class="col col-needs">
-          <div class="sec-head">
-            <h2 id="needsHead">Needs you</h2>
+        <div class="col col-needs" id="needsSec">
+          <div class="needs-sticky">
+            <div class="sec-head">
+              <h2 id="needsHead">Needs you</h2>
+              <p class="sec-note">Reply yes/no in Telegram or voice to unblock.</p>
+            </div>
+            <div id="needs" class="needs"></div>
           </div>
-          <div id="needs" class="needs"></div>
         </div>
       </section>
 
@@ -70,9 +94,13 @@
         <div id="timeline" class="timeline"></div>
         <div class="wakes-head sec-head row">
           <h3>Wakes</h3>
-          <div class="seg small" role="radiogroup" aria-label="Which wakes" id="wakeFilter">
-            <button type="button" role="radio" data-filter="acted" aria-checked="true">When he acted</button>
-            <button type="button" role="radio" data-filter="all">All</button>
+          <div class="toolbar">
+            <div class="seg small" role="radiogroup" aria-label="Which wakes" id="wakeFilter">
+              <button type="button" role="radio" data-filter="acted" aria-checked="true">When he acted</button>
+              <button type="button" role="radio" data-filter="crashed">Issues</button>
+              <button type="button" role="radio" data-filter="all">All</button>
+            </div>
+            <input class="search-box" id="wakeSearch" type="search" placeholder="Search wakes…" aria-label="Search wakes">
           </div>
         </div>
         <ol id="wakeList" class="wake-list"></ol>

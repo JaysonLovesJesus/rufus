@@ -14,7 +14,7 @@ import { DashboardData } from './data';
  */
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
-const WATCHED = ['live.json', 'gaps.json', 'watches.json', 'approvals.json', 'wakes.jsonl', 'decisions.jsonl', 'events.jsonl', 'trust.json', 'permissions.json', 'senses.json'];
+const WATCHED = ['live.json', 'gaps.json', 'watches.json', 'approvals.json', 'wakes.jsonl', 'decisions.jsonl', 'events.jsonl', 'trust.json', 'permissions.json', 'senses.json', 'credits.json', 'config.json'];
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -148,7 +148,7 @@ export async function startDashboard(opts: DashboardOptions): Promise<DashboardS
         return w ? sendJson(res, 200, w) : sendJson(res, 404, { error: 'wake not found' });
       }
       if (p === '/api/stream') {
-        res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+        res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no', 'x-content-type-options': 'nosniff' });
         res.write(`retry: 1500\nevent: hello\ndata: ${JSON.stringify({ rev })}\n\n`);
         clients.add(res);
         req.on('close', () => clients.delete(res));

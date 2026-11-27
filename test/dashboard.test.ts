@@ -93,6 +93,8 @@ describe('dashboard', () => {
     expect(typeof snap.credits.left5hPct).toBe('number');
     expect(snap.telemetry).toBeDefined();
     expect(typeof snap.telemetry.medianTurns).toBe('number');
+    expect(typeof snap.gaps[0].standing).toBe('boolean');
+    expect(res.body).not.toMatch(/\/Users\/[^/\s]+\//);
   });
 
   it('serves one wake for playback, and 404 for an unknown one', async () => {
