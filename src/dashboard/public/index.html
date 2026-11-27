@@ -4,209 +4,119 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <title>Rufus — Command</title>
+  <title>Rufus</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <div class="ambient" aria-hidden="true"></div>
+  <a class="skip-link" href="#main">Skip to content</a>
 
-  <header class="hud-bar">
-    <div class="hud-bar-inner">
-      <div class="brand-group">
-        <span class="brand-mark" aria-hidden="true"></span>
-        <span class="brand-name">RUFUS</span>
-        <span class="status-pill" id="daemonPill">
-          <span class="dot" id="daemonDot"></span>
-          <span id="daemonLabel">CONNECTING</span>
-        </span>
-      </div>
-
-      <nav class="nav-tabs" role="tablist" aria-label="Dashboard views">
-        <button class="nav-tab active" role="tab" aria-selected="true" data-view="command">Command</button>
-        <button class="nav-tab" role="tab" aria-selected="false" data-view="missions">Missions</button>
-        <button class="nav-tab" role="tab" aria-selected="false" data-view="log">Flight Log</button>
-        <button class="nav-tab" role="tab" aria-selected="false" data-view="systems">Systems</button>
-      </nav>
-
-      <div class="hud-right">
-        <button class="attention-btn" id="attentionBtn" type="button" hidden></button>
-        <span class="hud-clock" id="hudClock">--:--</span>
-        <button class="icon-btn" id="themeBtn" type="button" aria-label="Toggle theme" title="Toggle theme (T)">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="4"></circle>
-            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
-          </svg>
-        </button>
-      </div>
-    </div>
+  <header class="rail" id="rail">
+    <a class="wordmark" href="#top">Rufus</a>
+    <span class="rail-state" id="railState"></span>
+    <span class="rail-item" id="daemon"></span>
+    <span class="rail-item credits" id="credits"></span>
+    <span class="rail-spacer"></span>
+    <button class="rail-needs" id="needsChip" type="button" hidden></button>
+    <span class="rail-clock num" id="clock"></span>
+    <button class="rail-btn" id="helpBtn" type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
+    <button class="rail-btn" id="themeBtn" type="button" aria-label="Switch theme" title="Switch theme (T)"></button>
   </header>
+  <div class="banner" id="streamBanner" role="status" hidden>Live stream dropped. Reconnecting…</div>
 
-  <main class="shell" id="main">
-    <!-- VIEW 1: COMMAND HUD -->
-    <section class="view active" id="view-command" role="tabpanel">
-      <div class="command-grid">
-        <div class="command-primary">
-          <section class="panel core-panel">
-            <div class="core-visual">
-              <svg id="coreSvg" class="core-svg" viewBox="0 0 220 220" role="img" aria-label="Rufus neural core status">
-                <defs>
-                  <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.26" />
-                    <stop offset="65%" stop-color="var(--accent)" stop-opacity="0.05" />
-                    <stop offset="100%" stop-color="var(--accent)" stop-opacity="0" />
-                  </radialGradient>
-                </defs>
-                <circle cx="110" cy="110" r="102" fill="url(#coreGlow)" />
-                <circle cx="110" cy="110" r="92" class="ring-track" />
-                <circle cx="110" cy="110" r="92" class="ring-outer" id="ringOuter" />
-                <circle cx="110" cy="110" r="74" class="ring-ticks" id="ringTicks" />
-                <circle cx="110" cy="110" r="58" class="ring-inner" id="ringInner" />
-                <circle cx="110" cy="110" r="5" class="ring-center-dot" id="ringDot" />
-                <text x="110" y="96" text-anchor="middle" class="core-state-text" id="coreState">STANDBY</text>
-                <text x="110" y="132" text-anchor="middle" class="core-sub-text" id="coreSub">IDLE</text>
-              </svg>
-            </div>
-            <div class="core-info">
-              <div class="eyebrow" id="coreEyebrow">SYSTEM ONLINE · LOCAL LOOPBACK</div>
-              <h1 class="core-headline" id="coreHeadline">Initializing telemetry…</h1>
-              <p class="core-caption" id="coreCaption"></p>
-              <div class="pipeline" id="livePipeline" aria-label="Live execution stage"></div>
-              <div class="live-turns" id="liveTurns" hidden></div>
-              <div class="kpi-strip" id="kpiStrip"></div>
-            </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h2 class="panel-title">Active Missions</h2>
-                <p class="panel-sub" id="activeMissionsSub"></p>
-              </div>
-              <button class="link-btn" type="button" data-goto="missions">View all →</button>
-            </div>
-            <div class="mission-list" id="commandMissions"></div>
-          </section>
-        </div>
-
-        <aside class="command-rail">
-          <section class="panel attention-panel" id="attentionPanel" hidden>
-            <div class="panel-head">
-              <div>
-                <h2 class="panel-title amber">Needs Your Call</h2>
-                <p class="panel-sub">Reply in Telegram or voice to approve</p>
-              </div>
-            </div>
-            <div class="attention-list" id="attentionList"></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h2 class="panel-title">Credit Runway</h2>
-                <p class="panel-sub" id="creditStackSub"></p>
-              </div>
-            </div>
-            <div class="gauges" id="creditGauges"></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h2 class="panel-title">Recent Activity</h2>
-                <p class="panel-sub">Click any wake to inspect recorded thoughts</p>
-              </div>
-              <button class="link-btn" type="button" data-goto="log">Full log →</button>
-            </div>
-            <div class="activity-feed" id="recentFeed"></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h2 class="panel-title">Senses</h2>
-                <p class="panel-sub" id="sensesSub"></p>
-              </div>
-              <button class="link-btn" type="button" data-goto="systems">Systems →</button>
-            </div>
-            <div class="senses-grid" id="sensesGrid"></div>
-          </section>
-        </aside>
-      </div>
+  <div class="page" id="top">
+    <section class="head" aria-label="Right now">
+      <h1 class="statement" id="statement" aria-live="polite">Reading the workspace…</h1>
+      <p class="thought" id="thought" hidden></p>
+      <p class="machine-line" id="machineLine"></p>
+      <dl class="readout" id="readout" aria-label="Last 24 hours"></dl>
     </section>
 
-    <!-- VIEW 2: MISSIONS -->
-    <section class="view" id="view-missions" role="tabpanel" hidden>
-      <div class="view-toolbar">
-        <div>
-          <h1 class="view-title">Missions</h1>
-          <p class="view-sub" id="missionsSummary"></p>
-        </div>
-        <div class="controls">
-          <div class="seg" id="missionFilter" role="radiogroup" aria-label="Mission filter">
-            <button type="button" role="radio" data-mf="active" aria-checked="true">Active</button>
-            <button type="button" role="radio" data-mf="proposed">Proposed</button>
-            <button type="button" role="radio" data-mf="selfopt">Self-Opt</button>
-            <button type="button" role="radio" data-mf="done">Closed</button>
-          </div>
-          <input class="search" id="missionSearch" type="search" placeholder="Filter missions… (/)" aria-label="Filter missions">
-        </div>
-      </div>
-      <div class="mission-grid" id="missionBoard"></div>
-    </section>
-
-    <!-- VIEW 3: FLIGHT LOG -->
-    <section class="view" id="view-log" role="tabpanel" hidden>
-      <div class="view-toolbar">
-        <div>
-          <h1 class="view-title">Flight Log</h1>
-          <p class="view-sub" id="logSummary"></p>
-        </div>
-        <div class="controls">
-          <div class="seg" id="wakeFilter" role="radiogroup" aria-label="Wake filter">
-            <button type="button" role="radio" data-wf="acted" aria-checked="true">Acted</button>
-            <button type="button" role="radio" data-wf="issues">Issues</button>
-            <button type="button" role="radio" data-wf="all">All</button>
-          </div>
-          <input class="search" id="wakeSearch" type="search" placeholder="Search wakes…" aria-label="Search wakes">
-        </div>
-      </div>
-      <section class="panel spark-panel">
-        <div class="spark-head">
-          <span class="eyebrow">24-HOUR WAKE CADENCE</span>
-          <span class="mono-dim" id="sparkStats"></span>
-        </div>
-        <div id="sparkChart" class="spark-chart"></div>
+    <main id="main">
+      <section class="stage" id="stage">
+        <figure class="plate" id="plate">
+          <svg id="plateSvg" class="plate-svg" role="group" aria-label="Anatomy of Rufus: senses, memory, bouncer, gaps, desk, decide, trust gate, repeat, tools and sleep"></svg>
+          <figcaption class="plate-hint" id="plateHint">Click a part or press 1–9, 0 · Esc closes · ? for keys</figcaption>
+        </figure>
+        <aside class="sheet" id="sheet" hidden></aside>
       </section>
-      <section class="panel">
-        <div class="wake-table" id="wakeTable"></div>
-      </section>
-    </section>
 
-    <!-- VIEW 4: SYSTEMS -->
-    <section class="view" id="view-systems" role="tabpanel" hidden>
-      <div class="view-toolbar">
-        <div>
-          <h1 class="view-title">Systems</h1>
-          <p class="view-sub" id="systemsSummary"></p>
+      <section class="lower">
+        <div class="col-gaps" id="gapsSec">
+          <div class="sec-head">
+            <h2>Gaps</h2>
+            <p class="sec-note" id="gapNote"></p>
+            <div class="sec-tools">
+              <div class="tabs" role="radiogroup" aria-label="Filter gaps" id="gapFilter">
+                <button type="button" role="radio" data-gfilter="all" aria-checked="true">All</button>
+                <button type="button" role="radio" data-gfilter="life" aria-checked="false">Life</button>
+                <button type="button" role="radio" data-gfilter="selfopt" aria-checked="false">Self-Opt</button>
+                <button type="button" role="radio" data-gfilter="proposed" aria-checked="false">Proposed</button>
+                <button type="button" role="radio" data-gfilter="done" aria-checked="false">Done</button>
+              </div>
+              <input class="search" id="gapSearch" type="search" placeholder="Search  /" aria-label="Search gaps" autocomplete="off">
+            </div>
+          </div>
+          <div id="gapTree"></div>
         </div>
-      </div>
-      <div class="systems-grid" id="systemsGrid"></div>
-    </section>
-  </main>
+        <div class="col-needs" id="needsSec">
+          <div class="sec-head">
+            <h2 id="needsHead">Needs you</h2>
+          </div>
+          <div id="needs" class="needs"></div>
+        </div>
+      </section>
 
-  <!-- SLIDE-OVER INSPECTOR DRAWER -->
-  <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
-  <aside class="drawer" id="drawer" aria-label="Inspector" hidden>
-    <div class="drawer-head">
-      <div>
-        <div class="eyebrow" id="drawerEyebrow">INSPECTOR</div>
-        <h2 class="drawer-title" id="drawerTitle"></h2>
-      </div>
-      <button class="icon-btn" id="drawerClose" type="button" aria-label="Close inspector" title="Close (Esc)">✕</button>
+      <section class="history" id="history">
+        <div class="sec-head">
+          <h2>Timeline</h2>
+          <p class="sec-note" id="timelineNote"></p>
+          <div class="sec-tools">
+            <div class="tabs" role="radiogroup" aria-label="Time range" id="rangeSeg">
+              <button type="button" role="radio" data-hours="6" aria-checked="false">6h</button>
+              <button type="button" role="radio" data-hours="24" aria-checked="true">24h</button>
+              <button type="button" role="radio" data-hours="72" aria-checked="false">3d</button>
+            </div>
+          </div>
+        </div>
+        <div id="timeline" class="timeline"></div>
+
+        <div class="sec-head wakes-head">
+          <h2>Wake log</h2>
+          <div class="sec-tools">
+            <div class="tabs" role="radiogroup" aria-label="Which wakes" id="wakeFilter">
+              <button type="button" role="radio" data-filter="acted" aria-checked="true">When he acted</button>
+              <button type="button" role="radio" data-filter="crashed" aria-checked="false">Issues</button>
+              <button type="button" role="radio" data-filter="all" aria-checked="false">All</button>
+            </div>
+            <input class="search" id="wakeSearch" type="search" placeholder="Search wakes" aria-label="Search wakes" autocomplete="off">
+          </div>
+        </div>
+        <ol id="wakeList" class="wake-list"></ol>
+      </section>
+    </main>
+
+    <footer class="foot" id="foot"></footer>
+  </div>
+
+  <div class="help" id="help" hidden role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+    <div class="help-card">
+      <h2 id="helpTitle">Keys</h2>
+      <dl>
+        <dt><kbd>1</kbd>–<kbd>9</kbd> <kbd>0</kbd></dt><dd>Inspect a part</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Close the panel</dd>
+        <dt><kbd>Space</kbd></dt><dd>Play / pause a wake</dd>
+        <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Step one turn</dd>
+        <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Slower / faster</dd>
+        <dt><kbd>L</kbd></dt><dd>Follow the live wake</dd>
+        <dt><kbd>G</kbd></dt><dd>Jump to gaps</dd>
+        <dt><kbd>N</kbd></dt><dd>Jump to needs you</dd>
+        <dt><kbd>/</kbd></dt><dd>Search gaps</dd>
+        <dt><kbd>T</kbd></dt><dd>Light / dark</dd>
+      </dl>
     </div>
-    <div class="drawer-body" id="drawerBody"></div>
-  </aside>
+  </div>
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
 </body>
 </html>
