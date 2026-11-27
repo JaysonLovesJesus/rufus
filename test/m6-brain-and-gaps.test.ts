@@ -2,7 +2,7 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { FakeProvider, RufusCore, genericEvent, messageEvent, watchConnector } from '../src';
+import { FakeProvider, RufusCore, gapConnector, genericEvent, messageEvent, watchConnector } from '../src';
 
 const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'rufus-v2-m6-'));
 const NOW = new Date('2026-11-26T22:00:00Z');
@@ -160,6 +160,22 @@ describe('Milestone 6: Gap Board, 5 Brain-State Tools, 4-Level Trust Ladder & Is
     expect(fired).toHaveLength(1);
     expect(fired[0]?.source).toBe('watch');
     expect((await core.bouncer.decide(fired[0]!)).label).toBe('WAKE');
+
+    // Gap trigger wakes when board is empty, stays silent when waiting, wakes when open & unblocked
+    const gConn = gapConnector(dir, { cooldownMs: 1 });
+    const emptyEvents = await gConn.poll();
+    expect(emptyEvents).toHaveLength(1);
+    expect(emptyEvents[0]?.kind).toBe('empty_board');
+    expect((await core.bouncer.decide(emptyEvents[0]!)).label).toBe('WAKE');
+
+    const g1 = await core.gaps.create({ title: 'Waiting gap', target: 'done', reality: 'started', source: 'owner' });
+    await core.gaps.update(g1.id, { status: 'waiting', waitingOn: 'owner reply' });
+    expect(await gConn.poll()).toHaveLength(0);
+
+    await core.gaps.update(g1.id, { status: 'open', waitingOn: null });
+    const openEvents = await gConn.poll();
+    expect(openEvents).toHaveLength(1);
+    expect(openEvents[0]?.kind).toBe('open_work');
 
     // Suppress unused import lint
     expect(genericEvent({ source: 'system', kind: 'test', text: 'ok' }).source).toBe('system');

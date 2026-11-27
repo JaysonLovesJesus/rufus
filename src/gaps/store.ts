@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import type { LosslessEvent } from '../types';
+import type { EventConnector } from '../events/connectors';
+import { genericEvent } from '../events/ingest';
 
 export type GapSource = 'owner' | 'observed';
 export type GapStatus = 'proposed' | 'open' | 'waiting' | 'closed';
@@ -162,4 +165,67 @@ export class GapStore {
     }
     return lines.join('\n');
   }
+}
+
+/**
+ * Gap Board Trigger Connector:
+ * - Empty board (0 active, 0 proposed, 0 waiting): emits `gap/empty_board` so "not having a gap IS the gap" wakes Rufus.
+ * - Unblocked `open` gap(s) with no `waitingOn`: emits `gap/open_work` so Rufus stays in motion on real work.
+ * - All gaps `waiting` or `proposed`: stays completely silent (zero spam).
+ * Uses a fingerprint + cooldown so unchanged state never spams back-to-back wakes.
+ */
+export function gapConnector(workspaceDir: string, opts: { intervalMs?: number; cooldownMs?: number } = {}): EventConnector {
+  const store = new GapStore(workspaceDir);
+  const cooldownMs = opts.cooldownMs ?? 15 * 60_000;
+  let lastFingerprint = '';
+  let lastEmittedAt = 0;
+
+  return {
+    id: 'gaps',
+    intervalMs: opts.intervalMs ?? 60_000,
+    async poll(): Promise<LosslessEvent[]> {
+      const gaps = await store.list();
+      const nonClosed = gaps.filter((g) => g.status !== 'closed');
+      const now = Date.now();
+
+      // Case 1: Empty Gap Board -> not having a gap IS the gap!
+      if (nonClosed.length === 0) {
+        const fp = 'empty_board';
+        if (fp === lastFingerprint && now - lastEmittedAt < cooldownMs) return [];
+        lastFingerprint = fp;
+        lastEmittedAt = now;
+        return [
+          genericEvent({
+            id: `gap_empty_${Math.floor(now / Math.max(1000, cooldownMs))}`,
+            source: 'gap',
+            kind: 'empty_board',
+            text: 'Gap Board is empty. Not having qualified Gaps is the top Gap: call brain.investigate to see current reality across connected projects/feeds, then propose concrete Gaps (or ask the owner to align on top Goals).',
+            timestamp: new Date(now).toISOString(),
+          }),
+        ];
+      }
+
+      // Case 2: Unblocked `open` Gaps -> wake to advance real work!
+      const unblocked = nonClosed.filter((g) => g.status === 'open' && !g.waitingOn);
+      if (unblocked.length > 0) {
+        const fp = `open:${unblocked.map((g) => `${g.id}@${g.updatedAt}`).join(',')}`;
+        if (fp === lastFingerprint && now - lastEmittedAt < cooldownMs) return [];
+        lastFingerprint = fp;
+        lastEmittedAt = now;
+        const summary = unblocked.map((g) => `${g.id} ("${g.title}")`).join(', ');
+        return [
+          genericEvent({
+            id: `gap_open_${Math.floor(now / Math.max(1000, cooldownMs))}_${unblocked[0]!.id}`,
+            source: 'gap',
+            kind: 'open_work',
+            text: `Unblocked open Gap(s) on the Gap Board ready for progress: ${summary}. Pick the highest-leverage next move.`,
+            timestamp: new Date(now).toISOString(),
+          }),
+        ];
+      }
+
+      // Case 3: Everything is `proposed` (awaiting owner) or `waiting` (awaiting job/reply) -> stay silent.
+      return [];
+    },
+  };
 }

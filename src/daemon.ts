@@ -250,7 +250,7 @@ export class RufusCore {
     }
 
     // Automatic teacher->student label logging for SetFit + periodic non-blocking auto-retrain
-    if (event.source !== 'system' && event.kind !== 'owner_direct' && event.source !== 'watch') {
+    if (event.source !== 'system' && event.kind !== 'owner_direct' && event.source !== 'watch' && event.source !== 'gap') {
       const featureText = Bouncer.eventToFeatureText(event);
       await this.bouncer.recordExample({
         text: featureText,
@@ -298,7 +298,7 @@ export class RufusCore {
     const ev = genericEvent({
       source: 'system',
       kind: 'startup',
-      text: 'System just started. Run system.startup_snapshot and send a concise, natural orientation message via send_message, then sleep.',
+      text: 'System just started. Run system.startup_snapshot and send a concise, natural orientation message via send_message. If your Gap Board is empty or has unblocked open Gaps, check them before sleeping.',
       timestamp: this.now().toISOString(),
     });
     return this.processEvent(ev);

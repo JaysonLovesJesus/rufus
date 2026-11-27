@@ -15,7 +15,7 @@ export {
 export { ToolRegistry, type RegisteredTool } from './scripts/registry';
 export { registerBuiltins, type BuiltinDeps } from './scripts/builtins';
 export { ApprovalStore, type TrustLevel, type TrustTable, type PendingApproval } from './scripts/approvals';
-export { GapStore, type Gap, type GapSource, type GapStatus } from './gaps/store';
+export { GapStore, gapConnector, type Gap, type GapSource, type GapStatus } from './gaps/store';
 export { WatchStore, watchConnector, type WatchItem } from './events/watches';
 export { loadBrainSkill, runInvestigateBrain, runPlanBrain, runCreateBrain, runVerifyBrain, type BrainStateName } from './brains/states';
 export { verifySpokenReply, normalizeMultiline, renderWithSpeaker } from './speaker/speaker';
@@ -36,6 +36,7 @@ export { Bouncer } from './bouncer/bouncer';
 export { ClaudeCliProvider, FakeProvider } from './providers/claude';
 export { RufusCore, type DaemonOptions, type ProcessEventResult } from './daemon';
 export { TelegramChannel, type TelegramConfig } from './channels/telegram';
+export { verifyAllParts, type ComponentCheck } from './eval/verify';
 export {
   recordWake,
   loadWakes,

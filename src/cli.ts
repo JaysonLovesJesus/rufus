@@ -6,6 +6,7 @@ import { Bouncer } from './bouncer/bouncer';
 import { TelegramChannel } from './channels/telegram';
 import { RufusCore } from './daemon';
 import { computeScorecard, formatScorecard, runJudgmentEval } from './eval/flight-recorder';
+import { verifyAllParts } from './eval/verify';
 import { buildDefaultConnectors, HeartbeatHub } from './events/connectors';
 import { messageEvent } from './events/ingest';
 import { startEventWebhook } from './events/webhook';
@@ -203,6 +204,17 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (cmd === 'verify') {
+    const res = await verifyAllParts({ workspaceDir: dir, ...(pythonPath ? { pythonPath } : {}) });
+    const passed = res.checks.filter((c) => c.passed).length;
+    console.log(`Rufus Verification: ${passed}/${res.checks.length} parts PASS\n`);
+    for (const c of res.checks) {
+      console.log(`  ${c.passed ? 'PASS' : 'FAIL'}  ${c.component.padEnd(28)} ${c.detail}`);
+    }
+    if (!res.ok) process.exitCode = 1;
+    return;
+  }
+
   if (cmd === 'eval') {
     const core = makeCore();
     await core.init();
@@ -253,6 +265,7 @@ async function main(argv: string[]): Promise<void> {
       '  rufus tools                    List packaged scripts',
       '  rufus wake <text...>           Wake the RPG loop with a direct message',
       '  rufus startup [--shadow]       Run startup snapshot -> Haiku speaker',
+      '  rufus verify                   Verify every part of Rufus live (memory, bouncer, gaps, skills, trust, daemon, tools)',
       '  rufus bouncer status|train|test  Manage the local SetFit bouncer',
     ].join('\n'),
   );

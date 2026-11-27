@@ -5,6 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import type { LosslessEvent } from '../types';
+import { gapConnector } from '../gaps/store';
 import { genericEvent, messageEvent } from './ingest';
 import { watchConnector } from './watches';
 
@@ -248,6 +249,7 @@ export async function buildDefaultConnectors(workspaceDir: string): Promise<Even
     .catch(() => path.join(os.homedir(), '.rufus', 'anchor.json'));
   out.push(calendarConnector({ anchorPath }));
   out.push(watchConnector(workspaceDir));
+  out.push(gapConnector(workspaceDir));
   out.push(...(await loadCustomConnectors(workspaceDir)));
   return out;
 }

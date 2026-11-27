@@ -155,6 +155,9 @@ export class Bouncer {
     if (event.source === 'watch') {
       return { label: 'WAKE', confidence: 1, backend: 'rule', reason: 'self-set watch/alarm fired', durationMs: Date.now() - t0 };
     }
+    if (event.source === 'gap') {
+      return { label: 'WAKE', confidence: 1, backend: 'rule', reason: `gap board trigger (${event.kind})`, durationMs: Date.now() - t0 };
+    }
 
     const text = Bouncer.eventToFeatureText(event);
 
