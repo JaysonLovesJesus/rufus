@@ -33,8 +33,11 @@ const DECISIONS_LOG_MAX_BYTES = 20 * 1024 * 1024;
 export interface DaemonOptions {
   workspaceDir: string;
   reasoningProvider: ModelProvider;
+  /** Optional heavier provider for specialist brains (brain.plan / create / verify / investigate). Defaults to reasoningProvider. */
+  brainProvider?: ModelProvider;
   speakerProvider: ModelProvider;
   reasoningModel?: string;
+  brainModel?: string;
   speakerModel?: string;
   sink: MessageSink;
   pythonPath?: string;
@@ -94,8 +97,10 @@ export class RufusCore {
   readonly shadow: boolean;
   private readonly rawReasoningProvider: ModelProvider;
   private readonly reasoningProvider: ModelProvider;
+  private readonly brainProvider: ModelProvider;
   private readonly speakerProvider: ModelProvider;
   private readonly reasoningModel?: string;
+  private readonly brainModel?: string;
   private readonly speakerModel?: string;
   private readonly realSink: MessageSink;
   private readonly maxTurnsPerWake: number;
@@ -142,8 +147,10 @@ export class RufusCore {
     // Every model call is metered into the current wake's trace (usage, cost, latency, failures).
     const onCall = (c: Omit<WakeModelCall, 'turn'>) => this.wakeModelCalls.push({ ...c, turn: this.wakeTurn });
     this.reasoningProvider = meterProvider(opts.reasoningProvider, onCall);
+    this.brainProvider = opts.brainProvider ? meterProvider(opts.brainProvider, onCall) : this.reasoningProvider;
     this.speakerProvider = meterProvider(opts.speakerProvider, onCall);
     if (opts.reasoningModel) this.reasoningModel = opts.reasoningModel;
+    if (opts.brainModel) this.brainModel = opts.brainModel;
     if (opts.speakerModel) this.speakerModel = opts.speakerModel;
     this.realSink = opts.sink;
     this.maxTurnsPerWake = opts.maxTurnsPerWake ?? 25;
@@ -179,8 +186,8 @@ export class RufusCore {
       approvals: this.approvals,
       gaps: this.gaps,
       watches: this.watches,
-      brainProvider: this.reasoningProvider,
-      ...(this.reasoningModel ? { brainModel: this.reasoningModel } : {}),
+      brainProvider: this.brainProvider,
+      ...(this.brainModel || this.reasoningModel ? { brainModel: this.brainModel ?? this.reasoningModel } : {}),
       speakerProvider: this.speakerProvider,
       ...(this.speakerModel ? { speakerModel: this.speakerModel } : {}),
       sink,
@@ -528,6 +535,9 @@ export class RufusCore {
     await this.events.close();
     await this.bouncer.close();
     (this.reasoningProvider as { close?: () => void }).close?.();
+    if (this.brainProvider !== this.reasoningProvider) {
+      (this.brainProvider as { close?: () => void }).close?.();
+    }
     (this.speakerProvider as { close?: () => void }).close?.();
     (this.triageProvider as { close?: () => void } | undefined)?.close?.();
   }

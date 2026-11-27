@@ -9,7 +9,10 @@ import { GeminiCliProvider } from './gemini';
 import { LocalLlamaProvider, findLocalLlmModel } from './local';
 
 export interface ProvidersConfig {
+  /** Fast Decide loop (runs every turn). Defaults to Haiku -> Gemini -> Local. */
   reasoning?: string[];
+  /** Deep specialist brains (brain.investigate / plan / create / verify). Defaults to Opus -> Gemini -> Local. */
+  brain?: string[];
   speaker?: string[];
   triage?: string[];
 }
@@ -59,12 +62,16 @@ function buildOne(spec: string, opts: { workspaceDir: string; timeoutMs?: number
 }
 
 /**
- * Builds the 3-tier configurable provider chains for Decide (reasoning), Speaker, and Triage.
- * Reads optional `providers` from `<workspaceDir>/config.json` so any user can pick their own stack;
- * defaults to Claude -> Gemini CLI -> Local llama-cli (skipping any provider not installed).
+ * Builds the 4-lane configurable provider chains:
+ * - reasoning (fast Decide loop, every turn): Haiku -> Gemini CLI -> Local
+ * - brain (deep specialists: plan, create, verify, investigate): Opus -> Gemini CLI -> Local
+ * - speaker (owner messages): Haiku -> Gemini CLI -> Local
+ * - triage (cheap wake filter): Haiku -> Gemini CLI -> Local
+ * Reads optional `providers` from `<workspaceDir>/config.json` so any user can pick their own stack.
  */
 export function buildProviderSet(opts: { workspaceDir: string; credits?: CreditTracker }): {
   reasoning: FallbackProvider;
+  brain: FallbackProvider;
   speaker: FallbackProvider;
   triage: FallbackProvider;
   credits: CreditTracker;
@@ -79,7 +86,12 @@ export function buildProviderSet(opts: { workspaceDir: string; credits?: CreditT
   }
 
   const reasoningSpecs = cfg.reasoning ?? [
-    `claude:${process.env.RUFUS_REASONING_MODEL || 'opus'}`,
+    `claude:${process.env.RUFUS_DECIDE_MODEL || process.env.RUFUS_REASONING_MODEL || 'haiku'}`,
+    'gemini',
+    'local',
+  ];
+  const brainSpecs = cfg.brain ?? [
+    `claude:${process.env.RUFUS_BRAIN_MODEL || 'opus'}`,
     'gemini',
     'local',
   ];
@@ -104,6 +116,7 @@ export function buildProviderSet(opts: { workspaceDir: string; credits?: CreditT
 
   return {
     reasoning: makeChain(reasoningSpecs),
+    brain: makeChain(brainSpecs),
     speaker: makeChain(speakerSpecs, { timeoutMs: 45_000, effort: 'low' }),
     triage: makeChain(triageSpecs, { timeoutMs: 45_000 }),
     credits,

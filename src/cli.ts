@@ -48,6 +48,7 @@ async function main(argv: string[]): Promise<void> {
     return new RufusCore({
       workspaceDir: dir,
       reasoningProvider: providers.reasoning,
+      brainProvider: providers.brain,
       speakerProvider: providers.speaker,
       triageProvider: providers.triage,
       sink,
@@ -146,6 +147,7 @@ async function main(argv: string[]): Promise<void> {
     const core = new RufusCore({
       workspaceDir: dir,
       reasoningProvider: providers.reasoning,
+      brainProvider: providers.brain,
       speakerProvider: providers.speaker,
       sink: tg ?? sink,
       ...(pythonPath ? { pythonPath } : {}),
