@@ -535,7 +535,7 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
       } else {
         const watch = await opts.registry.runAction(
           'watch.set',
-          { kind: 't3_thread', threadId: work.threadId, gapId: servedGapId, label: work.label ?? `${action.toolId} thread for ${servedGapId}` },
+          { kind: work.kind, threadId: work.threadId, gapId: servedGapId, label: work.label ?? `${action.toolId} thread for ${servedGapId}` },
           { workspaceDir: opts.workspaceDir, now: now(), wakeId, gapId: servedGapId, stepOf: action.toolId },
         );
         receipt.summary +=
