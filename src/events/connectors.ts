@@ -555,7 +555,10 @@ export function browserConnector(opts: { sources?: ReturnType<typeof defaultBrow
           state.since[src.browser] = newest; // baseline
           continue;
         }
-        const fresh = visits.filter((v) => v.at > since).sort((x, y) => x.at - y.at).slice(-25);
+        const fresh = visits
+          .filter((v) => v.at > since && !/^https?:\/\/(?:127\.0\.0\.1|localhost):4747\b/i.test(v.url))
+          .sort((x, y) => x.at - y.at)
+          .slice(-25);
         for (const v of fresh) {
           out.push(
             genericEvent({

@@ -146,6 +146,14 @@ export class WatchStore {
 
   async add(item: Omit<WatchItem, 'id' | 'createdAt' | 'fired'>, now = new Date()): Promise<WatchItem> {
     const list = await this.list();
+    // Deduplicate pending single-gap timers so a gap never stacks multiple duplicate chase alarms.
+    if (item.kind === 'timer' && item.gapId && !item.gapIds?.length) {
+      for (const existing of list) {
+        if (!existing.fired && existing.kind === 'timer' && existing.gapId === item.gapId && !existing.gapIds?.length) {
+          existing.fired = true;
+        }
+      }
+    }
     const created: WatchItem = {
       ...item,
       id: `watch_${randomUUID().slice(0, 6)}`,
@@ -255,7 +263,7 @@ function pidAlive(pid: number): boolean {
 }
 
 /** Timers due within this long of one that is due fire with it, so they run as one wake. */
-export const WATCH_MERGE_MS = 3 * 60_000;
+export const WATCH_MERGE_MS = 10 * 60_000;
 
 export function watchConnector(workspaceDir: string, intervalMs = 30_000, opts: { t3Bin?: string } = {}): Omit<EventConnector, 'poll'> & { poll(): Promise<LosslessEvent[]> } {
   const store = new WatchStore(workspaceDir);

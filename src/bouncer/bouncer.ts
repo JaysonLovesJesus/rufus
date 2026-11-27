@@ -314,6 +314,10 @@ export class Bouncer {
     if (event.source === 'watch') {
       return { label: 'WAKE', confidence: 1, backend: 'rule', reason: 'self-set watch/alarm fired', durationMs: Date.now() - t0 };
     }
+    // Ambient app-switching context is logged to Memory, never wakes Rufus up.
+    if (event.source === 'screen' && event.kind === 'focus') {
+      return { label: 'SLEEP', confidence: 1, backend: 'rule', reason: 'ambient screen focus (memory only)', durationMs: Date.now() - t0 };
+    }
 
     const text = Bouncer.eventToFeatureText(event);
 
