@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import os from 'node:os';
 import readline from 'node:readline';
-import type { ModelProvider, ModelRequest } from '../types';
+import type { ModelCallStats, ModelProvider, ModelRequest } from '../types';
 
 interface WarmSlot {
   proc: ChildProcessWithoutNullStreams;
@@ -8,62 +10,120 @@ interface WarmSlot {
   exited: boolean;
 }
 
+/** Warm processes kept per provider (e.g. Decide plus one brain state); the oldest is dropped past this. */
+const MAX_WARM = 2;
+
 /**
- * Fast Claude CLI provider on your existing Claude subscription:
- * - Passes `--strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools ""` so Claude CLI doesn't load 600k+ tokens of unrelated MCP schemas.
- * - Uses `--input-format stream-json --output-format stream-json --verbose` with a pre-warmed fresh process pool (size 1)
- *   so every turn gets 100% fresh context with zero cold-start process spawn lag!
+ * The CLI flags that keep a daemon model call isolated from the owner's own Claude Code setup:
+ * - Rufus's rules are the system prompt (`--system-prompt`), so the default agent prompt never loads and the rules cache across turns;
+ * - no user/project/local settings, CLAUDE.md, memory, hooks, skills or plugins (`--setting-sources ""`, `--safe-mode`);
+ * - no MCP servers or tools, and nothing saved to the owner's session history (`--no-session-persistence`).
+ */
+export function claudeCliArgs(model: string, system: string): string[] {
+  return [
+    '-p',
+    '--input-format',
+    'stream-json',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--strict-mcp-config',
+    '--mcp-config',
+    '{"mcpServers":{}}',
+    '--tools',
+    '',
+    '--setting-sources',
+    '',
+    '--safe-mode',
+    '--no-session-persistence',
+    '--system-prompt',
+    system,
+    '--model',
+    model,
+  ];
+}
+
+/** Reads usage and cost from the CLI's final `result` line. */
+export function statsFromResult(model: string, durationMs: number, msg: Record<string, unknown>): ModelCallStats {
+  const usage = (msg.usage && typeof msg.usage === 'object' ? msg.usage : {}) as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const stats: ModelCallStats = { model, durationMs, ok: msg.is_error !== true };
+  const fields: Array<[keyof ModelCallStats, unknown]> = [
+    ['inputTokens', usage.input_tokens],
+    ['outputTokens', usage.output_tokens],
+    ['cacheReadTokens', usage.cache_read_input_tokens],
+    ['cacheWriteTokens', usage.cache_creation_input_tokens],
+    ['costUsd', msg.total_cost_usd],
+  ];
+  for (const [k, v] of fields) {
+    const n = num(v);
+    if (n !== undefined) (stats as unknown as Record<string, number>)[k] = n;
+  }
+  return stats;
+}
+
+/**
+ * Claude CLI provider on the owner's existing Claude subscription.
+ * - Each call is a fresh process with fresh context (stream-json in and out), isolated by `claudeCliArgs`.
+ * - A warm process per (model, system prompt) is spawned ahead of the next call, so turns skip the cold start.
+ * - Runs from the workspace (never the git repo), so no project CLAUDE.md or developer memory applies.
  */
 export class ClaudeCliProvider implements ModelProvider {
   readonly name: string;
   private readonly defaultModel: string;
   private readonly timeoutMs: number;
-  private warmByModel = new Map<string, WarmSlot>();
+  private readonly cwd: string;
+  private warm = new Map<string, WarmSlot>();
   private closed = false;
 
-  constructor(opts: { name?: string; model?: string; timeoutMs?: number } = {}) {
+  constructor(opts: { name?: string; model?: string; timeoutMs?: number; cwd?: string } = {}) {
     this.defaultModel = opts.model ?? 'opus';
     this.name = opts.name ?? `claude-cli:${this.defaultModel}`;
     this.timeoutMs = opts.timeoutMs ?? 90_000;
+    this.cwd = opts.cwd ?? os.tmpdir();
   }
 
-  private spawnWarm(model: string): WarmSlot {
-    const args = [
-      '-p',
-      '--input-format',
-      'stream-json',
-      '--output-format',
-      'stream-json',
-      '--verbose',
-      '--strict-mcp-config',
-      '--mcp-config',
-      '{"mcpServers":{}}',
-      '--tools',
-      '',
-      '--model',
-      model,
-    ];
-    const proc = spawn('claude', args, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+  private static key(model: string, system: string): string {
+    return `${model}:${createHash('sha1').update(system).digest('hex')}`;
+  }
+
+  private spawnWarm(model: string, system: string): WarmSlot {
+    const key = ClaudeCliProvider.key(model, system);
+    const proc = spawn('claude', claudeCliArgs(model, system), { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
     const rl = readline.createInterface({ input: proc.stdout });
     const slot: WarmSlot = { proc, rl, exited: false };
+    proc.once('error', () => {
+      slot.exited = true;
+    });
     proc.once('exit', () => {
       slot.exited = true;
-      if (this.warmByModel.get(model) === slot) this.warmByModel.delete(model);
+      if (this.warm.get(key) === slot) this.warm.delete(key);
     });
     return slot;
   }
 
-  /** Pre-warms a fresh Claude CLI process in the background for the next turn. */
-  prewarm(model = this.defaultModel): void {
+  /** Pre-warms a fresh Claude CLI process in the background for the next call with this model and system prompt. */
+  prewarm(model = this.defaultModel, system = ''): void {
     if (this.closed) return;
-    const existing = this.warmByModel.get(model);
+    const key = ClaudeCliProvider.key(model, system);
+    const existing = this.warm.get(key);
     if (existing && !existing.exited) return;
-    this.warmByModel.set(model, this.spawnWarm(model));
+    while (this.warm.size >= MAX_WARM) {
+      const [oldKey, old] = this.warm.entries().next().value as [string, WarmSlot];
+      this.warm.delete(oldKey);
+      try {
+        old.rl.close();
+        old.proc.kill();
+      } catch {
+        /* ignore */
+      }
+    }
+    this.warm.set(key, this.spawnWarm(model, system));
   }
 
   close(): void {
     this.closed = true;
-    for (const slot of this.warmByModel.values()) {
+    for (const slot of this.warm.values()) {
       try {
         slot.rl.close();
         slot.proc.kill();
@@ -71,25 +131,31 @@ export class ClaudeCliProvider implements ModelProvider {
         /* ignore */
       }
     }
-    this.warmByModel.clear();
+    this.warm.clear();
   }
 
   async complete(req: ModelRequest): Promise<string> {
+    return (await this.completeWithStats(req)).text;
+  }
+
+  async completeWithStats(req: ModelRequest): Promise<{ text: string; stats: ModelCallStats }> {
     const model = req.model ?? this.defaultModel;
-    const existing = this.warmByModel.get(model);
-    this.warmByModel.delete(model);
-    const slot = existing && !existing.exited ? existing : this.spawnWarm(model);
+    const system = req.system.trim();
+    const key = ClaudeCliProvider.key(model, system);
+    const existing = this.warm.get(key);
+    this.warm.delete(key);
+    const slot = existing && !existing.exited ? existing : this.spawnWarm(model, system);
 
-    // Pre-warm the next fresh process immediately in the background while this turn runs
-    this.prewarm(model);
+    // Pre-warm the next fresh process for the same model and rules while this call runs
+    this.prewarm(model, system);
 
-    const combined = `${req.system.trim()}\n\n---\n\n${req.prompt.trim()}`;
-    const payload = `${JSON.stringify({ type: 'user', message: { role: 'user', content: combined } })}\n`;
+    const payload = `${JSON.stringify({ type: 'user', message: { role: 'user', content: req.prompt.trim() } })}\n`;
+    const started = Date.now();
 
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<{ text: string; stats: ModelCallStats }>((resolve, reject) => {
       let settled = false;
       let stderrBuf = '';
-      const finish = (err?: Error, value?: string) => {
+      const finish = (err?: Error, value?: string, stats?: ModelCallStats) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -100,8 +166,8 @@ export class ClaudeCliProvider implements ModelProvider {
         } catch {
           /* ignore */
         }
-        if (err) reject(err);
-        else resolve((value ?? '').trim());
+        if (err) reject(Object.assign(err, { stats: stats ?? { model, durationMs: Date.now() - started, ok: false, error: err.message } }));
+        else resolve({ text: (value ?? '').trim(), stats: stats ?? { model, durationMs: Date.now() - started, ok: true } });
       };
 
       const timer = setTimeout(() => finish(new Error(`claude CLI timed out after ${this.timeoutMs}ms`)), this.timeoutMs);
@@ -116,8 +182,9 @@ export class ClaudeCliProvider implements ModelProvider {
         try {
           const msg = JSON.parse(line) as { type?: string; is_error?: boolean; result?: string };
           if (msg.type === 'result') {
-            if (msg.is_error) finish(new Error(`claude CLI error: ${msg.result || stderrBuf.trim()}`));
-            else finish(undefined, String(msg.result ?? ''));
+            const stats = statsFromResult(model, Date.now() - started, msg as Record<string, unknown>);
+            if (msg.is_error) finish(new Error(`claude CLI error: ${msg.result || stderrBuf.trim()}`), undefined, { ...stats, error: String(msg.result || stderrBuf.trim()).slice(0, 300) });
+            else finish(undefined, String(msg.result ?? ''), stats);
           }
         } catch {
           /* ignore non-JSON line */

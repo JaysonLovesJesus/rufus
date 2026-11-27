@@ -1,10 +1,9 @@
-import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises';
-import os from 'node:os';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FakeProvider, RufusCore, computeScorecard, loadWakes, messageEvent, runJudgmentEval } from '../src';
+import { tempDir, topDown } from './helpers';
 
-const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'rufus-v2-m4-'));
 const NOW = new Date('2026-11-26T14:00:00Z');
 
 describe('Milestone 4: Unified Startup Orientation & Shadow Mode', () => {
@@ -15,11 +14,13 @@ describe('Milestone 4: Unified Startup Orientation & Shadow Mode', () => {
     await writeFile(path.join(dir, 'projects', 'beta.md'), '# Beta\n', 'utf8');
 
     const realSent: string[] = [];
-    const reasoning = new FakeProvider((_req, idx) => {
-      if (idx === 0) return JSON.stringify({ toolId: 'system.startup_snapshot', input: {} });
-      if (idx === 1) return JSON.stringify({ toolId: 'send_message', input: { purpose: 'Notify user I restarted and share active projects.' } });
-      return JSON.stringify({ toolId: 'sleep', input: { reason: 'Startup announced' } });
-    });
+    const reasoning = new FakeProvider(
+      topDown((_req, idx) => {
+        if (idx === 0) return JSON.stringify({ toolId: 'system.startup_snapshot', input: {} });
+        if (idx === 1) return JSON.stringify({ toolId: 'send_message', input: { purpose: 'Notify user I restarted and share active projects.' } });
+        return JSON.stringify({ toolId: 'sleep', input: { reason: 'Startup announced' } });
+      }),
+    );
     const speaker = new FakeProvider(() => 'Online and ready. Active projects:\n1. alpha\n2. beta');
 
     const core = new RufusCore({
@@ -32,7 +33,8 @@ describe('Milestone 4: Unified Startup Orientation & Shadow Mode', () => {
     });
 
     const res = await core.announceStartup();
-    expect(res?.wake?.turns).toBe(3);
+    const work = (ids: string[]) => ids.filter((id) => id !== 'watch.set' && id !== 'sleep');
+    expect(work(res?.wake?.trace.map((t) => t.toolId) ?? [])).toEqual(['system.startup_snapshot', 'send_message']);
     expect(res?.wake?.slept).toBe(true);
     expect(res?.shadowLogged).toBe(true);
     // Shadow mode NEVER writes to the real sink
@@ -45,7 +47,7 @@ describe('Milestone 4: Unified Startup Orientation & Shadow Mode', () => {
     // Flight Recorder (wakes.jsonl) + Outcome Scorecard + Golden Judgment Eval
     const wakes = await loadWakes(dir);
     expect(wakes).toHaveLength(1);
-    expect(wakes[0]?.trace).toHaveLength(3);
+    expect(work(wakes[0]?.trace.map((t) => t.toolId) ?? [])).toEqual(['system.startup_snapshot', 'send_message']);
     const sc = await computeScorecard(dir);
     expect(sc.totalWakes).toBe(1);
     expect(sc.toolSuccessRate).toBe(1);
@@ -73,7 +75,7 @@ describe('Milestone 4: Unified Startup Orientation & Shadow Mode', () => {
     const dir = await tempDir();
     let executedCount = 0;
     let step = 0;
-    const reasoning = new FakeProvider(() => {
+    const reasoning = new FakeProvider(topDown(() => {
       step++;
       if (step === 1) return JSON.stringify({ toolId: 'demo.send', input: { to: 'Alex' } });
       if (step === 2) return JSON.stringify({ toolId: 'sleep', input: { reason: 'awaiting approval' } });
@@ -83,7 +85,7 @@ describe('Milestone 4: Unified Startup Orientation & Shadow Mode', () => {
       if (step === 6) return JSON.stringify({ toolId: 'sleep', input: { reason: 'approved and ran' } });
       if (step === 7) return JSON.stringify({ toolId: 'demo.send', input: { to: 'Sam' } });
       return JSON.stringify({ toolId: 'sleep', input: { reason: 'auto-ran' } });
-    });
+    }));
 
     const core = new RufusCore({
       workspaceDir: dir,

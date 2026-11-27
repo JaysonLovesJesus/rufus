@@ -1,10 +1,8 @@
-import { mkdtemp } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeProvider, RufusCore, TelegramChannel, ToolRegistry, messageEvent, registerBuiltins, type MessageSink, type Receipt } from '../src';
+import { tempDir, topDown } from './helpers';
 
-const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'rufus-v2-m5-'));
 const NOW = new Date('2026-11-26T14:00:00Z');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -23,10 +21,12 @@ describe('Milestone 5: Chat responsiveness (mark read + typing)', () => {
   it('marks the triggering owner message read before the Thinker runs', async () => {
     const dir = await tempDir();
     const log: string[] = [];
-    const reasoning = new FakeProvider(() => {
-      log.push('thinker');
-      return JSON.stringify({ toolId: 'sleep', input: { reason: 'done' } });
-    });
+    const reasoning = new FakeProvider(
+      topDown(() => {
+        log.push('thinker');
+        return JSON.stringify({ toolId: 'sleep', input: { reason: 'done' } });
+      }),
+    );
     const sink: MessageSink = {
       send: async () => undefined,
       markRead: async (chatId, messageId) => void log.push(`read:${chatId}:${messageId}`),
@@ -41,7 +41,7 @@ describe('Milestone 5: Chat responsiveness (mark read + typing)', () => {
   it('never blocks or fails the wake when markRead hangs or throws', async () => {
     const dir = await tempDir();
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const reasoning = new FakeProvider(() => JSON.stringify({ toolId: 'sleep', input: { reason: 'done' } }));
+    const reasoning = new FakeProvider(topDown(() => JSON.stringify({ toolId: 'sleep', input: { reason: 'done' } })));
     let calls = 0;
     const sink: MessageSink = {
       send: async () => undefined,
@@ -66,7 +66,7 @@ describe('Milestone 5: Chat responsiveness (mark read + typing)', () => {
   it('does not mark non-owner (third-party) messages read', async () => {
     const dir = await tempDir();
     const markRead = vi.fn(async () => undefined);
-    const reasoning = new FakeProvider(() => JSON.stringify({ toolId: 'sleep', input: { reason: 'done' } }));
+    const reasoning = new FakeProvider(topDown(() => JSON.stringify({ toolId: 'sleep', input: { reason: 'done' } })));
     const core = new RufusCore({
       workspaceDir: dir,
       reasoningProvider: reasoning,

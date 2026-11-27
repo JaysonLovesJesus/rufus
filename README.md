@@ -20,6 +20,8 @@ Rufus takes a different approach: **force code and AI to do what each one is act
 
 ## How It Works
 
+Everything Rufus does serves a **gap**: what you want true minus what is true now. The full design, item by item, is in [`docs/OUTLINE.md`](docs/OUTLINE.md), and `pnpm rufus verify` measures the code against it.
+
 ### 1. Waiting Mode (Local & Instant)
 Messages (text, voice notes, replies, reactions, captions), emails, calendar changes, and files flow into one lossless event stream. A lightweight local **SetFit** model (a tiny sentence transformer + classifier head) classifies every incoming event in milliseconds: **`SLEEP`** or **`WAKE`**.
 
@@ -28,7 +30,7 @@ Every time you push back on a nudge, skip an item, approve a change, or the reas
 ### 2. Awake Mode (A Turn-Based Loop)
 When something deserves real thought, one reasoning model wakes up with fresh context, relevant embedded memories, and the top relevant tools and skills.
 
-It picks **one** action, then switches **off** while deterministic code executes it and hands back an immutable **Receipt** (exact pass/fail, real changes made, and raw output). On the next turn, the model wakes up with that Receipt and decides what to do next — until it calls **`sleep`**.
+It picks **one** action and the gap it serves, then switches **off** while deterministic code executes it and hands back an immutable **Receipt** (exact pass/fail, real changes made, and raw output). On the next turn, the model wakes up with that Receipt and decides what to do next — until it calls **`sleep`**.
 
 ### 3. Packaged Scripts (`tools/<id>/`)
 Every capability — built-in or created by Rufus himself — is a clean, self-contained package:
@@ -88,9 +90,14 @@ pnpm rufus bouncer test "Production deploy failed on main"
 ```bash
 pnpm typecheck              # TypeScript check
 pnpm test                   # Run all test suites
+pnpm check                  # Typecheck + tests + rufus verify (run before committing)
+pnpm rufus help             # Every command
 pnpm rufus start --shadow   # Shadow mode (log decisions without sending)
 pnpm rufus stats            # Live outcome scorecard
+pnpm rufus verify           # Measure the code against docs/OUTLINE.md (sends nothing)
+pnpm rufus verify --live    # Replay real owner messages through the real model on a workspace copy
 pnpm rufus eval             # Replay golden judgment evals
+pnpm rufus dashboard --open # Read-only local dashboard
 pnpm rufus bouncer status   # Training example counts (SLEEP vs WAKE)
 ```
 

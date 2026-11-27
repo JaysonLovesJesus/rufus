@@ -17,6 +17,8 @@ export type Vector = number[];
 export interface Embedder {
   readonly modelId?: string;
   embed(text: string): Promise<Vector> | Vector;
+  /** Embeds a search query; models trained with query/passage roles (e5) need to know which side a text is on. */
+  embedQuery?(text: string): Promise<Vector> | Vector;
   embedBatch?(texts: string[]): Promise<Vector[]> | Vector[];
   close?(): Promise<void> | void;
 }
@@ -82,6 +84,10 @@ export function createLocalEmbedder(dim = DEFAULT_DIM): Embedder {
 /**
  * Neural semantic embedder backed by the persistent local Python sidecar (paraphrase-MiniLM-L3-v2).
  * Automatically falls back to hashEmbed if Python or sentence-transformers is unavailable.
+ *
+ * `RUFUS_EMBED_MODEL` swaps the model (e.g. `intfloat/multilingual-e5-small` for Portuguese and 512-token texts).
+ * It is off by default: the model has to be downloaded once, and the store re-embeds the whole log on the next load
+ * because the vector cache is keyed by model.
  */
 export function createSemanticEmbedder(opts: { pythonPath?: string; modelName?: string; fallbackDim?: number } = {}): Embedder {
   const modelName = opts.modelName ?? process.env.RUFUS_EMBED_MODEL ?? 'sentence-transformers/paraphrase-MiniLM-L3-v2';
@@ -157,14 +163,14 @@ export function createSemanticEmbedder(opts: { pythonPath?: string; modelName?: 
     return readyPromise;
   }
 
-  async function requestBatch(texts: string[]): Promise<Vector[] | undefined> {
+  async function requestBatch(texts: string[], role: 'query' | 'passage' = 'passage'): Promise<Vector[] | undefined> {
     if (!texts.length) return [];
     const ok = await ensureReady();
     if (!ok || !proc) return undefined;
     const run = async (): Promise<Vector[] | undefined> => {
       if (!proc) return undefined;
       const response = new Promise<string>((resolve) => waiters.push(resolve));
-      proc.stdin.write(`${JSON.stringify({ texts })}\n`);
+      proc.stdin.write(`${JSON.stringify({ texts, role })}\n`);
       const line = await response;
       try {
         const parsed = JSON.parse(line) as { vectors?: Vector[]; error?: string };
@@ -183,6 +189,11 @@ export function createSemanticEmbedder(opts: { pythonPath?: string; modelName?: 
     modelId: disabled ? fallback.modelId! : modelName,
     async embed(text: string): Promise<Vector> {
       const vecs = await requestBatch([text]);
+      if (vecs?.[0]) return vecs[0];
+      return fallback.embed(text);
+    },
+    async embedQuery(text: string): Promise<Vector> {
+      const vecs = await requestBatch([text], 'query');
       if (vecs?.[0]) return vecs[0];
       return fallback.embed(text);
     },

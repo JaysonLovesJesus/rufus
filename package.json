@@ -11,7 +11,9 @@
   "scripts": {
     "rufus": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify": "tsx src/cli.ts verify",
+    "check": "tsc --noEmit && vitest run && tsx src/cli.ts verify"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

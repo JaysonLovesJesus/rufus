@@ -82,6 +82,24 @@ def cmd_serve(model_dir: str) -> None:
         sys.stdout.flush()
 
 
+def cmd_predict(model_dir: str, data_path: str) -> None:
+    """Labels every text in a JSONL file in one batch, for held-out evaluation before a promotion."""
+    from setfit import SetFitModel
+
+    texts = []
+    with open(data_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                texts.append(str(json.loads(line).get("text", "")))
+    model = SetFitModel.from_pretrained(model_dir)
+    labels = []
+    if texts:
+        for probs in model.predict_proba(texts):
+            labels.append("WAKE" if float(probs[1]) >= float(probs[0]) else "SLEEP")
+    print(json.dumps({"labels": labels}))
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -91,11 +109,16 @@ def main() -> None:
     t.add_argument("--epochs", type=int, default=1)
     s = sub.add_parser("serve")
     s.add_argument("--model-dir", required=True)
+    e = sub.add_parser("predict")
+    e.add_argument("--model-dir", required=True)
+    e.add_argument("--data", required=True)
     args = p.parse_args()
     if args.cmd == "train":
         cmd_train(args.data, args.model_dir, args.epochs)
     elif args.cmd == "serve":
         cmd_serve(args.model_dir)
+    elif args.cmd == "predict":
+        cmd_predict(args.model_dir, args.data)
 
 
 if __name__ == "__main__":

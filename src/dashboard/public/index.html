@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Rufus</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="page">
+    <header class="glance" id="glance">
+      <div class="meta">
+        <span class="brand">Rufus</span>
+        <span class="daemon" id="daemon"></span>
+        <span class="clock" id="clock"></span>
+        <span class="spacer"></span>
+        <button class="needs-chip" id="needsChip" type="button" hidden></button>
+        <button class="theme-btn" id="themeBtn" type="button" aria-label="Switch theme"></button>
+      </div>
+      <h1 class="statement" id="statement" aria-live="polite">Reading the workspace…</h1>
+      <p class="substatement" id="substatement"></p>
+    </header>
+
+    <main>
+      <section class="stage" id="stage">
+        <figure class="plate" id="plate">
+          <figcaption class="plate-caption">
+            <span class="plate-no">Plate I</span>
+            <span class="plate-title">The working parts of Rufus, live</span>
+            <span class="plate-hint" id="plateHint">Select a part to read what it does.</span>
+          </figcaption>
+          <svg id="plateSvg" class="plate-svg" role="group" aria-label="Anatomy of Rufus: senses, memory, bouncer, gaps, desk, decide, trust gate, repeat, tools and sleep"></svg>
+        </figure>
+        <aside class="sheet" id="sheet" hidden></aside>
+      </section>
+
+      <section class="lower">
+        <div class="col col-gaps">
+          <div class="sec-head">
+            <h2>What he’s working toward</h2>
+            <p class="sec-note" id="gapNote"></p>
+          </div>
+          <div id="gapTree" class="gap-tree"></div>
+        </div>
+        <div class="col col-needs">
+          <div class="sec-head">
+            <h2 id="needsHead">Needs you</h2>
+          </div>
+          <div id="needs" class="needs"></div>
+        </div>
+      </section>
+
+      <section class="history" id="history">
+        <div class="sec-head row">
+          <div>
+            <h2>While you were away</h2>
+            <p class="sec-note" id="timelineNote"></p>
+          </div>
+          <div class="seg" role="radiogroup" aria-label="Time range" id="rangeSeg">
+            <button type="button" role="radio" data-hours="6">6 hours</button>
+            <button type="button" role="radio" data-hours="24" aria-checked="true">24 hours</button>
+            <button type="button" role="radio" data-hours="72">3 days</button>
+          </div>
+        </div>
+        <div id="timeline" class="timeline"></div>
+        <div class="wakes-head sec-head row">
+          <h3>Wakes</h3>
+          <div class="seg small" role="radiogroup" aria-label="Which wakes" id="wakeFilter">
+            <button type="button" role="radio" data-filter="acted" aria-checked="true">When he acted</button>
+            <button type="button" role="radio" data-filter="all">All</button>
+          </div>
+        </div>
+        <ol id="wakeList" class="wake-list"></ol>
+      </section>
+    </main>
+
+    <footer class="foot" id="foot"></footer>
+  </div>
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+</body>
+</html>

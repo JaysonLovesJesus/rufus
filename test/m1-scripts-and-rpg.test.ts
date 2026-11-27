@@ -1,7 +1,6 @@
-import { mkdtemp } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { tempDir } from './helpers';
 import {
   EventStore,
   FakeProvider,
@@ -14,7 +13,6 @@ import {
   type Receipt,
 } from '../src';
 
-const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'rufus-v2-m1-'));
 const NOW = new Date('2026-11-26T14:00:00Z');
 
 describe('Milestone 1: Packaged Script Standard & Text-Based RPG Loop', () => {

@@ -1,24 +1,25 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
-import os from 'node:os';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { FakeProvider, RufusCore, gapConnector, genericEvent, messageEvent, watchConnector } from '../src';
+import { FakeProvider, ROOT_GAP_ID, RufusCore, genericEvent, messageEvent, watchConnector } from '../src';
+import { tempDir, topDown } from './helpers';
 
-const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'rufus-v2-m6-'));
 const NOW = new Date('2026-11-26T22:00:00Z');
 
-describe('Milestone 6: Gap Board, 5 Brain-State Tools, 4-Level Trust Ladder & Isolated Desk', () => {
+describe('Milestone 6: Gap tree, 5 Brain-State Tools, 4-Level Trust Ladder & Isolated Desk', () => {
   it('enforces read-only Investigate, Plan, Create, and reality-checked Verify that closes a Gap', async () => {
     const dir = await tempDir();
     let seenPrompts: string[] = [];
     let call = 0;
 
     // Scripted provider covering Decide + nested fresh-context Brain-State calls
+    const gapOf = (prompt: string) => /Added Gap (gap_[a-z0-9]+)/.exec(prompt)?.[1];
     const provider = new FakeProvider((req) => {
       seenPrompts.push(req.prompt);
       call++;
-      // 1. Decide: call brain.investigate
-      if (call === 1) return JSON.stringify({ toolId: 'brain.investigate', input: { question: 'Check demo state' } });
+      const gap = gapOf(req.prompt);
+      // 1. Decide: look around (serves the root gap) with brain.investigate
+      if (call === 1) return JSON.stringify({ gap: ROOT_GAP_ID, toolId: 'brain.investigate', input: { question: 'Check demo state' } });
       // 2. Investigate step 1: tries to call a write tool -> must be refused by code!
       if (call === 2) return JSON.stringify({ toolId: 'demo.mutate', input: { value: 'hack' } });
       // 3. Investigate step 2: calls read tool
@@ -26,27 +27,25 @@ describe('Milestone 6: Gap Board, 5 Brain-State Tools, 4-Level Trust Ladder & Is
       // 4. Investigate step 3: finishes with facts + unknowns
       if (call === 4) return JSON.stringify({ done: true, facts: ['Current count is 0'], unknowns: [], summary: 'Verified count is 0.' });
       // 5. Decide: add owner Gap to Gap Board
-      if (call === 5) return JSON.stringify({ toolId: 'gaps.create', input: { title: 'Raise count to 1', target: 'demo.read returns count=1', reality: 'Current count is 0', source: 'owner' } });
+      if (call === 5) return JSON.stringify({ gap: ROOT_GAP_ID, toolId: 'gaps.create', input: { title: 'Raise count to 1', target: 'demo.read returns count=1', reality: 'Current count is 0', source: 'owner' } });
       // 6. Decide: call brain.plan
-      if (call === 6) return JSON.stringify({ toolId: 'brain.plan', input: { goal: 'Raise count to 1', verifiedFacts: 'count is 0' } });
+      if (call === 6) return JSON.stringify({ gap, toolId: 'brain.plan', input: { goal: 'Raise count to 1', verifiedFacts: 'count is 0' } });
       // 7. Plan fresh call
       if (call === 7) return JSON.stringify({ recommendation: 'Run demo.mutate once', subGaps: [{ title: 'Set count', target: 'count=1', firstMove: 'demo.mutate' }], options: [], openQuestions: [] });
       // 8. Decide: call brain.create
-      if (call === 8) return JSON.stringify({ toolId: 'brain.create', input: { title: 'Launch Spec', brief: 'Short spec', verifiedFacts: 'count=0', slug: 'launch-spec' } });
+      if (call === 8) return JSON.stringify({ gap, toolId: 'brain.create', input: { title: 'Launch Spec', brief: 'Short spec', verifiedFacts: 'count=0', slug: 'launch-spec' } });
       // 9. Create fresh call
       if (call === 9) return '# Launch Spec\nMove count from 0 to 1.';
       // 10. Decide: execute demo.mutate (act_and_report)
-      if (call === 10) return JSON.stringify({ toolId: 'demo.mutate', input: { value: '1' } });
-      // 11. Decide: call brain.verify with the created gapId
-      if (call === 11) {
-        const m = /gap_[a-z0-9]+/.exec(req.prompt);
-        return JSON.stringify({ toolId: 'brain.verify', input: { target: 'demo.read returns count=1', gapId: m?.[0] } });
-      }
+      if (call === 10) return JSON.stringify({ gap, toolId: 'demo.mutate', input: { value: '1' } });
+      // 11. Decide: verify the gap (its stored target is what gets checked)
+      if (call === 11) return JSON.stringify({ gap, toolId: 'brain.verify', input: {} });
       // 12. Verify step 1: checks reality via demo.read
       if (call === 12) return JSON.stringify({ toolId: 'demo.read', input: {} });
       // 13. Verify step 2: PASS
-      if (call === 13) return JSON.stringify({ done: true, passed: true, evidence: 'demo.read confirmed count=1' });
-      // 14. Decide: sleep
+      if (call === 13) return JSON.stringify({ done: true, passed: true, evidence: 'demo.read confirmed count=1', criteria: [{ element: 'what', criterion: 'count=1', receiptIndex: 1, observed: 'count=1', met: true }] });
+      // 14. Decide: schedule the root gap's next look, then sleep
+      if (call === 14) return JSON.stringify({ gap: ROOT_GAP_ID, toolId: 'watch.set', input: { kind: 'timer', label: 'next look for gaps', fireAt: '2099-01-01T00:00:00Z' } });
       return JSON.stringify({ toolId: 'sleep', input: { reason: 'Gap verified closed' } });
     });
 
@@ -101,12 +100,14 @@ describe('Milestone 6: Gap Board, 5 Brain-State Tools, 4-Level Trust Ladder & Is
     const draft = await readFile(path.join(dir, 'drafts', 'launch-spec.md'), 'utf8');
     expect(draft).toContain('Move count from 0 to 1.');
     // Gap was created and closed ONLY after brain.verify passed
-    const gaps = await core.gaps.list();
+    const gaps = (await core.gaps.list()).filter((g) => g.id !== ROOT_GAP_ID);
     expect(gaps).toHaveLength(1);
     expect(gaps[0]?.status).toBe('closed');
     expect(gaps[0]?.reality).toContain('count=1');
-    // Verify ran with fresh context (no prior Decide chat leaked into Verify's prompt)
-    expect(seenPrompts[11]).not.toContain('Launch Spec');
+    // Verify ran with fresh context: no Decide prompt leaked in, only the gap as code recorded it
+    expect(seenPrompts[11]).not.toContain('Receipts This Wake');
+    expect(seenPrompts[11]).not.toContain('THE GAP TREE');
+    expect(seenPrompts[11]).toContain('What is known about this gap (leads, not proof)');
 
     await core.close();
   });
@@ -116,10 +117,12 @@ describe('Milestone 6: Gap Board, 5 Brain-State Tools, 4-Level Trust Ladder & Is
     let capturedPrompt = '';
     const core = new RufusCore({
       workspaceDir: dir,
-      reasoningProvider: new FakeProvider((req) => {
-        capturedPrompt = req.prompt;
-        return JSON.stringify({ toolId: 'sleep', input: { reason: 'checked' } });
-      }),
+      reasoningProvider: new FakeProvider(
+        topDown((req) => {
+          capturedPrompt = req.prompt;
+          return JSON.stringify({ toolId: 'sleep', input: { reason: 'checked' } });
+        }),
+      ),
       speakerProvider: new FakeProvider(() => 'ok'),
       sink: { send: async () => undefined },
       now: () => NOW,
@@ -161,21 +164,10 @@ describe('Milestone 6: Gap Board, 5 Brain-State Tools, 4-Level Trust Ladder & Is
     expect(fired[0]?.source).toBe('watch');
     expect((await core.bouncer.decide(fired[0]!)).label).toBe('WAKE');
 
-    // Gap trigger wakes when board is empty, stays silent when waiting, wakes when open & unblocked
-    const gConn = gapConnector(dir, { cooldownMs: 1 });
-    const emptyEvents = await gConn.poll();
-    expect(emptyEvents).toHaveLength(1);
-    expect(emptyEvents[0]?.kind).toBe('empty_board');
-    expect((await core.bouncer.decide(emptyEvents[0]!)).label).toBe('WAKE');
-
-    const g1 = await core.gaps.create({ title: 'Waiting gap', target: 'done', reality: 'started', source: 'owner' });
-    await core.gaps.update(g1.id, { status: 'waiting', waitingOn: 'owner reply' });
-    expect(await gConn.poll()).toHaveLength(0);
-
-    await core.gaps.update(g1.id, { status: 'open', waitingOn: null });
-    const openEvents = await gConn.poll();
-    expect(openEvents).toHaveLength(1);
-    expect(openEvents[0]?.kind).toBe('open_work');
+    // The root gap is always on the tree and never closes
+    expect((await core.gaps.get(ROOT_GAP_ID))?.status).toBe('open');
+    await core.gaps.closeVerified(ROOT_GAP_ID, 'claimed done');
+    expect((await core.gaps.get(ROOT_GAP_ID))?.status).toBe('open');
 
     // Suppress unused import lint
     expect(genericEvent({ source: 'system', kind: 'test', text: 'ok' }).source).toBe('system');

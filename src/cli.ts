@@ -1,14 +1,18 @@
 #!/usr/bin/env -S npx tsx
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Bouncer } from './bouncer/bouncer';
+import { formatTrainingMetrics } from './bouncer/training';
 import { TelegramChannel } from './channels/telegram';
 import { RufusCore } from './daemon';
 import { computeScorecard, formatScorecard, runJudgmentEval } from './eval/flight-recorder';
-import { verifyAllParts } from './eval/verify';
+import { recordOpsFailure } from './eval/ops-log';
+import { loadScenarios, runScenario } from './eval/scenarios';
+import { OUTLINE_ITEMS, verifyAllParts } from './eval/verify';
 import { buildDefaultConnectors, HeartbeatHub } from './events/connectors';
 import { messageEvent } from './events/ingest';
+import { createSenseRuntime, stampConsole } from './events/runtime';
 import { startEventWebhook } from './events/webhook';
 import { ClaudeCliProvider } from './providers/claude';
 import type { MessageSink } from './types';
@@ -33,8 +37,8 @@ async function main(argv: string[]): Promise<void> {
   const makeCore = () =>
     new RufusCore({
       workspaceDir: dir,
-      reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus' }),
-      speakerProvider: new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'haiku' }),
+      reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus', cwd: dir }),
+      speakerProvider: new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'haiku', cwd: dir }),
       sink,
       ...(pythonPath ? { pythonPath } : {}),
       shadow,
@@ -88,7 +92,11 @@ async function main(argv: string[]): Promise<void> {
     let tgToken = process.env.TELEGRAM_BOT_TOKEN;
     let tgChatId = process.env.TELEGRAM_CHAT_ID;
     let stt: { command: string; args: string[] } | undefined;
-    for (const cfgPath of [path.join(dir, 'config.json'), path.join(os.homedir(), '.rufus', 'config.json')]) {
+    // The legacy ~/.rufus config belongs to the owner's real workspace: a copied or test workspace must never pick up his bot.
+    const isDefaultWorkspace = path.resolve(dir) === path.join(os.homedir(), '.rufus-v2');
+    const telegramOff = /^(0|off|false|no)$/i.test(process.env.RUFUS_TELEGRAM ?? '');
+    const cfgPaths = [path.join(dir, 'config.json'), ...(isDefaultWorkspace ? [path.join(os.homedir(), '.rufus', 'config.json')] : [])];
+    for (const cfgPath of cfgPaths) {
       try {
         const cfg = JSON.parse(await fs.readFile(cfgPath, 'utf8')) as {
           telegram?: { token?: string; chatId?: string | number; transcribe?: { command: string; args: string[] } };
@@ -103,27 +111,34 @@ async function main(argv: string[]): Promise<void> {
         /* ignore */
       }
     }
-    const tg = tgToken && tgChatId ? new TelegramChannel({ token: tgToken, chatId: tgChatId, ...(stt ? { stt } : {}) }) : undefined;
+    const onPollError = (error: string) => void recordOpsFailure(dir, { kind: 'poll_failed', channel: 'telegram', error });
+    stampConsole();
+    const offsetPath = path.join(dir, 'sense-state', 'telegram-offset');
+    const tg = !telegramOff && tgToken && tgChatId ? new TelegramChannel({ token: tgToken, chatId: tgChatId, ...(stt ? { stt } : {}), onPollError, offsetPath }) : undefined;
     const core = new RufusCore({
       workspaceDir: dir,
-      reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus' }),
-      speakerProvider: new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'haiku' }),
+      reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus', cwd: dir }),
+      speakerProvider: new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'haiku', cwd: dir }),
       sink: tg ?? sink,
       ...(pythonPath ? { pythonPath } : {}),
       shadow,
     });
     const initInfo = await core.init();
     const hub = new HeartbeatHub();
-    for (const c of await buildDefaultConnectors(dir)) hub.add(c);
+    const recentSent = async () => (await core.events.recent(400)).filter((e) => e.kind === 'assistant_sent').map((e) => e.text);
+    for (const c of await buildDefaultConnectors(dir, { recentSent })) hub.add(c);
+    const stop = new AbortController();
+    const runtime = createSenseRuntime({ core, hub, signal: stop.signal, heartbeatMs: intervalMs, ...(tg ? { tg } : {}) });
     const tts = new KokoroTts({ workspaceDir: dir });
     const httpPort = Number(process.env.RUFUS_HTTP_PORT || 8787);
-    const httpHost = process.env.RUFUS_HTTP_HOST || '0.0.0.0';
+    // This Mac only by default; set RUFUS_WEBHOOK_HOST (e.g. 0.0.0.0 or a tailnet IP) plus RUFUS_WEBHOOK_TOKEN to reach it from the phone.
+    const httpHost = process.env.RUFUS_WEBHOOK_HOST || process.env.RUFUS_HTTP_HOST || '127.0.0.1';
     const voiceHandler = createVoiceHttpHandler({
       tts,
       ...(stt ? { stt } : {}),
       onVoiceTurn: async (ev, voiceSink) => {
-        const res = await core.processEvent(ev, { sinkOverride: voiceSink });
-        console.log(`[voice:${ev.id}] turns=${res.wake?.turns ?? 0}`);
+        // Through the shared inbox: an utterance during a voice wake joins it.
+        await runtime.ingest(ev, { route: 'voice', sink: voiceSink, sense: 'voice', waitForWake: true });
       },
     });
     const httpServer = await startEventWebhook({
@@ -132,9 +147,7 @@ async function main(argv: string[]): Promise<void> {
       ...(process.env.RUFUS_WEBHOOK_TOKEN ? { token: process.env.RUFUS_WEBHOOK_TOKEN } : {}),
       extraHandler: voiceHandler,
       onEvent: async (ev) => {
-        if (await core.events.has(ev.id)) return;
-        const res = await core.processEvent(ev);
-        console.log(`[webhook:${ev.source}:${ev.id}] bouncer=${res.decision.label} turns=${res.wake?.turns ?? 0}`);
+        await runtime.ingest(ev, { sense: 'webhook' });
       },
     }).catch((err) => {
       console.error(`HTTP server warning: ${(err as Error).message}`);
@@ -143,54 +156,13 @@ async function main(argv: string[]): Promise<void> {
     console.log(
       `Rufus v2 Core running (heartbeat ${intervalMs}ms, shadow=${shadow}, tools=${core.registry.list().length}, custom=${initInfo.loadedTools.length}, sources=${hub.list().map((c) => c.id).join(',') || 'none'}${httpServer ? `, http=${httpServer.url}, voice=${httpServer.url}/voice (${tts.voice})` : ''}). Ctrl+C to stop.`,
     );
-    await core.announceStartup().catch((err) => console.error(`startup error: ${(err as Error).message}`));
-    const stop = new AbortController();
     process.once('SIGINT', () => stop.abort());
     process.once('SIGTERM', () => stop.abort());
 
-    // Run data connectors on ONE continuous background heartbeat feeding the SetFit Bouncer
-    let sensorBusy = false;
-    const sensorTimer = setInterval(async () => {
-      if (stop.signal.aborted || sensorBusy) return;
-      sensorBusy = true;
-      try {
-        const { events } = await hub.tick();
-        for (const ev of events) {
-          // Only process brand-new unseen events (EventStore deduplicates by id)
-          if (await core.events.has(ev.id)) continue;
-          const res = await core.processEvent(ev, ...(tg ? [{ pollIncoming: () => tg.poll(0).catch(() => []) }] : []));
-          console.log(`[${ev.source}:${ev.id}] bouncer=${res.decision.label} (${res.decision.backend}, ${res.decision.durationMs}ms) turns=${res.wake?.turns ?? 0}`);
-        }
-      } catch (err) {
-        console.error(`heartbeat error: ${(err as Error).message}`);
-      } finally {
-        sensorBusy = false;
-      }
-    }, Math.max(5000, intervalMs));
-    sensorTimer.unref?.();
-
+    // Senses, channels and wakes run apart: senses keep polling during a long wake, and wakes come from one inbox.
     try {
-      while (!stop.signal.aborted) {
-        if (tg) {
-          // Native Telegram long-polling (~150ms instant delivery, zero 5s sleep lag)
-          const incoming = await tg.poll(25).catch(() => []);
-          if (incoming.length) {
-            const [first, ...extras] = incoming;
-            const res = await core.processEvent(first!, {
-              additionalEvents: extras,
-              pollIncoming: () => tg.poll(0).catch(() => []),
-            });
-            console.log(`[${first!.id}${extras.length ? ` +${extras.length}` : ''}] bouncer=${res.decision.label} (${res.decision.backend}) turns=${res.wake?.turns ?? 0}`);
-          }
-          continue;
-        }
-        await new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, intervalMs);
-          stop.signal.addEventListener('abort', () => (clearTimeout(t), resolve()), { once: true });
-        });
-      }
+      await runtime.run();
     } finally {
-      clearInterval(sensorTimer);
       await httpServer?.close();
       tts.close();
       await core.close();
@@ -198,32 +170,112 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (cmd === 'dashboard') {
+    // Read-only local window into the workspace (127.0.0.1 only). Loaded lazily so it can never affect `start`.
+    const flag = (name: string) => {
+      const i = rest.indexOf(name);
+      return i >= 0 ? rest[i + 1] : undefined;
+    };
+    const workspaceDir = path.resolve(flag('--workspace') ?? dir);
+    const portArg = flag('--port') ?? process.env.RUFUS_DASHBOARD_PORT ?? '4747';
+    const port = Number(portArg);
+    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`--port needs a port number from 0 to 65535 (got "${portArg}")`);
+    const { startDashboard } = await import('./dashboard/server');
+    const dash = await startDashboard({ workspaceDir, port });
+    console.log(`Rufus dashboard: ${dash.url}  (workspace ${workspaceDir}, read-only). Ctrl+C to stop.`);
+    if (rest.includes('--open')) {
+      const { execFile } = await import('node:child_process');
+      execFile('open', [dash.url], () => undefined);
+    }
+    await new Promise<void>((resolve) => {
+      process.once('SIGINT', () => resolve());
+      process.once('SIGTERM', () => resolve());
+    });
+    await dash.close();
+    return;
+  }
+
   if (cmd === 'stats') {
     const sc = await computeScorecard(dir);
     for (const line of formatScorecard(sc)) console.log(line);
+    console.log('\nLocal bouncer:');
+    for (const line of formatTrainingMetrics(await Bouncer.readMetrics(dir))) console.log(line);
+    return;
+  }
+
+  if (cmd === 'verify' && rest.includes('--live')) {
+    // Live replays of real owner messages, through the real model, against a copy of the workspace (nothing is sent).
+    const only = rest.filter((a) => !a.startsWith('--'));
+    const all = await loadScenarios(dir);
+    if (!all.length) throw new Error(`No scenarios found in ${path.join(dir, 'eval', 'scenarios')}`);
+    const unknown = only.filter((id) => !all.some((s) => s.id === id));
+    if (unknown.length) throw new Error(`Unknown scenario(s): ${unknown.join(', ')}. Available: ${all.map((s) => s.id).join(', ')}`);
+    const scenarios = all.filter((s) => !only.length || only.includes(s.id));
+    let passedCount = 0;
+    for (const scenario of scenarios) {
+      console.log(`\n=== ${scenario.id}: ${scenario.description}`);
+      const reasoning = new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus', timeoutMs: 180_000, cwd: dir });
+      const speaker = new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'haiku', cwd: dir });
+      const judgeProvider = new ClaudeCliProvider({ model: 'opus', timeoutMs: 180_000, cwd: dir });
+      try {
+        const r = await runScenario({
+          workspaceDir: dir,
+          scenario,
+          reasoningProvider: reasoning,
+          speakerProvider: speaker,
+          judgeProvider,
+          ...(pythonPath ? { pythonPath } : {}),
+          log: (line) => console.log(line),
+        });
+        if (r.passed) passedCount++;
+        console.log(`--- ${r.passed ? 'PASS' : 'FAIL'} ${r.id} (${Math.round(r.durationMs / 1000)}s)`);
+        for (const c of r.checks) console.log(`   ${c.passed ? 'PASS' : 'FAIL'} ${c.name} — ${c.detail}`);
+        for (const g of r.gaps) console.log(`   gap ${g.id} [${g.status}] ${g.title}`);
+      } catch (err) {
+        // One broken scenario must not hide the others.
+        console.log(`--- FAIL ${scenario.id} (crashed: ${(err as Error).message})`);
+      } finally {
+        reasoning.close?.();
+        speaker.close?.();
+        judgeProvider.close?.();
+      }
+    }
+    console.log(`\nLive replays: ${passedCount}/${scenarios.length} pass`);
+    if (passedCount !== scenarios.length) process.exitCode = 1;
     return;
   }
 
   if (cmd === 'verify') {
+    console.log(`Measuring Rufus against docs/OUTLINE.md (workspace ${dir}, about 30s, sends nothing)...\n`);
     const res = await verifyAllParts({ workspaceDir: dir, ...(pythonPath ? { pythonPath } : {}) });
     const passed = res.checks.filter((c) => c.passed).length;
-    console.log(`Rufus Verification: ${passed}/${res.checks.length} parts PASS\n`);
-    for (const c of res.checks) {
-      console.log(`  ${c.passed ? 'PASS' : 'FAIL'}  ${c.component.padEnd(28)} ${c.detail}`);
+    console.log(`Rufus vs docs/OUTLINE.md: ${passed}/${res.checks.length} checks pass (${res.checks.length ? Math.round((100 * passed) / res.checks.length) : 0}%)\n`);
+    for (const item of [...new Set(res.checks.map((c) => c.item))]) {
+      const group = res.checks.filter((c) => c.item === item);
+      console.log(`${item}. ${OUTLINE_ITEMS[item] ?? 'Other'} — ${group.filter((c) => c.passed).length}/${group.length}`);
+      for (const c of group) console.log(`   ${c.passed ? 'PASS' : 'FAIL'} [${c.where}] ${c.component} — ${c.detail}`);
+    }
+    const failing = res.checks.filter((c) => !c.passed);
+    if (failing.length) {
+      console.log(`\n${failing.length} failing:`);
+      for (const c of failing) console.log(`   ${c.item}. ${c.component} — ${c.detail}`);
     }
     if (!res.ok) process.exitCode = 1;
     return;
   }
 
   if (cmd === 'eval') {
+    const casesPath = path.join(dir, 'evals', 'judgment.json');
+    if (!existsSync(casesPath)) throw new Error(`No judgment cases at ${casesPath}`);
     const core = makeCore();
     await core.init();
     try {
       const report = await runJudgmentEval({
         workspaceDir: dir,
-        provider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus' }),
+        provider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus', cwd: dir }),
         registry: core.registry,
       });
+      if (!report.total) throw new Error(`${casesPath} has no readable cases`);
       console.log(`Judgment Eval: ${report.passed}/${report.total} passed.`);
       for (const r of report.results) console.log(`  ${r.passed ? 'PASS' : 'FAIL'} ${r.id}${r.reason ? ` (${r.reason})` : ''}`);
       if (!report.ok) process.exitCode = 1;
@@ -241,14 +293,23 @@ async function main(argv: string[]): Promise<void> {
         const counts = await bouncer.exampleCount();
         console.log(`Bouncer training examples: ${counts.total} (SLEEP=${counts.sleep}, WAKE=${counts.wake})`);
       } else if (sub === 'train') {
+        if (!pythonPath || !existsSync(pythonPath)) {
+          throw new Error(`No SetFit python at ${pythonPath ?? '(none)'}. Create the venv (see README) or set RUFUS_PYTHON.`);
+        }
         const res = await bouncer.trainSetFit();
-        console.log(JSON.stringify(res, null, 2));
-        if (!res.ok) process.exitCode = 1;
+        if (!res.ok) {
+          console.error(`Bouncer training failed: ${res.error ?? 'unknown error'}`);
+          process.exitCode = 1;
+        } else {
+          console.log(`Trained on ${res.examples ?? 0} example(s)${res.seconds !== undefined ? ` in ${Math.round(res.seconds)}s` : ''}: ${res.promoted ? 'promoted' : 'kept the previous model'} (${res.reason ?? 'no reason given'})`);
+          for (const line of formatTrainingMetrics(await Bouncer.readMetrics(dir))) console.log(line);
+        }
       } else if (sub === 'test') {
         const text = args.join(' ').trim();
+        if (!text) throw new Error('Usage: rufus bouncer test <text...>');
         const ev = messageEvent({ channel: 'test', actor: 'other', text, timestamp: new Date().toISOString() });
         const d = await bouncer.decide(ev);
-        console.log(JSON.stringify(d, null, 2));
+        console.log(`${d.label} (${d.backend}, confidence ${d.confidence}, ${Math.round(d.durationMs)}ms)${d.reason ? `: ${d.reason}` : ''}`);
       } else {
         throw new Error('Usage: rufus bouncer [status | train | test <text...>]');
       }
@@ -258,17 +319,30 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  console.log(
-    [
-      'Rufus v2 Core — minimal CLI',
-      '  rufus init                     Initialize workspace',
-      '  rufus tools                    List packaged scripts',
-      '  rufus wake <text...>           Wake the RPG loop with a direct message',
-      '  rufus startup [--shadow]       Run startup snapshot -> Haiku speaker',
-      '  rufus verify                   Verify every part of Rufus live (memory, bouncer, gaps, skills, trust, daemon, tools)',
-      '  rufus bouncer status|train|test  Manage the local SetFit bouncer',
-    ].join('\n'),
-  );
+  const help = [
+    `Rufus (workspace ${dir}; set RUFUS_DIR to change it)`,
+    '',
+    '  rufus start [--shadow]               Run the daemon: senses, Telegram, voice and webhook (--shadow logs instead of sending)',
+    '  rufus wake <text...>                 Wake Rufus once with a message from the owner',
+    '  rufus startup [--shadow]             Run the startup orientation once',
+    '  rufus init                           Create the workspace folders',
+    '  rufus tools                          List every tool Rufus can call',
+    '  rufus stats                          Scorecard: wakes, tool success, owner outcomes, model cost, channel failures',
+    '  rufus verify                         Measure the code against docs/OUTLINE.md (about 30s, sends nothing)',
+    '  rufus verify --live [scenario...]    Replay real owner messages through the real model on a copy of the workspace',
+    '  rufus eval                           Replay the golden judgment cases in evals/judgment.json',
+    '  rufus bouncer status                 Count the bouncer training examples',
+    '  rufus bouncer train                  Retrain the local SetFit bouncer (kept only if held-out WAKE recall holds)',
+    '  rufus bouncer test <text...>         Show what the bouncer decides for a message',
+    '  rufus dashboard [--port N] [--workspace DIR] [--open]  Read-only dashboard on 127.0.0.1 (default port 4747)',
+  ].join('\n');
+  if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
+    console.log(help);
+    return;
+  }
+  console.error(`Unknown command: ${cmd}\n`);
+  console.error(help);
+  process.exitCode = 1;
 }
 
 main(process.argv.slice(2)).catch((err: Error) => {

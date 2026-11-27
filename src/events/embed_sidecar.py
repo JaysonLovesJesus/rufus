@@ -9,6 +9,8 @@ import os
 import sys
 
 BASE_MODEL = os.environ.get("RUFUS_EMBED_MODEL", "sentence-transformers/paraphrase-MiniLM-L3-v2")
+# e5 models were trained with "query: " / "passage: " prefixes and rank poorly without them.
+USES_ROLE_PREFIX = "e5" in BASE_MODEL.lower()
 
 
 def main() -> None:
@@ -28,6 +30,9 @@ def main() -> None:
             if not isinstance(texts, list):
                 texts = [str(texts)]
             texts = [str(t) for t in texts]
+            if USES_ROLE_PREFIX:
+                role = "query" if req.get("role") == "query" else "passage"
+                texts = [f"{role}: {t}" for t in texts]
             if not texts:
                 out = {"vectors": []}
             else:

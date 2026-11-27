@@ -1,10 +1,8 @@
-import { mkdtemp } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { tempDir } from './helpers';
 import { EventStore, HeartbeatHub, genericEvent, messageEvent } from '../src';
 
-const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'rufus-v2-m2-'));
 
 describe('Milestone 2: Lossless Event Store & Embedded Retrieval', () => {
   it('preserves timestamps, deleted flags, reactions, and retrieves semantically relevant events at $0', async () => {

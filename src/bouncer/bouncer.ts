@@ -1,14 +1,63 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { cosineSimilarity, createLocalEmbedder, normalize, type Embedder, type Vector } from '../embed';
 import type { BouncerDecision, BouncerExample, BouncerLabel, LosslessEvent } from '../types';
+import {
+  featureText,
+  isFeatureText,
+  relabelFromWakes,
+  resolveExamples,
+  scoreLabels,
+  shouldPromote,
+  splitHeldOut,
+  type HeldOutMetrics,
+  type TrainingMetrics,
+} from './training';
 
 const execFileAsync = promisify(execFile);
 const SIDECAR_SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'setfit_sidecar.py');
+
+/** Trains and runs SetFit models; the default shells out to the Python sidecar, tests pass a fake. */
+export interface SetFitRunner {
+  train(dataPath: string, modelDir: string, epochs: number): Promise<{ ok: boolean; seconds?: number; error?: string }>;
+  predict(modelDir: string, texts: readonly string[]): Promise<BouncerLabel[]>;
+}
+
+function pythonRunner(pythonPath: string): SetFitRunner {
+  return {
+    async train(dataPath, modelDir, epochs) {
+      const { stdout } = await execFileAsync(pythonPath, [SIDECAR_SCRIPT, 'train', '--data', dataPath, '--model-dir', modelDir, '--epochs', String(epochs)], {
+        timeout: 180_000,
+        maxBuffer: 4 * 1024 * 1024,
+      });
+      return JSON.parse(stdout.trim().split('\n').pop()!) as { ok: boolean; seconds?: number; error?: string };
+    },
+    async predict(modelDir, texts) {
+      const tmp = path.join(os.tmpdir(), `rufus-bouncer-eval-${process.pid}-${Date.now()}.jsonl`);
+      await fs.writeFile(tmp, texts.map((text) => JSON.stringify({ text })).join('\n'), 'utf8');
+      try {
+        const { stdout } = await execFileAsync(pythonPath, [SIDECAR_SCRIPT, 'predict', '--model-dir', modelDir, '--data', tmp], {
+          timeout: 180_000,
+          maxBuffer: 16 * 1024 * 1024,
+        });
+        const parsed = JSON.parse(stdout.trim().split('\n').pop()!) as { labels?: BouncerLabel[] };
+        if (!Array.isArray(parsed.labels) || parsed.labels.length !== texts.length) throw new Error('predict returned the wrong number of labels');
+        return parsed.labels;
+      } finally {
+        await fs.rm(tmp, { force: true });
+      }
+    },
+  };
+}
+
+async function hasModel(dir: string): Promise<boolean> {
+  return fs.stat(path.join(dir, 'config.json')).then((s) => s.isFile()).catch(() => false);
+}
 
 /**
  * The $0 Bouncer: decides SLEEP vs WAKE for every incoming event.
@@ -17,9 +66,16 @@ const SIDECAR_SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url))
  * - Otherwise uses a fast $0 local prototype classifier over `bouncer.jsonl` examples.
  */
 export class Bouncer {
+  readonly workspaceDir: string;
   readonly dataPath: string;
   readonly modelDir: string;
+  /** A retrain lands here first, and replaces modelDir only if it is no worse on the held-out set. */
+  readonly candidateDir: string;
+  /** The model a promotion replaced, kept for rollback. */
+  readonly previousDir: string;
+  readonly metricsPath: string;
   private readonly pythonPath?: string;
+  private readonly runner?: SetFitRunner;
   private readonly embedder: Embedder;
   private examples: Array<{ ex: BouncerExample; vec: Vector }> = [];
   private loaded = false;
@@ -28,24 +84,22 @@ export class Bouncer {
     pending: Array<(line: string) => void>;
   };
 
-  constructor(opts: { workspaceDir: string; pythonPath?: string; embedder?: Embedder }) {
-    this.dataPath = path.join(opts.workspaceDir, 'training', 'bouncer.jsonl');
-    this.modelDir = path.join(opts.workspaceDir, 'training', 'setfit-model');
+  constructor(opts: { workspaceDir: string; pythonPath?: string; embedder?: Embedder; runner?: SetFitRunner }) {
+    this.workspaceDir = opts.workspaceDir;
+    const training = path.join(opts.workspaceDir, 'training');
+    this.dataPath = path.join(training, 'bouncer.jsonl');
+    this.modelDir = path.join(training, 'setfit-model');
+    this.candidateDir = path.join(training, 'setfit-candidate');
+    this.previousDir = path.join(training, 'setfit-model.prev');
+    this.metricsPath = path.join(training, 'bouncer-metrics.json');
     if (opts.pythonPath) this.pythonPath = opts.pythonPath;
+    const runner = opts.runner ?? (opts.pythonPath ? pythonRunner(opts.pythonPath) : undefined);
+    if (runner) this.runner = runner;
     this.embedder = opts.embedder ?? createLocalEmbedder();
   }
 
   static eventToFeatureText(e: LosslessEvent): string {
-    return [
-      `source:${e.source}`,
-      `kind:${e.kind}`,
-      e.actor ? `actor:${e.actor}` : '',
-      e.channel ? `channel:${e.channel}` : '',
-      e.deleted ? 'deleted:true' : '',
-      e.text,
-    ]
-      .filter(Boolean)
-      .join(' | ');
+    return featureText(e);
   }
 
   async load(): Promise<void> {
@@ -57,7 +111,7 @@ export class Bouncer {
         if (!line.trim()) continue;
         try {
           const ex = JSON.parse(line) as BouncerExample;
-          if (!ex.text || (ex.label !== 'SLEEP' && ex.label !== 'WAKE')) continue;
+          if (!ex.text || !isFeatureText(ex.text) || (ex.label !== 'SLEEP' && ex.label !== 'WAKE')) continue;
           const vec = await this.embedder.embed(ex.text);
           this.examples.push({ ex, vec });
         } catch {
@@ -72,8 +126,7 @@ export class Bouncer {
   /** Appends a labeled training example (from pushback, skip, approval, or Opus sleep/acted). */
   async recordExample(example: BouncerExample): Promise<void> {
     await this.load();
-    const vec = await this.embedder.embed(example.text);
-    this.examples.push({ ex: example, vec });
+    if (isFeatureText(example.text)) this.examples.push({ ex: example, vec: await this.embedder.embed(example.text) });
     await fs.mkdir(path.dirname(this.dataPath), { recursive: true });
     await fs.appendFile(this.dataPath, `${JSON.stringify(example)}\n`, 'utf8');
   }
@@ -85,28 +138,119 @@ export class Bouncer {
     return { total: this.examples.length, sleep, wake };
   }
 
-  /** Trains the real local SetFit model via Python sidecar on `training/bouncer.jsonl`. */
-  async trainSetFit(opts: { epochs?: number } = {}): Promise<{ ok: boolean; examples?: number; seconds?: number; error?: string }> {
-    if (!this.pythonPath) return { ok: false, error: 'No pythonPath configured for SetFit.' };
+  private async rawExamples(): Promise<BouncerExample[]> {
+    const raw = await fs.readFile(this.dataPath, 'utf8').catch(() => '');
+    const out: BouncerExample[] = [];
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const ex = JSON.parse(line) as BouncerExample;
+        if (ex.label === 'SLEEP' || ex.label === 'WAKE') out.push(ex);
+      } catch {
+        /* skip corrupt line */
+      }
+    }
+    return out;
+  }
+
+  /** The cleaned, relabelled label set split into train and held-out (see training.ts). */
+  async preparedSet(): Promise<{ train: BouncerExample[]; heldOut: BouncerExample[]; stats: TrainingMetrics['resolve'] }> {
+    const { examples, stats } = resolveExamples(await this.rawExamples(), await relabelFromWakes(this.workspaceDir));
+    return { ...splitHeldOut(examples), stats };
+  }
+
+  /** WAKE precision/recall of a model directory on the held-out set. */
+  async evaluate(modelDir: string, heldOut: readonly BouncerExample[]): Promise<HeldOutMetrics> {
+    if (!this.runner) throw new Error('No SetFit runner configured.');
+    const predicted = heldOut.length ? await this.runner.predict(modelDir, heldOut.map((x) => x.text)) : [];
+    return scoreLabels(heldOut.map((x) => x.label), predicted);
+  }
+
+  static async readMetrics(workspaceDir: string): Promise<TrainingMetrics | undefined> {
     try {
-      const { stdout } = await execFileAsync(
-        this.pythonPath,
-        [SIDECAR_SCRIPT, 'train', '--data', this.dataPath, '--model-dir', this.modelDir, '--epochs', String(opts.epochs ?? 1)],
-        { timeout: 180_000, maxBuffer: 4 * 1024 * 1024 },
-      );
-      await this.close(); // reload newly trained model on next predict
-      return JSON.parse(stdout.trim().split('\n').pop()!) as { ok: boolean; examples?: number; seconds?: number; error?: string };
+      return JSON.parse(await fs.readFile(path.join(workspaceDir, 'training', 'bouncer-metrics.json'), 'utf8')) as TrainingMetrics;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Retrains SetFit on the cleaned labels, minus a held-out set. The new model is promoted only if its held-out WAKE recall is
+   * not lower than the current model's; the replaced model is kept in `setfit-model.prev`. Metrics land in `bouncer-metrics.json`.
+   */
+  async trainSetFit(opts: { epochs?: number; now?: Date } = {}): Promise<{
+    ok: boolean;
+    examples?: number;
+    seconds?: number;
+    promoted?: boolean;
+    reason?: string;
+    candidate?: HeldOutMetrics;
+    current?: HeldOutMetrics;
+    error?: string;
+  }> {
+    if (!this.runner) return { ok: false, error: 'No pythonPath configured for SetFit.' };
+    try {
+      const { train, heldOut, stats } = await this.preparedSet();
+      const trainPath = path.join(path.dirname(this.dataPath), 'bouncer.train.jsonl');
+      await fs.mkdir(path.dirname(trainPath), { recursive: true });
+      await fs.writeFile(trainPath, train.map((x) => JSON.stringify(x)).join('\n') + '\n', 'utf8');
+      await fs.writeFile(path.join(path.dirname(this.dataPath), 'bouncer.heldout.jsonl'), heldOut.map((x) => JSON.stringify(x)).join('\n') + '\n', 'utf8');
+      await fs.rm(this.candidateDir, { recursive: true, force: true });
+      const trained = await this.runner.train(trainPath, this.candidateDir, opts.epochs ?? 1);
+      if (!trained.ok) return { ok: false, ...(trained.error ? { error: trained.error } : {}) };
+
+      const candidate = await this.evaluate(this.candidateDir, heldOut);
+      const current = (await hasModel(this.modelDir)) ? await this.evaluate(this.modelDir, heldOut) : undefined;
+      const decision = shouldPromote(candidate, current);
+      if (decision.promote) {
+        await fs.rm(this.previousDir, { recursive: true, force: true });
+        if (await hasModel(this.modelDir)) await fs.rename(this.modelDir, this.previousDir);
+        else await fs.rm(this.modelDir, { recursive: true, force: true });
+        await fs.rename(this.candidateDir, this.modelDir);
+        await this.close(); // the next decide() loads the promoted model
+      } else {
+        await fs.rm(this.candidateDir, { recursive: true, force: true });
+      }
+      const metrics: TrainingMetrics = {
+        at: (opts.now ?? new Date()).toISOString(),
+        promoted: decision.promote,
+        reason: decision.reason,
+        trainExamples: train.length,
+        heldOut: { n: candidate.n, wake: candidate.wake },
+        candidate,
+        ...(current ? { current } : {}),
+        resolve: stats,
+      };
+      await fs.writeFile(this.metricsPath, JSON.stringify(metrics, null, 2), 'utf8');
+      return {
+        ok: true,
+        examples: train.length,
+        ...(trained.seconds !== undefined ? { seconds: trained.seconds } : {}),
+        promoted: decision.promote,
+        reason: decision.reason,
+        candidate,
+        ...(current ? { current } : {}),
+      };
     } catch (err) {
       const e = err as { stdout?: string; stderr?: string; message?: string };
       return { ok: false, error: e.stderr?.trim() || e.stdout?.trim() || e.message || String(err) };
     }
   }
 
+  private sidecarStarting?: Promise<boolean>;
+
   private async ensureSidecar(): Promise<boolean> {
     if (this.sidecar) return true;
+    // Senses and wakes call decide() concurrently: start one sidecar, not two.
+    this.sidecarStarting ??= this.startSidecar().finally(() => {
+      this.sidecarStarting = undefined;
+    });
+    return this.sidecarStarting;
+  }
+
+  private async startSidecar(): Promise<boolean> {
     if (!this.pythonPath) return false;
-    const hasModel = await fs.stat(path.join(this.modelDir, 'config.json')).then((s) => s.isFile()).catch(() => false);
-    if (!hasModel) return false;
+    if (!(await hasModel(this.modelDir))) return false;
 
     const proc = spawn(this.pythonPath, [SIDECAR_SCRIPT, 'serve', '--model-dir', this.modelDir], { stdio: ['pipe', 'pipe', 'pipe'] });
     const pending: Array<(line: string) => void> = [];
@@ -154,9 +298,6 @@ export class Bouncer {
     }
     if (event.source === 'watch') {
       return { label: 'WAKE', confidence: 1, backend: 'rule', reason: 'self-set watch/alarm fired', durationMs: Date.now() - t0 };
-    }
-    if (event.source === 'gap') {
-      return { label: 'WAKE', confidence: 1, backend: 'rule', reason: `gap board trigger (${event.kind})`, durationMs: Date.now() - t0 };
     }
 
     const text = Bouncer.eventToFeatureText(event);

@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LosslessEvent, MessageSink } from '../types';
-import { messageEvent } from '../events/ingest';
+import { isNonSpeech, messageEvent } from '../events/ingest';
+import { stripMarkdown } from '../channels/format';
 import type { KokoroTts } from './kokoro';
 
 const execFileAsync = promisify(execFile);
@@ -15,14 +16,19 @@ export interface VoiceHandlerDeps {
   tts: KokoroTts;
   stt?: { command: string; args: string[] };
   onVoiceTurn: (event: LosslessEvent, voiceSink: MessageSink) => Promise<void>;
+  /** End-of-turn window: utterances closer together than this are one turn. */
+  turnHoldMs?: number;
 }
+
+/** A pause shorter than this inside one spoken request ("Also,", "starting at...") does not end the turn. */
+export const VOICE_TURN_HOLD_MS = 1500;
 
 const VOICE_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-<title>Rufus — Live Voice</title>
+<title>Rufus · Voice</title>
 <style>
   :root { color-scheme: dark; --bg: #070b14; --card: #0f172a; --blue: #38bdf8; --glow: rgba(56,189,248,0.38); --text: #e2e8f0; --muted: #94a3b8; }
   * { box-sizing: border-box; }
@@ -53,7 +59,7 @@ const VOICE_HTML = `<!doctype html>
   </header>
   <div class="orb-wrap">
     <button class="orb" id="orb">Start Call</button>
-    <div class="status" id="status">Tap Start Call for hands-free voice with Daniel</div>
+    <div class="status" id="status">Tap Start Call to talk to Rufus hands-free</div>
   </div>
   <form class="bar" id="textForm">
     <input id="textInput" placeholder="Or type anytime..." autocomplete="off" />
@@ -102,13 +108,13 @@ const VOICE_HTML = `<!doctype html>
     const audio = new Audio(item.url);
     currentAudio = audio;
     orb.classList.add('speaking');
-    statusEl.textContent = 'Daniel is speaking... (just talk to interrupt)';
+    statusEl.textContent = 'Rufus is speaking... (just talk to interrupt)';
     audio.onended = audio.onerror = () => {
       currentAudio = null;
       if (audioQueue.length) playNext();
       else {
         orb.classList.remove('speaking');
-        statusEl.textContent = inCall ? 'On call — listening...' : 'Ready';
+        statusEl.textContent = inCall ? 'On call, listening...' : 'Ready';
       }
     };
     audio.play().catch(() => { currentAudio = null; orb.classList.remove('speaking'); });
@@ -121,6 +127,8 @@ const VOICE_HTML = `<!doctype html>
       addMsg('rufus', msg.text);
       audioQueue.push(msg);
       playNext();
+    } else if (msg.type === 'text') {
+      addMsg('rufus', msg.text);
     } else if (msg.type === 'status') {
       if (!speakingNow && !currentAudio) statusEl.textContent = msg.text;
     }
@@ -131,11 +139,20 @@ const VOICE_HTML = `<!doctype html>
     stopPlayback();
     addMsg('you', text);
     statusEl.textContent = 'Thinking...';
-    await fetch('/voice/turn', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
+    try {
+      const res = await fetch('/voice/turn', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) statusEl.textContent = failureText(res.status);
+    } catch {
+      statusEl.textContent = "Couldn't reach Rufus. Check the connection and try again.";
+    }
+  }
+
+  function failureText(status) {
+    return status === 401 ? 'Not signed in: open this page from the link with the token once.' : "That didn't go through (" + status + '). Try again.';
   }
 
   textForm.onsubmit = (e) => {
@@ -157,14 +174,21 @@ const VOICE_HTML = `<!doctype html>
       if (blob.size < 1800) return;
       statusEl.textContent = 'Hearing you...';
       const buf = await blob.arrayBuffer();
-      const res = await fetch('/voice/audio', {
-        method: 'POST',
-        headers: { 'content-type': blob.type || 'audio/webm' },
-        body: buf,
-      });
+      let res;
+      try {
+        res = await fetch('/voice/audio', {
+          method: 'POST',
+          headers: { 'content-type': blob.type || 'audio/webm' },
+          body: buf,
+        });
+      } catch {
+        statusEl.textContent = "Couldn't reach Rufus. Check the connection and try again.";
+        return;
+      }
       const data = await res.json().catch(() => ({}));
       if (data.transcript) addMsg('you', data.transcript);
-      else statusEl.textContent = data.error || 'Could not catch that';
+      else if (data.ignored) statusEl.textContent = inCall ? 'On call, listening...' : 'Ready';
+      else statusEl.textContent = res.status === 401 ? failureText(401) : data.error || 'Could not catch that. Try again.';
     };
     rec.start();
   }
@@ -186,7 +210,7 @@ const VOICE_HTML = `<!doctype html>
     }
     const rms = Math.sqrt(sum / data.length);
     const now = performance.now();
-    // Higher threshold while Daniel is playing to prevent speaker echo from self-interrupting
+    // Higher threshold while Rufus is playing to prevent speaker echo from self-interrupting
     const threshold = currentAudio ? 0.065 : 0.025;
 
     if (rms > threshold) {
@@ -223,7 +247,7 @@ const VOICE_HTML = `<!doctype html>
       src.connect(analyser);
       inCall = true;
       orb.textContent = 'End Call';
-      statusEl.textContent = 'On call — just start talking';
+      statusEl.textContent = 'On call, just start talking';
       runVadLoop();
     } catch (err) {
       statusEl.textContent = 'Mic unavailable (allow mic permission or use HTTPS)';
@@ -255,7 +279,7 @@ const VOICE_HTML = `<!doctype html>
 /**
  * Mounts Live Voice Call endpoints onto the shared Rufus HTTP server:
  * - GET  /voice           (mobile-friendly live voice UI with barge-in)
- * - GET  /voice/events    (SSE push for async Daniel audio clips & status)
+ * - GET  /voice/events    (SSE push for async Rufus audio clips & status)
  * - POST /voice/turn      (text turn -> ONE RPG stream -> async Kokoro bm_daniel audio)
  * - POST /voice/audio     (raw audio -> local STT -> ONE RPG stream -> async Kokoro audio)
  * - GET  /voice/clip/:id  (streams synthesized WAV audio)
@@ -274,8 +298,14 @@ export function createVoiceHttpHandler(deps: VoiceHandlerDeps) {
     }
   };
 
+  const turnParts: string[] = [];
+  let turnTimer: ReturnType<typeof setTimeout> | undefined;
+
   const voiceSink: MessageSink = {
-    send: async (text: string) => {
+    channel: 'voice',
+    send: async (raw: string) => {
+      // Spoken aloud and shown as plain text, so the Speaker's markdown marks are never read out.
+      const text = stripMarkdown(raw);
       const synth = await deps.tts.synthesize(text);
       if (synth.ok && synth.clipId) {
         // Fire-and-forget async playback: push clip URL to client immediately and return Receipt!
@@ -289,7 +319,9 @@ export function createVoiceHttpHandler(deps: VoiceHandlerDeps) {
         });
         return { messageId: `voice_${synth.clipId}` };
       }
-      broadcast({ type: 'status', text: `TTS unavailable: ${synth.error ?? 'unknown'}` });
+      // No audio, but the reply still reaches the page as text.
+      broadcast({ type: 'text', text });
+      broadcast({ type: 'status', text: `Voice unavailable (${synth.error ?? 'unknown'}), showing text` });
       return { messageId: `voice_text_${randomUUID().slice(0, 8)}` };
     },
   };
@@ -372,25 +404,48 @@ export function createVoiceHttpHandler(deps: VoiceHandlerDeps) {
           res.end(JSON.stringify({ ok: false, error: 'empty input' }));
           return;
         }
-
-        const ev = messageEvent({
-          channel: 'voice',
-          actor: 'owner',
-          text,
-          timestamp: new Date().toISOString(),
-          metadata: { mode: 'voice_call' },
-        });
-        ev.kind = 'owner_direct';
+        if (isNonSpeech(text)) {
+          // "(keyboard clicking)", "[music]": the recognizer heard sound, not words.
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ignored: 'no speech', heard: text }));
+          return;
+        }
         res.writeHead(202, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, eventId: ev.id, transcript: text }));
-        broadcast({ type: 'status', text: 'Thinking...' });
-        void deps.onVoiceTurn(ev, voiceSink)
-          .catch((err) => broadcast({ type: 'status', text: `Error: ${(err as Error).message}` }))
-          .finally(() => broadcast({ type: 'status', text: 'Ready' }));
+        res.end(JSON.stringify({ ok: true, held: true, transcript: text }));
+        holdTurn(text);
       });
       return true;
     }
 
     return false;
   };
+
+  // Utterances inside one end-of-turn window become one owner turn.
+  function holdTurn(text: string): void {
+    turnParts.push(text);
+    if (turnTimer) clearTimeout(turnTimer);
+    turnTimer = setTimeout(() => {
+      turnTimer = undefined;
+      const joined = turnParts.splice(0).join(' ').replace(/\s+/g, ' ').trim();
+      if (joined) void emitTurn(joined);
+    }, deps.turnHoldMs ?? VOICE_TURN_HOLD_MS);
+  }
+
+  async function emitTurn(text: string): Promise<void> {
+    const ev = messageEvent({
+      channel: 'voice',
+      actor: 'owner',
+      text,
+      timestamp: new Date().toISOString(),
+      audience: { from: 'owner', to: 'rufus', direction: 'incoming', network: 'voice call', chatType: 'dm' },
+      metadata: { mode: 'voice_call' },
+    });
+    // Counts as the owner only because startEventWebhook lets /voice* through solely with the token (or from this Mac).
+    ev.kind = 'owner_direct';
+    broadcast({ type: 'status', text: 'Thinking...' });
+    await deps
+      .onVoiceTurn(ev, voiceSink)
+      .catch((err) => broadcast({ type: 'status', text: `Error: ${(err as Error).message}` }))
+      .finally(() => broadcast({ type: 'status', text: 'Ready' }));
+  }
 }
