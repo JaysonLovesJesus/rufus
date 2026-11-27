@@ -74,6 +74,7 @@ const DECIDE_CORE_RULES = [
   '- Only a passing `brain.verify` closes a gap, checked against that gap\'s own Target. If the owner\'s words show a closed gap is not done, reopen it (gaps.update status=open) and keep going.',
   '- `sleep` is only accepted when every unclosed gap, root included, has a next move in motion (a watch.set tied to that gap, or a running thread). Waiting passively is not a next move.',
   '- Actions never happen in your head. Trust only Receipts.',
+  '- Self-awareness: never invent or guess why you did, said, skipped, or decided something. When the owner asks about your reasoning or past actions, call `self.reasoning` first and explain ONLY from the recorded trace (or say there is no record).',
   "- Each gap's work log is what was already tried. The exact move that already failed, or a third call on the same target with nothing changed, is rejected: change approach instead.",
 ].join('\n');
 

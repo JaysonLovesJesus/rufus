@@ -13,8 +13,9 @@ import { ROOT_GAP_ID, findsGaps, needsNextMove, ownerSpoke, parseDue, resolveGap
 import { renderWithSpeaker, type SpeakerWakeContext } from '../speaker/speaker';
 import type { ApprovalStore } from './approvals';
 import { PROMOTION_STREAK } from './ledger';
-import type { TrustLevel } from '../types';
+import type { TrustLevel, RpgTurnTrace } from '../types';
 import { protectedTargets, RUFUS_REPO_DIR } from './protected';
+import { registerReasoningTool } from './reasoning';
 import type { ToolRegistry } from './registry';
 import { registerRollbackTool } from './rollback';
 import { registerSelfUpgrade } from './self-upgrade';
@@ -35,6 +36,7 @@ export interface BuiltinDeps {
   sink: MessageSink;
   getActiveSink?: () => MessageSink;
   getWakeReceipts: () => readonly Receipt[];
+  getCurrentWakeTrace?: () => readonly RpgTurnTrace[];
   getWakeContext?: () => SpeakerWakeContext | undefined;
   /** Logs what Rufus sent, with the channel's messageId so later edits and the Desk can point at it. */
   onSent: (text: string, messageId?: string) => void | Promise<void>;
@@ -1640,6 +1642,8 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
   // Self-change tools live in the engine (reserved ids), so they can't be repaired around their own safeguards.
   await registerRollbackTool(registry);
   await registerSelfUpgrade(registry);
+  // Self-awareness: read-only flight-recorder introspection so Rufus explains real recorded reasoning, never guesses.
+  await registerReasoningTool(registry, { ...(deps.getCurrentWakeTrace ? { getCurrentWakeTrace: deps.getCurrentWakeTrace } : {}) });
   // The general search (names and contents, any folder), so finding something never means walking folders by hand.
   await registerLocalSearch(registry);
 }

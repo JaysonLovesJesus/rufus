@@ -29,6 +29,18 @@ const HEDGE_OR_QUESTION =
 const EMPTY_FUTURE_PROMISE =
   /\b(?:i(?:'ll| will)\s+(?:stop|start|always|never|remember to|make sure to|drop|skip)|from now on\s+i(?:'ll| will))\b/i;
 
+/** Owner asking Rufus to explain why he did, said, skipped, or decided something. */
+const ASKED_FOR_REASONING =
+  /\b(?:why\s+did\s+you|why\s+didn'?t\s+you|why\s+haven'?t\s+you|why\s+were\s+you|what\s+was\s+your\s+reasoning|explain\s+your\s+reasoning|how\s+did\s+you\s+decide|why\s+did\s+rufus)\b/i;
+
+/** Rufus claiming past internal reasoning or justifying a past action/skip. */
+const REASONING_CLAIM =
+  /\b(?:my\s+reasoning\s+was|the\s+reason\s+i\s+(?:did|said|sent|skipped|slept|woke|chose|decided|didn'?t)|i\s+(?:did\s+that|said\s+that|sent\s+that|woke\s+up(?:\s+\S+){0,4}|skipped(?:\s+\S+){0,4}|slept\s+on(?:\s+\S+){0,4}|decided\s+to(?:\s+\S+){0,5}|chose\s+to(?:\s+\S+){0,5}|didn'?t(?:\s+\S+){1,4})\s+because|i\s+thought\s+(?:that\s+)?[^.!?]{3,60}\s+so\s+i)\b/i;
+
+/** Honest admission that there is no recorded trace (always allowed, never confabulation). */
+const HONEST_NO_RECORD =
+  /\b(?:no\s+record(?:ed)?|not\s+recorded|don'?t\s+have\s+a\s+record|nothing\s+recorded|can'?t\s+verify\s+why|let\s+me\s+check\s+my\s+(?:trace|log|reasoning))\b/i;
+
 /** Tools whose writes are talk or Rufus's own bookkeeping, never a change to the owner's world. */
 const INTERNAL_TOOL = /^(?:send_message|edit_message|react_message|sleep|approvals\.deny|(?:gaps|watch|watches|skills)\.[\w.]+)$/;
 const INTERNAL_CHANGE = /^(?:sent_message_to_user|edited_message:|reacted:|gap_\w+:|watch_set:|skill_saved:|trust_promoted:|always_allow:)/;
@@ -115,10 +127,14 @@ function addressedThirdParty(text: string, names: readonly string[]): string | u
 
 /** Violations that make a draft unsafe to send (a false claim or the wrong recipient), as opposed to style. */
 export function isBlockingViolation(v: string): boolean {
-  return /^(?:unbacked completion claim|empty future promise|opened with "Done"|addressed a third party|reply is empty)/.test(v);
+  return /^(?:unbacked completion claim|unbacked reasoning claim|empty future promise|opened with "Done"|addressed a third party|reply is empty)/.test(v);
 }
 
-export function verifySpokenReply(text: string, receipts: readonly Receipt[], opts: { thirdParties?: readonly string[] } = {}): string[] {
+export function verifySpokenReply(
+  text: string,
+  receipts: readonly Receipt[],
+  opts: { thirdParties?: readonly string[]; ownerPrompt?: string } = {},
+): string[] {
   const s = text.trim();
   if (!s) return ['reply is empty'];
   const fails: string[] = [];
@@ -148,6 +164,22 @@ export function verifySpokenReply(text: string, receipts: readonly Receipt[], op
     if (named.length && !named.some((o) => world.some((w) => o.backedBy.test(w.ranToolId) || o.backedBy.test(w.change)))) {
       fails.push(`unbacked completion claim ("${quoted}"): no receipt shows a change to ${named.map((o) => o.name).join(' or ')}`);
       break;
+    }
+  }
+
+  // 1b. Self-awareness / anti-confabulation gate: never invent why you did, said, skipped, or decided something.
+  const checkedReasoning = receipts.some((r) => r.toolId === 'self.reasoning' && r.status === 'ok');
+  const ownerAskedReasoning = Boolean(opts.ownerPrompt && ASKED_FOR_REASONING.test(opts.ownerPrompt));
+  if (!checkedReasoning && !HONEST_NO_RECORD.test(s)) {
+    const reasoningClause = clauses.find((c) => REASONING_CLAIM.test(c));
+    if (reasoningClause) {
+      fails.push(
+        `unbacked reasoning claim ("${reasoningClause.slice(0, 80)}"): call self.reasoning first to inspect your recorded thoughts instead of guessing`,
+      );
+    } else if (ownerAskedReasoning && !HEDGE_OR_QUESTION.test(s)) {
+      fails.push(
+        'unbacked reasoning claim: the owner asked why you did/said/skipped something, but self.reasoning was not called to read your actual recorded trace',
+      );
     }
   }
 
@@ -290,6 +322,7 @@ export async function renderWithSpeaker(opts: {
     'Hard Rules:',
     '- Honor the Purpose directly, using ONLY the real Wake Context and Receipts.',
     '- Never invent facts or claim any change that did not actually happen. Only the "Real changes" list counts as done; talk, gaps, watches and saved notes are not changes to his world.',
+    '- Self-awareness: when explaining why you did, said, skipped, or decided something, use ONLY the recorded thoughts and decisions from self.reasoning. Never invent or post-hoc rationalize a reason; if there is no record, say so plainly.',
     '- First person only ("I"). Never quote UTC times.',
     '- Never repeat what the owner was already sent, and never contradict it. If something earlier was wrong, say so once, plainly.',
     '- Use the recent conversation: never say you lack something the conversation or receipts show you already have or already sent.',
@@ -314,7 +347,13 @@ export async function renderWithSpeaker(opts: {
     'Write ONLY the final message.',
   ].join('\n\n');
 
-  const gate = (t: string) => verifySpokenReply(t, opts.receipts, { thirdParties });
+  const ownerPrompt = [
+    opts.wakeContext?.trigger?.kind === 'owner_direct' ? opts.wakeContext.trigger.text : '',
+    ...(opts.wakeContext?.arrivals ?? []).filter((e) => e.kind === 'owner_direct').map((e) => e.text),
+  ]
+    .filter(Boolean)
+    .join('\n');
+  const gate = (t: string) => verifySpokenReply(t, opts.receipts, { thirdParties, ...(ownerPrompt ? { ownerPrompt } : {}) });
   let text = normalizeMultiline(await opts.provider.complete({ system, prompt, ...(opts.model ? { model: opts.model } : {}) }));
   let violations = gate(text);
   let rewritten = false;

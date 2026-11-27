@@ -106,6 +106,7 @@ export class RufusCore {
   private readonly maxTurnsPerWake: number;
   private readonly now: () => Date;
   private wakeReceipts: Receipt[] = [];
+  private wakeTrace: RpgWakeReport['trace'] = [];
   private wakeModelCalls: WakeModelCall[] = [];
   private wakeTurn = 1;
   private mcpBridge?: McpBridgeHandle;
@@ -193,6 +194,7 @@ export class RufusCore {
       sink,
       getActiveSink: () => this.activeSink ?? sink,
       getWakeReceipts: () => this.wakeReceipts,
+      getCurrentWakeTrace: () => this.wakeTrace,
       getWakeContext: () => this.wakeContext,
       onSent: async (text, messageId) => {
         // The channel's messageId travels with the logged message, so edits and the Desk can point at it.
@@ -319,6 +321,7 @@ export class RufusCore {
     }
 
     this.wakeReceipts = [];
+    this.wakeTrace = [];
     this.wakeModelCalls = [];
     this.wakeTurn = 1;
     this.wakeContext = { trigger: event, arrivals: opts.additionalEvents ?? [] };
@@ -364,6 +367,7 @@ export class RufusCore {
         },
         onTurn: (t) => {
           this.wakeTurn = t.turn + 1;
+          this.wakeTrace.push(t);
           if (!live) return;
           live.turns.push(t);
           live.updatedAt = this.now().toISOString();
