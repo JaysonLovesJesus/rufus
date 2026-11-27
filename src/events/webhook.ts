@@ -12,6 +12,8 @@ export interface WebhookOptions {
   onEvent: (event: LosslessEvent) => void | Promise<void>;
   /** Optional extra HTTP handler (e.g. Live Voice Call UI on /voice*) sharing the same server & port. */
   extraHandler?: (req: http.IncomingMessage, res: http.ServerResponse, pathname: string) => Promise<boolean>;
+  /** Extra /health fields (the build and pid), so `rufus promote` can tell the new build from the old process. */
+  health?: () => Record<string, unknown>;
 }
 
 const TOKEN_COOKIE = 'rufus_token';
@@ -57,7 +59,7 @@ export function isAuthorized(req: http.IncomingMessage, url: URL, token: string 
 
 /** Webhook payloads are third-party input: they can never pose as the owner, Rufus, or Rufus's own internal events. */
 const RESERVED_SOURCES = new Set(['message', 'system', 'watch', 'gap', 'self', 'voice']);
-const RESERVED_KINDS = new Set(['owner_direct', 'assistant_sent']);
+const RESERVED_KINDS = new Set(['owner_direct', 'owner_sent', 'assistant_sent']);
 const RESERVED_ACTORS = /^(?:owner|rufus|me)$/i;
 
 export function webhookEventFields(payload: Record<string, unknown>, pathSource: string | undefined): { source: string; kind: string; actor?: string } {
@@ -81,7 +83,7 @@ export async function startEventWebhook(opts: WebhookOptions): Promise<{ url: st
     const pathname = url.pathname;
     if (req.method === 'GET' && pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
+      res.end(JSON.stringify({ ...(opts.health?.() ?? {}), ok: true }));
       return;
     }
     const guarded = pathname.startsWith('/voice') || pathname.startsWith('/event') || pathname.startsWith('/webhook');

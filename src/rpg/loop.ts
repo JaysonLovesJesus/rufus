@@ -13,8 +13,8 @@ import { servesGap, type WatchItem, type WatchStore } from '../events/watches';
 import { checkRepeat, gapText as describeGap, hashSimilarity, loadProjectCards, logEntry, matchProjectCard, raisingEvent, rankGapsInPlay, type Similarity } from '../gaps/context';
 import { RECENTLY_CLOSED_MS, ROOT_GAP_ID, isDone, ownerSpoke, resolveGapSource, type Gap, type GapStore } from '../gaps/store';
 import type { ApprovalStore } from '../scripts/approvals';
+import { AWAITING_APPROVAL_NEXT, passGate } from '../scripts/gate';
 import type { ToolRegistry } from '../scripts/registry';
-import { validateInput } from '../scripts/standard';
 
 function formatLocalTime(d: Date | string): string {
   const date = typeof d === 'string' ? new Date(d) : d;
@@ -82,10 +82,6 @@ const ROOT_WRITE_TOOLS = new Set(['gaps.create', 'gaps.update', 'watch.set']);
 /** How soon Rufus comes back to a gap a wake left without a next move; doubles on each repeat, up to the cap. */
 const RESUME_MS = 5 * 60_000;
 const RESUME_MAX_MS = 2 * 60 * 60_000;
-/** What a draft waiting on the owner needs next, the same however the draft was queued. */
-const AWAITING_APPROVAL_NEXT =
-  'Ask the owner (approvals.approve on his yes, approvals.deny on his no), and schedule a chase for this gap in case there is no answer. ' +
-  'In the ask, say in plain words exactly what will change, and that replying "yes" in chat approves it: there is no button, and no ids or tool names.';
 /** Unreadable replies in a row before a wake stops (the quick return, with backoff, picks it up again). */
 const MAX_UNREADABLE_IN_A_ROW = 3;
 
@@ -241,6 +237,7 @@ async function projectCardsBlock(workspaceDir: string, inPlay: readonly Gap[], s
  * a stray one is attached to the gap its label names (or the closest in meaning, else the root's next look), a dead one retired.
  */
 async function reconcileWatches(gaps: GapStore, watches: WatchStore, similarity: Similarity): Promise<void> {
+  // Derived from gap changes that already went through the ladder (a close or drop retires its watches in the same step).
   const all = await gaps.list();
   const live = all.filter((g) => !isDone(g));
   const liveIds = new Set(live.map((g) => g.id));
@@ -296,6 +293,8 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
   let sleepReason: string | undefined;
 
   await opts.gaps?.ensureRoot();
+  // One ladder for the wake's moves and for the actions its tools and the engine take.
+  opts.registry.useTrust(opts.approvals);
   const similarity: Similarity =
     opts.similarity ?? (typeof opts.events.similarity === 'function' ? (q, t) => opts.events.similarity(q, t) : hashSimilarity);
   if (opts.gaps && opts.watches) await reconcileWatches(opts.gaps, opts.watches, similarity).catch(() => undefined);
@@ -430,18 +429,30 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
         const spec = action.gap;
         // The gap points at the message that raised it, which may have arrived mid-wake rather than being the trigger.
         const raisedBy = (await raisingEvent({ spec, trigger: opts.trigger, arrivals, similarity })) ?? opts.trigger;
-        const g = await opts.gaps.create({
-          title: spec.title,
-          target: spec.target,
-          reality: spec.reality ?? `Not measured yet. Raised by: ${raisedBy.text.slice(0, 200)}`,
-          source: resolveGapSource(spec.source, ownerSpoke(opts.trigger, arrivals)),
-          ...(spec.parentId ? { parentId: spec.parentId } : {}),
-          evidenceIds: [raisedBy.id],
-          ...(spec.due ? { due: spec.due } : {}),
-          now: now(),
-        });
-        servedGapId = g.id;
-        gapNote = `New gap ${g.id} [${g.status}]: ${g.title}. `;
+        const source = resolveGapSource(spec.source, ownerSpoke(opts.trigger, arrivals));
+        const reality = spec.reality ?? `Not measured yet. Raised by: ${raisedBy.text.slice(0, 200)}`;
+        // Saving a new gap is gaps.create, on gaps.create's rung, whether Decide calls it or names the gap inline.
+        const gate = await opts.registry.gate(
+          'gaps.create',
+          { title: spec.title, target: spec.target, reality, source, ...(spec.parentId ? { parentId: spec.parentId } : {}), ...(spec.due ? { due: spec.due } : {}) },
+          { now: now() },
+        );
+        if (!gate.run) {
+          receipt = { ...gate.receipt, summary: `The new gap was not saved, so ${action.toolId} did not run either. ${gate.receipt.summary}` };
+        } else {
+          const g = await opts.gaps.create({
+            title: spec.title,
+            target: spec.target,
+            reality,
+            source,
+            ...(spec.parentId ? { parentId: spec.parentId } : {}),
+            evidenceIds: [raisedBy.id],
+            ...(spec.due ? { due: spec.due } : {}),
+            now: now(),
+          });
+          servedGapId = g.id;
+          gapNote = `New gap ${g.id} [${g.status}]: ${g.title}. `;
+        }
       } else if (typeof action.gap === 'string') {
         const g = await opts.gaps.get(action.gap);
         if (g) servedGapId = g.id;
@@ -472,58 +483,27 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
       }
     }
 
+    if (!receipt && manifest?.internal) {
+      const takenBy = opts.registry.list().filter((m) => m.actions?.includes(manifest.id)).map((m) => m.id);
+      receipt = rejected(
+        `Rejected: ${action.toolId} is an action other tools take as a step, through the trust ladder${takenBy.length ? ` (${takenBy.join(', ')})` : ''}, not a move. Nothing ran.`,
+        'internal_action',
+      );
+    }
+
     if (!receipt) {
       // The move's gap flows into the tool, so scheduling, verifying and splitting attach to the gap being served.
       const props = manifest?.inputSchema.properties ?? {};
       if (servedGapId && 'gapId' in props && !(typeof input.gapId === 'string' && input.gapId.trim())) input.gapId = servedGapId;
-      // `sleep` is not an action on the world: it never goes through the trust ladder, so its gap check always runs.
-      const trustLevel =
-        action.toolId === 'sleep' ? 'act_quietly' : opts.approvals && manifest ? await opts.approvals.levelFor(manifest) : manifest?.requiresApproval ? 'draft' : 'act_quietly';
-      if (trustLevel === 'never') {
-        receipt = {
-          toolId: action.toolId,
-          effect: manifest?.effect ?? 'write',
-          status: 'failed',
-          durationMs: 0,
-          summary: `Blocked: ${action.toolId} is at "blocked" on the trust ladder, so it never runs. Nothing ran. Close this gap another way (a different tool, or a draft the owner can act on), or ask the owner whether to unblock it.`,
-          changes: [],
-          error: 'neverAllow',
-          at,
-        };
-      } else if (trustLevel === 'rehearse') {
-        receipt = {
-          toolId: action.toolId,
-          effect: manifest?.effect ?? 'write',
-          status: 'ok',
-          durationMs: 0,
-          summary: `Rehearsed only: ${action.toolId} is at "rehearse" on the trust ladder, so it did not run and nothing changed in the world. Would have run ${action.toolId}(${JSON.stringify(input).slice(0, 200)}). Don't report it as done: close the gap another way, or ask the owner to raise its trust.`,
-          changes: [],
-          data: { rehearsed: true, toolId: action.toolId, input },
-          at,
-        };
-      } else if (trustLevel === 'draft' && opts.approvals && manifest) {
-        const errors = validateInput(input, manifest.inputSchema);
-        if (errors.length) {
-          receipt = rejected(`Invalid input for ${manifest.id}: ${errors.join('; ')}. Nothing ran. Fix the input to match its inputSchema on the Desk.`, errors.join('; '));
-        } else {
-          const saved = await opts.approvals.enqueue(action.toolId, input, now(), servedGapId);
-          receipt = {
-            toolId: action.toolId,
-            effect: manifest.effect,
-            status: 'pending_approval',
-            durationMs: 0,
-            summary: `Draft awaiting owner approval (${saved.id}): ${action.toolId}. Nothing ran yet. ${AWAITING_APPROVAL_NEXT}`,
-            changes: [],
-            data: { approvalId: saved.id, toolId: action.toolId, input },
-            at,
-          };
-        }
+      // Every move, `sleep` included, goes through the same trust gate; the gate's rung comes from trust.json or the tool's default.
+      const gate = manifest ? await passGate({ manifest, input, ...(opts.approvals ? { approvals: opts.approvals } : {}), now: now(), ...(servedGapId ? { gapId: servedGapId } : {}) }) : undefined;
+      if (gate && !gate.run) {
+        receipt = gate.receipt;
       } else {
-        const approved = trustLevel === 'act_and_report' || trustLevel === 'act_quietly';
         receipt = await opts.registry.call(action.toolId, input, {
           workspaceDir: opts.workspaceDir,
           now: now(),
-          ...(approved ? { approved: true } : {}),
+          ...(gate ? { approved: true, level: gate.level } : {}),
           wakeId,
           ...(servedGapId ? { gapId: servedGapId } : {}),
         });
@@ -531,8 +511,6 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
           const saved = await opts.approvals.enqueue(action.toolId, input, now(), servedGapId);
           receipt.summary = `Draft awaiting owner approval (${saved.id}): ${receipt.summary} ${AWAITING_APPROVAL_NEXT}`;
           receipt.data = { approvalId: saved.id, toolId: action.toolId, input };
-        } else if (trustLevel === 'act_and_report' && receipt.status === 'ok' && manifest?.effect === 'write' && action.toolId !== 'send_message') {
-          receipt.nextHints = [...(receipt.nextHints ?? []), 'report_to_owner'];
         }
       }
     }
@@ -543,15 +521,29 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
     }
     if (servedGapId && servedGapId !== ROOT_GAP_ID) focusGapId = servedGapId;
     // Async work the move started (a T3 thread) becomes the served gap's next move: code watches it and wakes Rufus when it needs him.
+    // Setting that watch is watch.set, on watch.set's rung.
     if (receipt.status === 'ok' && receipt.asyncWork && servedGapId && opts.watches) {
       const work = receipt.asyncWork;
       const watching = (await opts.watches.active()).some((w) => w.kind === 't3_thread' && w.threadId === work.threadId && w.gapId === servedGapId);
-      if (!watching) await opts.watches.add({ kind: 't3_thread', threadId: work.threadId, gapId: servedGapId, label: work.label ?? `${action.toolId} thread for ${servedGapId}` }, now());
-      receipt.summary += ` Code is watching thread ${work.threadId} as ${servedGapId}'s next move (wakes you when it finishes, needs input, or is blocked).`;
+      if (watching) {
+        receipt.summary += ` Code is watching thread ${work.threadId} as ${servedGapId}'s next move (wakes you when it finishes, needs input, or is blocked).`;
+      } else {
+        const watch = await opts.registry.runAction(
+          'watch.set',
+          { kind: 't3_thread', threadId: work.threadId, gapId: servedGapId, label: work.label ?? `${action.toolId} thread for ${servedGapId}` },
+          { workspaceDir: opts.workspaceDir, now: now(), wakeId, gapId: servedGapId, stepOf: action.toolId },
+        );
+        receipt.summary +=
+          watch.status === 'ok' && !(watch.data as { rehearsed?: boolean } | undefined)?.rehearsed
+            ? ` Code is watching thread ${work.threadId} as ${servedGapId}'s next move (wakes you when it finishes, needs input, or is blocked).`
+            : ` Thread ${work.threadId} is not watched: ${watch.summary}`;
+      }
     }
-    // Code writes the move into the work log of the gap it served, so what was tried carries across wakes.
+    // Code writes the move into the work log of the gap it served, so what was tried carries across wakes (gaps.note, on its rung).
     if (servedGapId && opts.gaps && action.toolId !== 'sleep') {
-      await opts.gaps.appendLog(servedGapId, logEntry({ toolId: action.toolId, input, receipt, at, wakeId, turn: turns })).catch(() => undefined);
+      await opts.registry
+        .runAction('gaps.note', { gapId: servedGapId, log: logEntry({ toolId: action.toolId, input, receipt, at, wakeId, turn: turns }) }, { workspaceDir: opts.workspaceDir, now: now(), wakeId, gapId: servedGapId })
+        .catch(() => undefined);
     }
 
     receipts.push(receipt);
@@ -573,7 +565,8 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
       const sent = (receipt.data as { text?: string } | undefined)?.text;
       if (sent) sentMessages.push(sent);
     }
-    if (action.toolId === 'sleep' && receipt.status === 'ok') {
+    // A rehearsed move did not run: a rehearsed sleep does not end the wake.
+    if (action.toolId === 'sleep' && receipt.status === 'ok' && !(receipt.data as { rehearsed?: boolean } | undefined)?.rehearsed) {
       slept = true;
       sleepReason = String(action.input.reason ?? 'done');
       break;
@@ -592,12 +585,14 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
     else if (!endReason) endReason = 'turn_cap';
     if (slept && opts.gaps) {
       // Every gap has a next move again: the backoff starts over.
-      for (const g of (await opts.gaps.list().catch(() => [])).filter((x) => x.resumeAttempts)) await opts.gaps.annotate(g.id, { resumeAttempts: null }).catch(() => undefined);
+      for (const g of (await opts.gaps.list().catch(() => [])).filter((x) => x.resumeAttempts)) {
+        await opts.registry.runAction('gaps.note', { gapId: g.id, resumeAttempts: 0 }, { workspaceDir: opts.workspaceDir, now: now(), wakeId, gapId: g.id }).catch(() => undefined);
+      }
     }
     // Nothing waits passively: if the wake ended without an accepted sleep (turn cap, garbled replies, or a crash),
     // one quick return covers every gap left without a next move, backing off per gap when the same gap keeps coming back.
     if (!slept && opts.gaps && opts.watches) {
-      await scheduleResume({ gaps: opts.gaps, watches: opts.watches, trigger: opts.trigger, trace, endReason, turns, error: crash, now: now() }).catch(() => undefined);
+      await scheduleResume({ gaps: opts.gaps, watches: opts.watches, registry: opts.registry, workspaceDir: opts.workspaceDir, wakeId, trigger: opts.trigger, trace, endReason, turns, error: crash, now: now() }).catch(() => undefined);
     }
   }
 
@@ -631,6 +626,7 @@ const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 const END_REASON_TEXT: Record<WakeEndReason, string> = {
   slept: 'slept',
+  no_progress: 'it made no progress',
   turn_cap: 'it hit the turn cap',
   unreadable: 'Decide gave unreadable replies in a row',
   crashed: 'it crashed',
@@ -643,6 +639,9 @@ const END_REASON_TEXT: Record<WakeEndReason, string> = {
 async function scheduleResume(opts: {
   gaps: GapStore;
   watches: WatchStore;
+  registry: ToolRegistry;
+  workspaceDir: string;
+  wakeId: string;
   trigger: LosslessEvent;
   trace: readonly RpgTurnTrace[];
   endReason: WakeEndReason;
@@ -661,7 +660,7 @@ async function scheduleResume(opts: {
   for (const g of stranded) {
     const attempt = Math.max(g.resumeAttempts ?? 0, fromWatch(g.id)) + 1;
     attempts.set(g.id, attempt);
-    await opts.gaps.annotate(g.id, { resumeAttempts: attempt });
+    await opts.registry.runAction('gaps.note', { gapId: g.id, resumeAttempts: attempt }, { workspaceDir: opts.workspaceDir, now: opts.now, wakeId: opts.wakeId, gapId: g.id });
   }
   // The gap stranded least often sets the time, so a fresh gap is not held back by one that keeps failing.
   const attempt = Math.min(...attempts.values());
@@ -676,15 +675,11 @@ async function scheduleResume(opts: {
       return `${g.id} "${g.title.slice(0, 60)}" (attempt ${attempts.get(g.id)}): ${shown}`;
     })
     .join(' | ');
-  await opts.watches.add(
-    {
-      kind: 'timer',
-      label: `Resume: the last wake ended before these gaps had a next move (${reason}). Last moves: ${lastMoves}`.slice(0, 1200),
-      gapId: stranded.find((g) => g.id !== ROOT_GAP_ID)?.id ?? stranded[0]!.id,
-      gapIds: stranded.map((g) => g.id),
-      fireAt: new Date(opts.now.getTime() + delay).toISOString(),
-      resumeAttempt: attempt,
-    },
-    opts.now,
-  );
+  const label = `Resume: the last wake ended before these gaps had a next move (${reason}). Last moves: ${lastMoves}`.slice(0, 1200);
+  const gapId = stranded.find((g) => g.id !== ROOT_GAP_ID)?.id ?? stranded[0]!.id;
+  const fireAt = new Date(opts.now.getTime() + delay).toISOString();
+  // The quick return is a timer like any other: watch.set's rung decides it (a draft of it waits on the owner like any draft).
+  const gate = await opts.registry.gate('watch.set', { kind: 'timer', label, gapId, fireAt }, { now: opts.now, gapId });
+  if (!gate.run) return;
+  await opts.watches.add({ kind: 'timer', label, gapId, gapIds: stranded.map((g) => g.id), fireAt, resumeAttempt: attempt }, opts.now);
 }

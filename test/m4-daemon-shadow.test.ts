@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { FakeProvider, RufusCore, computeScorecard, loadWakes, messageEvent, runJudgmentEval } from '../src';
+import { FakeProvider, RufusCore, computeScorecard, loadWakes, messageEvent } from '../src';
 import { tempDir, topDown } from './helpers';
 
 const NOW = new Date('2026-11-26T14:00:00Z');
@@ -44,29 +44,13 @@ describe('Milestone 4: Unified Startup Orientation & Shadow Mode', () => {
     expect(shadowLog).toContain('Online and ready.');
     expect(shadowLog).toContain('1. alpha');
 
-    // Flight Recorder (wakes.jsonl) + Outcome Scorecard + Golden Judgment Eval
+    // Flight Recorder (wakes.jsonl) + Outcome Scorecard
     const wakes = await loadWakes(dir);
     expect(wakes).toHaveLength(1);
     expect(work(wakes[0]?.trace.map((t) => t.toolId) ?? [])).toEqual(['system.startup_snapshot', 'send_message']);
     const sc = await computeScorecard(dir);
     expect(sc.totalWakes).toBe(1);
     expect(sc.toolSuccessRate).toBe(1);
-
-    const evalRes = await runJudgmentEval({
-      workspaceDir: dir,
-      cases: [
-        {
-          id: 'list-tools-check',
-          trigger: messageEvent({ channel: 'cli', actor: 'owner', text: 'What tools do you have?', timestamp: NOW.toISOString() }),
-          expectedFirstTool: 'tools.list_all',
-        },
-      ],
-      provider: new FakeProvider(() => JSON.stringify({ thought: 'List tools', toolId: 'tools.list_all', input: {} })),
-      registry: core.registry,
-      now: () => NOW,
-    });
-    expect(evalRes.ok).toBe(true);
-    expect(evalRes.passed).toBe(1);
 
     await core.close();
   });
@@ -83,7 +67,7 @@ describe('Milestone 4: Unified Startup Orientation & Shadow Mode', () => {
       if (step === 4) return JSON.stringify({ toolId: 'sleep', input: { reason: 'refused' } });
       if (step === 5) return JSON.stringify({ toolId: 'approvals.approve', input: { alwaysAllow: true } });
       if (step === 6) return JSON.stringify({ toolId: 'sleep', input: { reason: 'approved and ran' } });
-      if (step === 7) return JSON.stringify({ toolId: 'demo.send', input: { to: 'Sam' } });
+      if (step === 7) return JSON.stringify({ toolId: 'demo.send', input: { to: 'Alex' } });
       return JSON.stringify({ toolId: 'sleep', input: { reason: 'auto-ran' } });
     }));
 

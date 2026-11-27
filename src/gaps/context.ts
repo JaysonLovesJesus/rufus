@@ -70,7 +70,7 @@ export function moveKey(toolId: string, input: Record<string, unknown>): MoveKey
 }
 
 /** The work-log line code writes after a move. */
-export function logEntry(opts: { toolId: string; input: Record<string, unknown>; receipt: Receipt; at: string; wakeId?: string; turn?: number }): GapLogEntry {
+export function logEntry(opts: { toolId: string; input: Record<string, unknown>; receipt: Receipt; at: string; wakeId?: string; turn?: number; expect?: string; met?: boolean }): GapLogEntry {
   const k = moveKey(opts.toolId, opts.input);
   const r = opts.receipt;
   const result = r.status === 'ok' || r.status === 'pending_approval' ? r.summary : `${r.error ?? r.summary}${r.error && !r.summary.includes(r.error) ? ` (${r.summary.slice(0, 120)})` : ''}`;
@@ -86,6 +86,8 @@ export function logEntry(opts: { toolId: string; input: Record<string, unknown>;
     inputText: k.inputText,
     status: r.status,
     result: result.replace(/\s+/g, ' ').slice(0, 300),
+    ...(opts.expect ? { expect: opts.expect.slice(0, 200) } : {}),
+    ...(opts.met !== undefined ? { met: opts.met } : {}),
   };
 }
 

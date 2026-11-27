@@ -48,10 +48,14 @@ export function topDown(script: (req: ModelRequest, idx: number) => string | Pro
   return async (req: ModelRequest): Promise<string> => {
     if (!isDecide(req)) return script(req, idx++);
     const last = lastReceipt(req.prompt);
-    const stranded = /have no next move in motion: (gap_[a-z0-9]+)/.exec(last);
+    const stranded = /have no (?:real )?next move(?: in motion)?: (gap_[a-z0-9]+)/.exec(last);
     if (stranded) {
       settling = true;
-      return JSON.stringify({ gap: stranded[1], toolId: 'watch.set', input: { kind: 'timer', label: 'next move', fireAt: '2099-01-01T00:00:00Z' } });
+      return JSON.stringify({
+        gap: stranded[1],
+        toolId: 'watch.set',
+        input: { kind: 'timer', label: 'next move', fireAt: '2099-01-01T00:00:00Z', waitsOn: 'time', waitsFor: 'next check window', expect: 'New events or work arrive' },
+      });
     }
     if (settling && /watch\.set -> ok/.test(last)) {
       settling = false;

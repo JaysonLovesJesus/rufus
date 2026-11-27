@@ -13,6 +13,8 @@ import time
 
 BASE_MODEL = os.environ.get("RUFUS_SETFIT_BASE", "sentence-transformers/paraphrase-MiniLM-L3-v2")
 LABEL_TO_ID = {"SLEEP": 0, "WAKE": 1}
+# A missed event costs far more than a wasted wake: WAKE from this probability up, not from 0.5.
+WAKE_THRESHOLD = float(os.environ.get("RUFUS_BOUNCER_WAKE_THRESHOLD", "0.3"))
 ID_TO_LABEL = {0: "SLEEP", 1: "WAKE"}
 
 
@@ -39,7 +41,8 @@ def cmd_train(data_path: str, model_dir: str, epochs: int) -> None:
 
     t0 = time.time()
     ds = Dataset.from_list(rows)
-    model = SetFitModel.from_pretrained(BASE_MODEL, labels=["SLEEP", "WAKE"])
+    # WAKE labels are rare (about 1 in 20): balanced class weights keep the head from learning "always SLEEP".
+    model = SetFitModel.from_pretrained(BASE_MODEL, labels=["SLEEP", "WAKE"], head_params={"class_weight": "balanced", "max_iter": 1000})
     args = TrainingArguments(
         output_dir=os.path.join(model_dir, "_checkpoints"),
         batch_size=8,
@@ -73,9 +76,9 @@ def cmd_serve(model_dir: str) -> None:
             probs = model.predict_proba([text])[0]
             sleep_p = float(probs[0])
             wake_p = float(probs[1])
-            label = "WAKE" if wake_p >= sleep_p else "SLEEP"
+            label = "WAKE" if wake_p >= WAKE_THRESHOLD else "SLEEP"
             conf = max(sleep_p, wake_p)
-            out = {"label": label, "confidence": round(conf, 4), "durationMs": round((time.time() - t0) * 1000, 2)}
+            out = {"label": label, "confidence": round(conf, 4), "wakeP": round(wake_p, 4), "durationMs": round((time.time() - t0) * 1000, 2)}
         except Exception as e:
             out = {"label": "WAKE", "confidence": 0.5, "error": str(e), "durationMs": round((time.time() - t0) * 1000, 2)}
         sys.stdout.write(json.dumps(out) + "\n")
@@ -96,7 +99,7 @@ def cmd_predict(model_dir: str, data_path: str) -> None:
     labels = []
     if texts:
         for probs in model.predict_proba(texts):
-            labels.append("WAKE" if float(probs[1]) >= float(probs[0]) else "SLEEP")
+            labels.append("WAKE" if float(probs[1]) >= WAKE_THRESHOLD else "SLEEP")
     print(json.dumps({"labels": labels}))
 
 

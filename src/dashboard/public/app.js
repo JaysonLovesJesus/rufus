@@ -126,6 +126,7 @@
     'memory.search': 'search memory', 'skills.save': 'update a brain skill',
     'brain.investigate': 'investigate', 'brain.plan': 'plan', 'brain.create': 'create', 'brain.verify': 'verify',
     'gaps.create': 'add a gap', 'gaps.approve': 'approve a gap', 'gaps.update': 'update a gap',
+    'gaps.close': 'close a verified gap', 'gaps.note': 'note on a gap', 'gaps.retarget': "change a gap's target",
     'watch.set': 'schedule a next move', 'approvals.approve': 'carry out an approved move', 'approvals.deny': 'drop a declined move',
     'system.startup_snapshot': 'check his startup state', 'self.upgrade': 'upgrade himself', 'self.restart': 'restart himself',
     'self.inspect_tool': 'inspect a tool', 'self.recent_activity': 'review his recent activity',

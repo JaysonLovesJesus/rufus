@@ -47,7 +47,7 @@ tools/<id>/
 When it's time to talk to you, a fast speaker model receives only **why** Rufus is messaging you (`purpose`), the clean **Receipts** from code, and your personal `VOICE.md` — checked by a fast code gate so nothing unverified slips through.
 
 ### 5. Full Transparency (`wakes.jsonl`)
-Every wake saves its complete turn-by-turn transcript. Run `pnpm rufus stats` for a live scorecard (wasted wake rate, tool success rate, approval rate, average speed) or `pnpm rufus eval` to replay golden judgment cases.
+Every wake saves its complete turn-by-turn transcript. Run `pnpm rufus stats` for a live scorecard (wasted wake rate, tool success rate, approval rate, average speed) or `pnpm rufus verify --live` to replay real owner messages through the real model.
 
 ---
 
@@ -96,7 +96,7 @@ pnpm rufus start --shadow   # Shadow mode (log decisions without sending)
 pnpm rufus stats            # Live outcome scorecard
 pnpm rufus verify           # Measure the code against docs/OUTLINE.md (sends nothing)
 pnpm rufus verify --live    # Replay real owner messages through the real model on a workspace copy
-pnpm rufus eval             # Replay golden judgment evals
+pnpm rufus promote          # Check a commit, run the daemon from it, roll back if /health fails
 pnpm rufus dashboard --open # Read-only local dashboard
 pnpm rufus bouncer status   # Training example counts (SLEEP vs WAKE)
 ```

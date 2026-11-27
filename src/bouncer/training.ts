@@ -10,6 +10,8 @@ const FEATURE_TEXT = /^source:[^|]+ \| kind:/;
 /** What the owner said or did about an event outranks what Rufus did with it. */
 const OWNER_SIGNALS = new Set<BouncerExample['source']>(['pushback', 'skip', 'approval', 'user_message']);
 const OPUS = new Set<BouncerExample['source']>(['opus_acted', 'opus_sleep']);
+/** Priors that always train and are never held out: held-out scores measure real outcomes only. */
+const WEAK = new Set<BouncerExample['source']>(['seed', 'reply_pair']);
 /** One in five labelled examples is held out, picked by a hash of its text so the split stays the same as data grows. */
 const HELD_OUT_EVERY = 5;
 
@@ -83,7 +85,14 @@ export function resolveExamples(examples: readonly BouncerExample[], relabel?: R
       out.push(opus.filter((x) => x.label === label).pop()!);
       continue;
     }
-    out.push(group[group.length - 1]!);
+    // A cheap model's re-check of a slept event beats the seeds; the owner's old reply habits are the weakest prior of all.
+    const review = group.filter((x) => x.source === 'review');
+    if (review.length) {
+      out.push(review[review.length - 1]!);
+      continue;
+    }
+    const strong = group.filter((x) => !WEAK.has(x.source));
+    out.push((strong.length ? strong : group)[(strong.length ? strong : group).length - 1]!);
   }
   return { examples: out, stats };
 }
@@ -95,7 +104,7 @@ export function resolveExamples(examples: readonly BouncerExample[], relabel?: R
 export function splitHeldOut(examples: readonly BouncerExample[]): { train: BouncerExample[]; heldOut: BouncerExample[] } {
   const held = new Set<BouncerExample>();
   for (const label of ['WAKE', 'SLEEP'] as const) {
-    const pool = examples.filter((x) => x.source !== 'seed' && x.label === label);
+    const pool = examples.filter((x) => !WEAK.has(x.source) && x.label === label);
     const picked = pool.filter((x) => isHeldOut(x.text));
     if (!picked.length && pool.length >= 3) picked.push(pool.reduce((a, b) => (textHash(b.text) < textHash(a.text) ? b : a)));
     for (const x of picked) held.add(x);

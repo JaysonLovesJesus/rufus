@@ -31,7 +31,7 @@ async function cli(args: string[], dir: string): Promise<{ code: number; out: st
 describe('rufus CLI', () => {
   it('lists every command on help, and fails loudly on an unknown command or bad input', async () => {
     const dir = await tempDir('rufus-cli-');
-    const [help, unknown, emptyTest, badPort, noCases, train] = await Promise.all([
+    const [help, unknown, emptyTest, badPort, removedEval, train] = await Promise.all([
       cli(['help'], dir),
       cli(['statz'], dir),
       cli(['bouncer', 'test'], dir),
@@ -40,15 +40,17 @@ describe('rufus CLI', () => {
       cli(['bouncer', 'train'], dir),
     ]);
     expect(help.code).toBe(0);
-    for (const c of ['start', 'wake', 'stats', 'verify', 'verify --live', 'eval', 'bouncer train', 'dashboard']) expect(help.out).toContain(`rufus ${c}`);
+    for (const c of ['start', 'wake', 'stats', 'verify', 'verify --live', 'promote', 'bouncer train', 'dashboard']) expect(help.out).toContain(`rufus ${c}`);
     expect(unknown.code).toBe(1);
     expect(unknown.err).toContain('Unknown command: statz');
     expect(emptyTest.code).toBe(1);
     expect(emptyTest.err).toContain('Usage: rufus bouncer test');
     expect(badPort.code).toBe(1);
     expect(badPort.err).toContain('--port needs a port number');
-    expect(noCases.code).toBe(1);
-    expect(noCases.err).toContain('No judgment cases at');
+    // The judgment eval is gone (the live replays replaced it).
+    expect(help.out).not.toContain('rufus eval');
+    expect(removedEval.code).toBe(1);
+    expect(removedEval.err).toContain('Unknown command: eval');
     expect(train.code).toBe(1);
     expect(train.err).toContain('No SetFit python at');
   }, 60_000);

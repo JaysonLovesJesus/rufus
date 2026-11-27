@@ -6,7 +6,7 @@ import { Bouncer } from './bouncer/bouncer';
 import { formatTrainingMetrics } from './bouncer/training';
 import { TelegramChannel } from './channels/telegram';
 import { RufusCore } from './daemon';
-import { computeScorecard, formatScorecard, runJudgmentEval } from './eval/flight-recorder';
+import { computeScorecard, formatScorecard } from './eval/flight-recorder';
 import { recordOpsFailure } from './eval/ops-log';
 import { loadScenarios, runScenario } from './eval/scenarios';
 import { OUTLINE_ITEMS, verifyAllParts } from './eval/verify';
@@ -14,6 +14,7 @@ import { buildDefaultConnectors, HeartbeatHub } from './events/connectors';
 import { messageEvent } from './events/ingest';
 import { createSenseRuntime, stampConsole } from './events/runtime';
 import { startEventWebhook } from './events/webhook';
+import { DAEMON_LABEL, defaultReleasesDir, launchAgentPath, promote, sourceRepoDir } from './ops/release';
 import { ClaudeCliProvider } from './providers/claude';
 import type { MessageSink } from './types';
 import { KokoroTts } from './voice/kokoro';
@@ -122,6 +123,8 @@ async function main(argv: string[]): Promise<void> {
       sink: tg ?? sink,
       ...(pythonPath ? { pythonPath } : {}),
       shadow,
+      // Its own process, so its calls never evict the Speaker's warm one.
+      triageProvider: new ClaudeCliProvider({ model: process.env.RUFUS_TRIAGE_MODEL || 'haiku', cwd: dir, timeoutMs: 60_000 }),
     });
     const initInfo = await core.init();
     const hub = new HeartbeatHub();
@@ -264,24 +267,17 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  if (cmd === 'eval') {
-    const casesPath = path.join(dir, 'evals', 'judgment.json');
-    if (!existsSync(casesPath)) throw new Error(`No judgment cases at ${casesPath}`);
-    const core = makeCore();
-    await core.init();
-    try {
-      const report = await runJudgmentEval({
-        workspaceDir: dir,
-        provider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus', cwd: dir }),
-        registry: core.registry,
-      });
-      if (!report.total) throw new Error(`${casesPath} has no readable cases`);
-      console.log(`Judgment Eval: ${report.passed}/${report.total} passed.`);
-      for (const r of report.results) console.log(`  ${r.passed ? 'PASS' : 'FAIL'} ${r.id}${r.reason ? ` (${r.reason})` : ''}`);
-      if (!report.ok) process.exitCode = 1;
-    } finally {
-      await core.close();
-    }
+  if (cmd === 'promote') {
+    const prepare = rest.includes('--prepare');
+    const reasonIdx = rest.indexOf('--reason');
+    const reason = reasonIdx >= 0 ? rest[reasonIdx + 1] : undefined;
+    const ref = rest.find((a, i) => !a.startsWith('--') && (reasonIdx < 0 || i !== reasonIdx + 1));
+    const res = await promote(
+      { workspaceDir: dir, releasesDir: defaultReleasesDir(), sourceDir: sourceRepoDir(), plistPath: launchAgentPath(DAEMON_LABEL) },
+      { ...(ref ? { ref } : {}), prepare, ...(reason ? { reason } : {}) },
+    );
+    console.log(res.summary);
+    if (!res.ok) process.exitCode = 1;
     return;
   }
 
@@ -330,7 +326,7 @@ async function main(argv: string[]): Promise<void> {
     '  rufus stats                          Scorecard: wakes, tool success, owner outcomes, model cost, channel failures',
     '  rufus verify                         Measure the code against docs/OUTLINE.md (about 30s, sends nothing)',
     '  rufus verify --live [scenario...]    Replay real owner messages through the real model on a copy of the workspace',
-    '  rufus eval                           Replay the golden judgment cases in evals/judgment.json',
+    '  rufus promote [ref] [--prepare]      Build, check, and switch the daemon to a checked release',
     '  rufus bouncer status                 Count the bouncer training examples',
     '  rufus bouncer train                  Retrain the local SetFit bouncer (kept only if held-out WAKE recall holds)',
     '  rufus bouncer test <text...>         Show what the bouncer decides for a message',

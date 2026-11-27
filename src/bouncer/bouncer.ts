@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { cosineSimilarity, createLocalEmbedder, normalize, type Embedder, type Vector } from '../embed';
 import type { BouncerDecision, BouncerExample, BouncerLabel, LosslessEvent } from '../types';
+import type { GapLook } from './gap-lens';
+import { loadReplyPairs, replyPairExamples } from './reply-pairs';
+import type { Triage } from './triage';
 import {
   featureText,
   isFeatureText,
@@ -20,6 +23,11 @@ import {
 } from './training';
 
 const execFileAsync = promisify(execFile);
+
+/** Below this confidence the classifier is unsure, and a cheap model makes the first call instead of waking Opus. */
+export const SURE_CONFIDENCE = 0.9;
+/** WAKE from this probability up (high recall: a missed event costs far more than a wasted wake). Matches setfit_sidecar.py. */
+export const WAKE_THRESHOLD = 0.3;
 const SIDECAR_SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'setfit_sidecar.py');
 
 /** Trains and runs SetFit models; the default shells out to the Python sidecar, tests pass a fake. */
@@ -153,9 +161,16 @@ export class Bouncer {
     return out;
   }
 
-  /** The cleaned, relabelled label set split into train and held-out (see training.ts). */
+  /**
+   * The cleaned, relabelled label set split into train and held-out (see training.ts).
+   * The owner's past reply pairs join as a weak, capped prior: they always train, are never held out, and any real label
+   * for the same text replaces them.
+   */
   async preparedSet(): Promise<{ train: BouncerExample[]; heldOut: BouncerExample[]; stats: TrainingMetrics['resolve'] }> {
-    const { examples, stats } = resolveExamples(await this.rawExamples(), await relabelFromWakes(this.workspaceDir));
+    const raw = await this.rawExamples();
+    const real = raw.filter((x) => x.source !== 'seed').length;
+    const pairs = replyPairExamples(await loadReplyPairs(this.workspaceDir), real);
+    const { examples, stats } = resolveExamples([...pairs, ...raw], await relabelFromWakes(this.workspaceDir));
     return { ...splitHeldOut(examples), stats };
   }
 
@@ -308,11 +323,13 @@ export class Bouncer {
         this.sidecar!.pending.push(resolve);
         this.sidecar!.proc.stdin.write(`${JSON.stringify({ text })}\n`);
       });
-      const res = JSON.parse(replyLine) as { label: BouncerLabel; confidence: number; durationMs?: number };
+      const res = JSON.parse(replyLine) as { label: BouncerLabel; confidence: number; wakeP?: number; durationMs?: number };
+      const wakeScore = typeof res.wakeP === 'number' ? res.wakeP : res.label === 'WAKE' ? res.confidence : 1 - res.confidence;
       return {
         label: res.label,
         confidence: res.confidence,
         backend: 'setfit',
+        wakeScore,
         durationMs: res.durationMs ?? Date.now() - t0,
       };
     }
@@ -342,7 +359,49 @@ export class Bouncer {
       label,
       confidence: Number(confidence.toFixed(4)),
       backend: 'prototype',
+      wakeScore: Number(Math.min(1, Math.max(0, 0.5 + margin)).toFixed(4)),
       durationMs: Date.now() - t0,
     };
+  }
+
+  /**
+   * The Bouncer with the gap tree in view. The local classifier decides alone when it is sure and the event touches no gap.
+   * Otherwise a cheap model makes the first call: unsure classifier, or the classifier would sleep on an event close to
+   * (or tied by person or thread to) an open gap. Opus wakes only when the cheap model says WAKE or cannot tell.
+   * With no cheap model (or when it fails), an event tied to or very near a gap wakes: recall beats cost.
+   */
+  async judge(event: LosslessEvent, ctx: { look?: GapLook; triage?: Triage } = {}): Promise<BouncerDecision> {
+    const base = await this.decide(event);
+    if (base.backend === 'rule') return base;
+    const t0 = Date.now() - base.durationMs;
+    const look = ctx.look ?? { features: [], hints: [] };
+    const tied = look.hints.filter((h) => h.tie);
+    const nearHigh = look.features.includes('gap_near:high');
+    const near = nearHigh || look.features.includes('gap_near:mid');
+    const gapIds = (tied.length ? tied : near ? look.hints : []).map((h) => h.id);
+    const withGaps = { ...base, ...(gapIds.length ? { gapIds } : {}) };
+    const touchesGap = tied.length > 0 || near;
+    const unsure = base.confidence < SURE_CONFIDENCE;
+    if (!unsure && !(touchesGap && base.label === 'SLEEP')) return withGaps;
+    const fallback = (why: string): BouncerDecision =>
+      base.label === 'SLEEP' && (tied.length > 0 || nearHigh)
+        ? { ...withGaps, label: 'WAKE', reason: `${tied.length ? `tied to ${tied[0]!.id} by ${tied[0]!.tie}` : `close to ${gapIds[0]}`}${why}`, durationMs: Date.now() - t0 }
+        : withGaps;
+    if (!ctx.triage) return fallback('');
+    try {
+      const v = await ctx.triage.decide(event, { hints: look.hints, ...(base.wakeScore !== undefined ? { wakeScore: base.wakeScore } : {}) });
+      const ids = v.gapId ? [v.gapId, ...gapIds.filter((g) => g !== v.gapId)] : gapIds;
+      return {
+        ...base,
+        label: v.sure ? v.label : 'WAKE',
+        confidence: v.sure ? 0.8 : 0.5,
+        backend: 'triage',
+        reason: v.sure ? v.reason || 'cheap model' : `cheap model unsure (${v.reason || 'no reason'}): Opus decides`,
+        ...(ids.length ? { gapIds: ids } : {}),
+        durationMs: Date.now() - t0,
+      };
+    } catch (err) {
+      return fallback(` (cheap model failed: ${err instanceof Error ? err.message : String(err)})`);
+    }
   }
 }

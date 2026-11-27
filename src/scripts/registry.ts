@@ -5,10 +5,12 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { createLocalEmbedder, topKBySimilarity, type Embedder, type Vector } from '../embed';
 import { loadWakes } from '../eval/flight-recorder';
-import type { Receipt, ScriptContext, ScriptOutput, ToolManifest } from '../types';
-import type { ApprovalStore, TrustLevel } from './approvals';
+import type { ActionStep, Receipt, ScriptContext, ScriptOutput, ToolManifest, TrustLevel } from '../types';
+import { effectDefault, stricterOf, type ApprovalStore } from './approvals';
+import { markForReport, passGate, resolveLevel, type GateDecision } from './gate';
 import { touchesTrustFiles } from './protected';
 import { executeScript, explainError, MANIFEST_FILE, readToolLessons, readToolStats, RUN_FILE, TEST_FILE, validateInput, validateManifest } from './standard';
+import { toolEnv } from './sandbox';
 import { archiveToolVersion, carryToolHistory } from './versions';
 
 const execFileAsync = promisify(execFile);
@@ -24,6 +26,23 @@ export function ensureToolPath(env: NodeJS.ProcessEnv = process.env): void {
 /** How many of a tool's recent real calls a repair replays, and how long each replay may take. */
 const REPLAY_LIMIT = 6;
 const REPLAY_TIMEOUT_MS = 20_000;
+/** Where the staged test's calls to run() are counted, so "has a passing test" means the test really ran the tool. */
+const REAL_RUN_FILE = '.run.real.mjs';
+
+/** What a tool just built or repaired starts at: draft (ask the owner) with a passing test of the tool itself, else rehearse. */
+export function startLevelFor(evidence: { testRanTool: boolean; replayWorked: number }): TrustLevel {
+  return evidence.testRanTool || evidence.replayWorked > 0 ? 'draft' : 'rehearse';
+}
+
+/**
+ * A packaged tool's manifest is written by the model, so it can't vouch for its own trust: a declared default rung only
+ * counts when it is stricter than its effect's, and engine-only fields (actions, internal) are dropped.
+ */
+export function packagedManifest(m: ToolManifest): ToolManifest {
+  const { actions: _actions, internal: _internal, defaultTrust, ...rest } = m;
+  const def = effectDefault(m);
+  return { ...rest, ...(defaultTrust && stricterOf(defaultTrust, def) === defaultTrust && defaultTrust !== def ? { defaultTrust } : {}) };
+}
 
 export interface RegisteredTool {
   manifest: ToolManifest;
@@ -37,6 +56,8 @@ export interface CallOptions {
   workspaceDir: string;
   now: Date;
   approved?: boolean;
+  /** The rung this call runs at (set by the gate), so a receipt that changed something at act_and_report is reported. */
+  level?: TrustLevel;
   /** The owner approved this exact input: lets a write touch protected files (trust files, manifests, gate code). */
   ownerApproved?: boolean;
   env?: Record<string, string | undefined>;
@@ -62,6 +83,10 @@ export class ToolRegistry {
   private readonly builtinIds = new Set<string>();
   private readonly embedder: Embedder;
   readonly toolsDir: string;
+  /** The trust ladder every action taken inside a tool (`ctx.act`) and by engine code goes through. */
+  private approvals?: ApprovalStore;
+  /** The calls running now, innermost last, each collecting the model spend made inside it. */
+  private readonly running: Array<{ usd: number }> = [];
 
   constructor(opts: { toolsDir: string; embedder?: Embedder }) {
     this.toolsDir = opts.toolsDir;
@@ -77,6 +102,50 @@ export class ToolRegistry {
       ...(m.notWhen?.length ? [`not when: ${m.notWhen.join('; ')}`] : []),
     ].join('\n');
     return await this.embedder.embed(text);
+  }
+
+  /** Attaches the trust ladder (trust.json + approvals.json) used for actions and for tools' starting rungs. */
+  useTrust(approvals: ApprovalStore | undefined): void {
+    if (approvals) this.approvals = approvals;
+  }
+
+  /** The ladder's decision for one action or tool call made by engine code (or a tool's step): run now, or what happened instead. */
+  async gate(toolId: string, input: Record<string, unknown>, opts: { now: Date; gapId?: string; stepOf?: string }): Promise<GateDecision> {
+    const manifest = this.tools.get(toolId)?.manifest;
+    if (!manifest) {
+      return {
+        run: false,
+        level: 'never',
+        receipt: { toolId, effect: 'write', status: 'failed', durationMs: 0, summary: `Unknown action "${toolId}". Nothing ran.`, changes: [], error: 'unknown action', at: opts.now.toISOString() },
+      };
+    }
+    return passGate({ manifest, input, ...(this.approvals ? { approvals: this.approvals } : {}), now: opts.now, ...(opts.gapId ? { gapId: opts.gapId } : {}), ...(opts.stepOf ? { stepOf: opts.stepOf } : {}) });
+  }
+
+  /** Gates one action and, if the ladder lets it run, runs it: the receipt is what really happened. */
+  async runAction(toolId: string, input: Record<string, unknown>, opts: CallOptions & { stepOf?: string }): Promise<Receipt> {
+    const decision = await this.gate(toolId, input, { now: opts.now, ...(opts.gapId ? { gapId: opts.gapId } : {}), ...(opts.stepOf ? { stepOf: opts.stepOf } : {}) });
+    if (!decision.run) return decision.receipt;
+    const { stepOf: _stepOf, ...callOpts } = opts;
+    return this.call(toolId, input, { ...callOpts, approved: true, level: decision.level });
+  }
+
+  /** The rung a tool is on now (the Desk tag, the dashboard). */
+  async levelOf(manifest: ToolManifest): Promise<TrustLevel | 'never'> {
+    return resolveLevel(manifest, this.approvals);
+  }
+
+  /** A tool's explicit rungs now (for a version about to be archived). */
+  async rungsOf(id: string): Promise<Record<string, TrustLevel> | undefined> {
+    return this.approvals?.rungsOf(id);
+  }
+
+  /** Puts back the rungs a kept version had (a rollback); a version that recorded none keeps today's rungs. */
+  async restoreRungs(id: string, rungs: Record<string, string> | undefined): Promise<boolean> {
+    if (!this.approvals || !rungs) return false;
+    const valid = Object.fromEntries(Object.entries(rungs).filter((e): e is [string, TrustLevel] => ['rehearse', 'draft', 'act_and_report', 'act_quietly'].includes(e[1])));
+    await this.approvals.restoreRungs(id, valid);
+    return true;
   }
 
   /** True for ids registered in code: no packaged tool may replace them. */
@@ -122,8 +191,9 @@ export class ToolRegistry {
           continue;
         }
         await fs.stat(path.join(toolDir, RUN_FILE));
-        const vector = await this.embedManifest(checked.manifest);
-        this.tools.set(checked.manifest.id, { manifest: checked.manifest, toolDir, vector });
+        const manifest = packagedManifest(checked.manifest);
+        const vector = await this.embedManifest(manifest);
+        this.tools.set(manifest.id, { manifest, toolDir, vector });
         loaded.push(checked.manifest.id);
       } catch (err) {
         errors.push(`${entry}: ${err instanceof Error ? err.message : String(err)}`);
@@ -139,7 +209,8 @@ export class ToolRegistry {
       const checked = validateManifest(JSON.parse(await fs.readFile(path.join(toolDir, MANIFEST_FILE), 'utf8')) as unknown);
       if (!checked.manifest || checked.errors.length) return { ok: false, error: checked.errors.join('; ') };
       if (checked.manifest.id !== id || this.isReserved(id)) return { ok: false, error: `manifest id "${checked.manifest.id}" cannot be loaded as ${id}` };
-      this.tools.set(id, { manifest: checked.manifest, toolDir, vector: await this.embedManifest(checked.manifest) });
+      const manifest = packagedManifest(checked.manifest);
+      this.tools.set(id, { manifest, toolDir, vector: await this.embedManifest(manifest) });
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -159,6 +230,8 @@ export class ToolRegistry {
     const always: ToolManifest[] = [];
     const candidates: Array<{ item: ToolManifest; vector: Vector }> = [];
     for (const t of this.tools.values()) {
+      // Actions are steps other tools take through the ladder, not moves: they are not offered to Decide.
+      if (t.manifest.internal) continue;
       if (t.alwaysVisible) always.push(t.manifest);
       else candidates.push({ item: t.manifest, vector: t.vector });
     }
@@ -173,11 +246,12 @@ export class ToolRegistry {
    * trust gate will really do with it, how its recent calls went, its last error, and the newest lessons from failures.
    */
   async formatForDesk(shown: readonly ToolManifest[], approvals?: ApprovalStore): Promise<string> {
-    const index = `Every tool id (${this.tools.size}; any of them can be called, not only those shown): ${this.list().map((m) => m.id).join(', ')}`;
+    const callable = this.list().filter((m) => !m.internal);
+    const index = `Every tool id (${callable.length}; any of them can be called, not only those shown): ${callable.map((m) => m.id).join(', ')}`;
     const blocks: string[] = [];
     for (const t of shown) {
       const entry = this.tools.get(t.id);
-      const level = approvals ? await approvals.levelFor(t) : t.effect === 'write' && t.requiresApproval ? 'draft' : 'act_quietly';
+      const level = await resolveLevel(t, approvals ?? this.approvals);
       const tags = [t.effect, TRUST_WORDS[level]];
       let health = '';
       let lessons = '';
@@ -227,7 +301,26 @@ export class ToolRegistry {
     }
     // Composed sub-calls are read-only and never inherit the owner's approval of the outer call.
     const subOpts: CallOptions = { workspaceDir: opts.workspaceDir, now: opts.now, ...(opts.env ? { env: opts.env } : {}), ...(opts.wakeId ? { wakeId: opts.wakeId } : {}), ...(opts.gapId ? { gapId: opts.gapId } : {}) };
+    // Each action the tool takes as a step of its work goes through the ladder on its own rung, never the tool's.
+    const steps: Array<{ receipt: Receipt; level: ActionStep['level'] }> = [];
+    const act = async (actionId: string, actionInput: Record<string, unknown>): Promise<Receipt> => {
+      const at = opts.now.toISOString();
+      let receipt: Receipt;
+      let level: ActionStep['level'];
+      if (!entry.manifest.actions?.includes(actionId)) {
+        level = 'never';
+        receipt = { toolId: actionId, effect: 'write', status: 'failed', durationMs: 0, summary: `Refused: ${toolId} does not declare the action ${actionId}. Nothing ran.`, changes: [], error: 'undeclared action', at };
+      } else {
+        const decision = await this.gate(actionId, actionInput, { now: opts.now, ...(opts.gapId ? { gapId: opts.gapId } : {}), stepOf: toolId });
+        level = decision.level;
+        // An action runs because the ladder said so, not because the owner approved the outer call.
+        receipt = decision.run ? await this.call(actionId, actionInput, { ...subOpts, approved: true, level: decision.level }) : decision.receipt;
+      }
+      steps.push({ receipt, level });
+      return receipt;
+    };
     const ctx: ScriptContext = {
+      act,
       workspaceDir: opts.workspaceDir,
       now: opts.now,
       env: opts.env ?? process.env,
@@ -259,18 +352,57 @@ export class ToolRegistry {
             at: opts.now.toISOString(),
           };
         }
+        // A read sub-tool still runs on its own rung: one that is blocked, rehearsed or asks first is not run inside another tool.
+        const subLevel = await resolveLevel(sub.manifest, this.approvals, args);
+        if (subLevel !== 'act_and_report' && subLevel !== 'act_quietly') {
+          return {
+            toolId: readOnlyId,
+            effect: 'read',
+            status: 'failed',
+            durationMs: 0,
+            summary: `Composition refused: "${readOnlyId}" is at "${subLevel}" on the trust ladder, so it only runs as its own move.`,
+            changes: [],
+            error: 'sub-tool not runnable on its trust rung',
+            at: opts.now.toISOString(),
+          };
+        }
         return this.call(readOnlyId, args, subOpts);
       },
     };
-    return executeScript({
-      manifest: entry.manifest,
-      input,
-      ctx,
-      ...(entry.toolDir ? { toolDir: entry.toolDir } : {}),
-      ...(entry.handler ? { handler: entry.handler } : {}),
-      ...(opts.approved !== undefined ? { approved: opts.approved } : {}),
-      ...(opts.ownerApproved ? { ownerApproved: true } : {}),
-    });
+    // Model spend made while this call runs is charged to it (the innermost running call), for the spend ledger.
+    const frame = { usd: 0 };
+    this.running.push(frame);
+    let receipt: Receipt;
+    try {
+      receipt = await executeScript({
+        manifest: entry.manifest,
+        input,
+        ctx,
+        ...(entry.toolDir ? { toolDir: entry.toolDir } : {}),
+        ...(entry.handler ? { handler: entry.handler } : {}),
+        ...(opts.approved !== undefined ? { approved: opts.approved } : {}),
+        ...(opts.ownerApproved ? { ownerApproved: true } : {}),
+      });
+    } finally {
+      this.running.splice(this.running.lastIndexOf(frame), 1);
+    }
+    if (this.approvals) {
+      await this.approvals.spend.record(toolId, { at: opts.now, ms: receipt.durationMs, usd: frame.usd }).catch(() => undefined);
+      // The scope and rung it ran on, so the owner's later pushback can cost exactly that scope its rung.
+      if (opts.level) receipt = { ...receipt, trust: { key: await this.approvals.keyFor(entry.manifest, input), level: opts.level } };
+    }
+    const done = withSteps(opts.level ? markForReport(opts.level, receipt) : receipt, steps);
+    // Do-and-tell outside any wake (no digest is coming): queue it for the next wake's digest.
+    if (!opts.wakeId && opts.level === 'act_and_report' && this.approvals && done.status === 'ok' && done.changes.length) {
+      await this.approvals.reports.add({ toolId, summary: done.summary.slice(0, 300), changes: done.changes, at: done.at }).catch(() => undefined);
+    }
+    return done;
+  }
+
+  /** Charges model spend to the call running now (the daemon's model meter calls this); outside any call it is Decide's own. */
+  chargeSpend(usd: number): void {
+    const frame = this.running[this.running.length - 1];
+    if (frame && Number.isFinite(usd) && usd > 0) frame.usd += usd;
   }
 
   /** The tool's recent real calls from `wakes.jsonl` (newest last, distinct inputs), with how each went. */
@@ -292,7 +424,7 @@ export class ToolRegistry {
   }
 
   /** Runs a packaged run.mjs on one input in a child process; true when it returns ok. */
-  private async replayOnce(dir: string, input: Record<string, unknown>, timeoutMs: number): Promise<boolean> {
+  private async replayOnce(dir: string, input: Record<string, unknown>, timeoutMs: number, manifest?: ToolManifest): Promise<boolean> {
     const script = [
       `import { run } from './run.mjs';`,
       `const out = await run(JSON.parse(process.env.RUFUS_REPLAY_INPUT), { workspaceDir: process.env.RUFUS_REPLAY_WS, now: new Date(), env: process.env, callTool: async (id) => ({ toolId: id, effect: 'read', status: 'failed', durationMs: 0, summary: 'not available in replay', changes: [], at: new Date().toISOString() }) });`,
@@ -303,7 +435,8 @@ export class ToolRegistry {
         cwd: dir,
         timeout: timeoutMs,
         maxBuffer: 4 * 1024 * 1024,
-        env: { ...process.env, RUFUS_REPLAY_INPUT: JSON.stringify(input), RUFUS_REPLAY_WS: path.dirname(this.toolsDir) },
+        // Like a real call: only the base environment and the secrets the tool declares.
+        env: toolEnv(manifest, process.env, { RUFUS_REPLAY_INPUT: JSON.stringify(input), RUFUS_REPLAY_WS: path.dirname(this.toolsDir) }),
       });
       return stdout.includes('REPLAY_OK');
     } catch {
@@ -316,16 +449,16 @@ export class ToolRegistry {
    * new version (read tools live; write tools only have their inputs re-checked against the new schema, since running
    * them would act). Anything that worked on the old version and fails on the new one blocks the repair.
    */
-  private async replayGate(id: string, oldDir: string, stagingDir: string, manifest: ToolManifest): Promise<{ ok: boolean; report: string }> {
+  private async replayGate(id: string, oldDir: string, stagingDir: string, manifest: ToolManifest): Promise<{ ok: boolean; report: string; worked: number }> {
     const calls = await this.recentRealCalls(id);
-    if (!calls.length) return { ok: true, report: 'replay: no real past calls to check' };
+    if (!calls.length) return { ok: true, report: 'replay: no real past calls to check', worked: 0 };
     const regressions: string[] = [];
     let fixed = 0;
     let kept = 0;
     if (manifest.effect === 'read') {
       const timeoutMs = Math.min(manifest.timeoutMs ?? REPLAY_TIMEOUT_MS, REPLAY_TIMEOUT_MS);
       for (const c of calls) {
-        const [before, after] = await Promise.all([this.replayOnce(oldDir, c.input, timeoutMs), this.replayOnce(stagingDir, c.input, timeoutMs)]);
+        const [before, after] = await Promise.all([this.replayOnce(oldDir, c.input, timeoutMs, this.tools.get(id)?.manifest), this.replayOnce(stagingDir, c.input, timeoutMs, manifest)]);
         if (before && !after) regressions.push(JSON.stringify(c.input).slice(0, 160));
         else if (!before && after) fixed++;
         else if (before && after) kept++;
@@ -338,7 +471,9 @@ export class ToolRegistry {
       }
     }
     const report = `replay of ${calls.length} real past call(s): ${kept} still work, ${fixed} fixed, ${regressions.length} broken`;
-    return regressions.length ? { ok: false, report: `${report}. Broken by this version: ${regressions.join(' | ')}` } : { ok: true, report };
+    // Only a live replay (read tools) shows the new version working; a write tool's inputs are only schema-checked.
+    const worked = manifest.effect === 'read' ? kept + fixed : 0;
+    return regressions.length ? { ok: false, report: `${report}. Broken by this version: ${regressions.join(' | ')}`, worked } : { ok: true, report, worked };
   }
 
   /**
@@ -353,11 +488,12 @@ export class ToolRegistry {
     runCode: string;
     testCode: string;
     tag?: { reason?: string; wakeId?: string; gapId?: string; now?: Date };
-  }): Promise<{ ok: boolean; error?: string; testOutput?: string; replaced?: string }> {
-    const checked = validateManifest(pkg.manifest);
-    if (checked.errors.length || !checked.manifest) {
-      return { ok: false, error: `Invalid manifest: ${checked.errors.join('; ')}` };
+  }): Promise<{ ok: boolean; error?: string; testOutput?: string; replaced?: string; startLevel?: TrustLevel; evidence?: { testRanTool: boolean; replayWorked: number } }> {
+    const validated = validateManifest(pkg.manifest);
+    if (validated.errors.length || !validated.manifest) {
+      return { ok: false, error: `Invalid manifest: ${validated.errors.join('; ')}` };
     }
+    const checked = { manifest: packagedManifest(validated.manifest) };
     const id = checked.manifest.id;
     if (this.isReserved(id)) {
       return { ok: false, error: `"${id}" is a built-in tool; its code lives in the engine and cannot be created or repaired as a packaged tool.` };
@@ -372,13 +508,35 @@ export class ToolRegistry {
     await fs.mkdir(stagingDir, { recursive: true });
     try {
       await fs.writeFile(path.join(stagingDir, MANIFEST_FILE), `${JSON.stringify(checked.manifest, null, 2)}\n`, 'utf8');
-      await fs.writeFile(path.join(stagingDir, RUN_FILE), pkg.runCode, 'utf8');
       await fs.writeFile(path.join(stagingDir, TEST_FILE), pkg.testCode, 'utf8');
+      // While the test runs, run.mjs is a thin probe around the real code that notes each run() and whether it came back ok.
+      const probe = path.join(stagingDir, '.test-probe');
+      await fs.writeFile(path.join(stagingDir, REAL_RUN_FILE), pkg.runCode, 'utf8');
+      await fs.writeFile(
+        path.join(stagingDir, RUN_FILE),
+        [
+          `import { appendFileSync } from 'node:fs';`,
+          `import * as real from './${REAL_RUN_FILE}';`,
+          `export * from './${REAL_RUN_FILE}';`,
+          `export async function run(input, ctx) {`,
+          `  const out = await real.run(input, ctx);`,
+          `  try { appendFileSync(process.env.RUFUS_TEST_PROBE, out && out.ok === true ? 'ok\\n' : 'fail\\n'); } catch {}`,
+          `  return out;`,
+          `}`,
+        ].join('\n'),
+        'utf8',
+      );
 
       const { stdout, stderr } = await execFileAsync(process.execPath, [path.join(stagingDir, TEST_FILE)], {
         cwd: stagingDir,
         timeout: 15_000,
+        // The test sees what the tool will see when it runs: the base environment and its declared secrets.
+        env: toolEnv(checked.manifest, process.env, { RUFUS_TEST_PROBE: probe }),
       });
+      const testRanTool = (await fs.readFile(probe, 'utf8').catch(() => '')).split('\n').includes('ok');
+      await fs.writeFile(path.join(stagingDir, RUN_FILE), pkg.runCode, 'utf8');
+      await fs.rm(path.join(stagingDir, REAL_RUN_FILE), { force: true });
+      await fs.rm(probe, { force: true });
 
       // Engine-enforced ScriptOutput contract check (never rely solely on the AI's test.mjs)
       const contractCheck = [
@@ -394,12 +552,15 @@ export class ToolRegistry {
       await execFileAsync(process.execPath, ['--input-type=module', '-e', contractCheck], {
         cwd: stagingDir,
         timeout: 15_000,
+        env: toolEnv(checked.manifest),
       });
 
       let replay = '';
+      let replayWorked = 0;
       if (isRepair) {
         const gate = await this.replayGate(id, finalDir, stagingDir, checked.manifest);
         replay = gate.report;
+        replayWorked = gate.worked;
         if (!gate.ok) {
           await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
           return { ok: false, error: `Repair refused: ${gate.report}` };
@@ -413,6 +574,8 @@ export class ToolRegistry {
         replaced = await archiveToolVersion(finalDir, {
           at: now,
           reason: pkg.tag?.reason ?? 'tools.repair',
+          // The rungs the old code had earned go with it, so rolling back to it brings them back.
+          ...(this.approvals ? { rungs: await this.approvals.rungsOf(id) } : {}),
           ...(pkg.tag?.wakeId ? { wakeId: pkg.tag.wakeId } : {}),
           ...(pkg.tag?.gapId ? { gapId: pkg.tag.gapId } : {}),
         });
@@ -423,8 +586,12 @@ export class ToolRegistry {
 
       const vector = await this.embedManifest(checked.manifest);
       this.tools.set(id, { manifest: checked.manifest, toolDir: finalDir, vector });
+      // A tool just built or changed starts low on the ladder, whatever rung it had: the owner raises it from there.
+      const evidence = { testRanTool, replayWorked };
+      const startLevel = startLevelFor(evidence);
+      if (this.approvals) await this.approvals.setStartLevel(id, startLevel);
       const out = [`${stdout}${stderr}`.trim(), replay, replaced ? `previous version kept as .versions/${replaced}` : ''].filter(Boolean).join('\n');
-      return { ok: true, testOutput: out, ...(replaced ? { replaced } : {}) };
+      return { ok: true, testOutput: out, startLevel, evidence, ...(replaced ? { replaced } : {}) };
     } catch (err) {
       await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
       const e = err as { stdout?: string; stderr?: string; message?: string };
@@ -434,4 +601,13 @@ export class ToolRegistry {
       };
     }
   }
+}
+
+/** Folds the actions a tool took into its receipt: what they changed (even inside a read tool), drafts, and the report hint. */
+function withSteps(receipt: Receipt, steps: ReadonlyArray<{ receipt: Receipt; level: ActionStep['level'] }>): Receipt {
+  if (!steps.length) return receipt;
+  const actions: ActionStep[] = steps.map((s) => ({ toolId: s.receipt.toolId, level: s.level, status: s.receipt.status, summary: s.receipt.summary, changes: s.receipt.changes }));
+  const changes = [...receipt.changes, ...steps.filter((s) => s.receipt.status === 'ok').flatMap((s) => s.receipt.changes)];
+  const hints = [...new Set([...(receipt.nextHints ?? []), ...steps.flatMap((s) => s.receipt.nextHints ?? [])])];
+  return { ...receipt, changes: [...new Set(changes)], ...(hints.length ? { nextHints: hints } : {}), actions };
 }

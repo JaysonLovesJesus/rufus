@@ -59,6 +59,8 @@ const DEFAULT_SKILLS: Record<BrainStateName, string> = {
     '- Hints about how or where to get it ("probably in a group chat") are leads, not requirements: if the owner has what they wanted, it does not matter which path found it.',
     '- If you are given the owner conversation since the gap opened, weigh it: if the owner said it is not what was wanted, that is FAIL.',
     "- Return `passed: true` ONLY when reality unmistakably meets the Target; otherwise return `passed: false` with exact observed evidence of what's still off.",
+    "- The owner's own words are evidence. Rufus's own messages are claims: they prove only that they were sent and what they said, never that what they say is true.",
+    '- `hingesOnOwner: true` when the Target is met only if the owner is satisfied (whether a draft, a set of thoughts or a plan is what he wanted): then his reaction decides, and his silence is not a yes. `false` when the outcome can be checked (a file, an event, a message in the form he asked for).',
   ].join('\n'),
 };
 
@@ -127,6 +129,16 @@ export function brainTools(registry: ToolRegistry): ToolManifest[] {
   return registry.list().filter((t) => t.effect === 'read' && !t.id.startsWith('brain.'));
 }
 
+/** The read tools a brain may run on its own: those whose trust rung lets them run without the owner (a new tool at draft asks first). */
+export async function runnableBrainTools(registry: ToolRegistry): Promise<ToolManifest[]> {
+  const out: ToolManifest[] = [];
+  for (const t of brainTools(registry)) {
+    const level = await registry.levelOf(t);
+    if (level === 'act_and_report' || level === 'act_quietly') out.push(t);
+  }
+  return out;
+}
+
 /** A brain returns what it has at this share of its tool timeout, rather than losing everything to the timeout. */
 const DEADLINE_SHARE = 0.8;
 /** Past this share of the timeout, the next step is the last one: write up the facts. */
@@ -171,7 +183,7 @@ async function runReadOnlyBrain(opts: {
   timeoutMs?: number;
 }): Promise<{ done: Record<string, unknown>; receipts: Receipt[]; stoppedEarly?: string }> {
   const skill = await loadBrainSkill(opts.workspaceDir, opts.state);
-  const readTools = brainTools(opts.registry);
+  const readTools = await runnableBrainTools(opts.registry);
   const maxSteps = Math.max(1, Math.min(8, opts.maxSteps ?? 5));
   const receipts: Receipt[] = [];
   const started = Date.now();
@@ -180,7 +192,7 @@ async function runReadOnlyBrain(opts: {
 
   const doneSchema =
     opts.state === 'VERIFY'
-      ? '{"done":true,"passed":true|false,"criteria":[{"element":"what|form|where|by when|why","criterion":"one part of the Target","receiptIndex":<the Step number whose receipt shows it>,"observed":"what that receipt shows","met":true|false}],"evidence":"exact observed proof","remaining":"what is still missing if failed"}'
+      ? '{"done":true,"passed":true|false,"hingesOnOwner":true|false,"criteria":[{"element":"what|form|where|by when|why","criterion":"one part of the Target","receiptIndex":<the Step number whose receipt shows it>,"observed":"what that receipt shows","met":true|false}],"evidence":"exact observed proof","remaining":"what is still missing if failed"}'
       : '{"done":true,"facts":["observed fact 1",...],"unknowns":["what could not be verified",...],"summary":"1-2 line synthesis"}';
 
   const system = [
@@ -221,6 +233,19 @@ async function runReadOnlyBrain(opts: {
 
     const toolId = String(parsed.toolId).trim();
     const manifest = opts.registry.get(toolId)?.manifest;
+    if (manifest && manifest.effect === 'read' && !toolId.startsWith('brain.') && !readTools.some((t) => t.id === toolId)) {
+      receipts.push({
+        toolId,
+        effect: 'read',
+        status: 'failed',
+        durationMs: 0,
+        summary: `Refused: "${toolId}" is at "${await opts.registry.levelOf(manifest)}" on the trust ladder, so it does not run inside a brain. Use a tool from Available Read-Only Tools, or report it as an unknown.`,
+        changes: [],
+        error: 'not runnable on its trust rung',
+        at: opts.now.toISOString(),
+      });
+      continue;
+    }
     if (!manifest || manifest.effect !== 'read' || toolId.startsWith('brain.')) {
       receipts.push({
         toolId,
@@ -345,6 +370,8 @@ export async function runVerifyBrain(opts: {
   gapContext?: string;
   /** The owner's by-when (ISO), when the gap has one. */
   due?: string;
+  /** The owner's standing preferences: a deliverable that breaks one does not meet his target. */
+  standing?: string;
   maxSteps?: number;
   timeoutMs?: number;
   now: Date;
@@ -359,6 +386,7 @@ export async function runVerifyBrain(opts: {
     mission: [
       `Target condition to verify against reality right now:\n${opts.target}${byWhen}`,
       'Split the Target into its parts (what, form, where, by when) and check each one. For each criterion, cite the Step number of the receipt that shows it (receiptIndex). A criterion with no successful receipt behind it fails.',
+      ...(opts.standing ? [`The owner's standing preferences (a deliverable that breaks one does not meet his target):\n${opts.standing}`] : []),
       ...(opts.context ? [`Step 0 (given, citable as receiptIndex 0):\n${opts.context}`] : []),
       ...(opts.gapContext ? [`What is known about this gap (leads, not proof):\n${opts.gapContext}`] : []),
     ].join('\n\n'),
@@ -376,6 +404,7 @@ export async function runVerifyBrain(opts: {
   const remaining = [said, codeSays].filter(Boolean).join(' ') || undefined;
   return {
     passed,
+    hingesOnOwner: done.hingesOnOwner === true,
     evidence,
     ...(remaining ? { remaining } : {}),
     criteria,

@@ -1,9 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { BouncerDecision, BouncerExample, LosslessEvent, ModelCallStats, ModelProvider, ModelRequest, RpgWakeReport } from '../types';
-import { EventStore } from '../events/store';
-import { runRpgWake } from '../rpg/loop';
-import type { ToolRegistry } from '../scripts/registry';
 import { loadOpsFailures } from './ops-log';
 import { computeOwnerOutcomes, percentile, readEventLog, readGaps, type OwnerOutcomes } from './outcomes';
 
@@ -103,27 +100,6 @@ export interface OutcomeScorecard {
   outcomes: OwnerOutcomes;
 }
 
-export interface JudgmentEvalCase {
-  id: string;
-  trigger: LosslessEvent;
-  expectedFirstTool: string;
-  forbiddenTools?: string[];
-  notes?: string;
-}
-
-export interface JudgmentEvalReport {
-  total: number;
-  passed: number;
-  ok: boolean;
-  results: Array<{
-    id: string;
-    passed: boolean;
-    actualFirstTool: string;
-    expectedFirstTool: string;
-    reason?: string;
-  }>;
-}
-
 /** Appends one complete RPG wake transcript to `<workspace>/wakes.jsonl`. */
 export async function recordWake(workspaceDir: string, rec: WakeRecord): Promise<void> {
   await fs.mkdir(workspaceDir, { recursive: true });
@@ -221,10 +197,12 @@ export async function computeScorecard(workspaceDir: string): Promise<OutcomeSco
   const metered = wakes.filter((w) => Array.isArray(w.modelCalls));
   const calls = metered.flatMap((w) => w.modelCalls!);
   const costUsd = calls.reduce((s, c) => s + (c.costUsd ?? 0), 0);
-  const roles = [...new Set(calls.map((c) => c.role))].sort();
+  // A role at a different effort is its own row, so a change of effort shows its latency before and after.
+  const roleKey = (c: WakeModelCall) => (c.effort ? `${c.role} (effort ${c.effort})` : c.role);
+  const roles = [...new Set(calls.map(roleKey))].sort();
   const avg = (xs: number[]) => (xs.length ? Math.round(xs.reduce((s, x) => s + x, 0) / xs.length) : undefined);
   const byRole = roles.map((role) => {
-    const rc = calls.filter((c) => c.role === role);
+    const rc = calls.filter((c) => roleKey(c) === role);
     const ok = rc.filter((c) => c.ok).map((c) => c.durationMs);
     const p50Ms = percentile(ok, 50);
     const p90Ms = percentile(ok, 90);
@@ -327,53 +305,4 @@ export function formatScorecard(sc: OutcomeScorecard): string[] {
   if (!sc.opsFailures.length) lines.push('  none logged');
   for (const f of sc.opsFailures) lines.push(`  ${f.kind}${f.channel ? ` (${f.channel})` : ''}: ${f.total} total, ${f.last24h} in 24h. Last: ${f.lastError.slice(0, 100)}`);
   return lines;
-}
-
-/** Replays golden judgment cases (`evals/judgment.json`) to grade Turn 1 tool selection objectively. */
-export async function runJudgmentEval(opts: {
-  workspaceDir: string;
-  cases?: readonly JudgmentEvalCase[];
-  provider: ModelProvider;
-  model?: string;
-  registry: ToolRegistry;
-  now?: () => Date;
-}): Promise<JudgmentEvalReport> {
-  let cases: readonly JudgmentEvalCase[] = opts.cases ?? [];
-  if (!opts.cases) {
-    try {
-      const raw = await fs.readFile(path.join(opts.workspaceDir, 'evals', 'judgment.json'), 'utf8');
-      cases = JSON.parse(raw) as JudgmentEvalCase[];
-    } catch {
-      cases = [];
-    }
-  }
-
-  const events = new EventStore({ workspaceDir: opts.workspaceDir });
-  const results: JudgmentEvalReport['results'] = [];
-
-  for (const c of cases) {
-    const wake = await runRpgWake({
-      workspaceDir: opts.workspaceDir,
-      trigger: c.trigger,
-      reasoningProvider: opts.provider,
-      ...(opts.model ? { reasoningModel: opts.model } : {}),
-      registry: opts.registry,
-      events,
-      maxTurns: 1,
-      ...(opts.now ? { now: opts.now } : {}),
-    });
-    const actualFirstTool = wake.trace[0]?.toolId ?? 'none';
-    const forbidden = c.forbiddenTools?.includes(actualFirstTool) ?? false;
-    const passed = actualFirstTool === c.expectedFirstTool && !forbidden;
-    results.push({
-      id: c.id,
-      passed,
-      actualFirstTool,
-      expectedFirstTool: c.expectedFirstTool,
-      ...(passed ? {} : { reason: `picked "${actualFirstTool}", expected "${c.expectedFirstTool}"` }),
-    });
-  }
-
-  const passed = results.filter((r) => r.passed).length;
-  return { total: results.length, passed, ok: passed === results.length, results };
 }

@@ -3,7 +3,9 @@ import path from 'node:path';
 import type { BouncerDecision, LosslessEvent, MessageSink, ModelProvider, Receipt, RpgWakeReport } from './types';
 import { Bouncer } from './bouncer/bouncer';
 import { wakeForApproval, wakeForSentText } from './bouncer/training';
-import { createSemanticEmbedder } from './embed';
+import { SenseJudge } from './bouncer/sensing';
+import { createTriage } from './bouncer/triage';
+import { createLocalEmbedder, createSemanticEmbedder } from './embed';
 import { meterProvider, recordWake, type WakeModelCall } from './eval/flight-recorder';
 import { appendRotating } from './eval/ops-log';
 import { genericEvent } from './events/ingest';
@@ -36,6 +38,9 @@ export interface DaemonOptions {
   shadow?: boolean;
   maxTurnsPerWake?: number;
   now?: () => Date;
+  /** A cheap model (e.g. haiku) that makes the first call when the Bouncer is unsure, and re-checks what it slept on. */
+  triageProvider?: ModelProvider;
+  triageModel?: string;
 }
 
 export interface ProcessEventResult {
@@ -78,6 +83,9 @@ export class RufusCore {
   readonly gaps: GapStore;
   readonly watches: WatchStore;
   readonly bouncer: Bouncer;
+  /** Gap and reply-habit features, the cheap model's first call, and the re-check of slept events. */
+  readonly senseJudge: SenseJudge;
+  private readonly triageProvider: ModelProvider | undefined;
   readonly shadow: boolean;
   private readonly reasoningProvider: ModelProvider;
   private readonly speakerProvider: ModelProvider;
@@ -108,6 +116,19 @@ export class RufusCore {
       workspaceDir: opts.workspaceDir,
       ...(opts.pythonPath ? { pythonPath: opts.pythonPath } : {}),
     });
+    this.senseJudge = new SenseJudge({
+      workspaceDir: opts.workspaceDir,
+      bouncer: this.bouncer,
+      gaps: this.gaps,
+      events: this.events,
+      // Shares the memory's sidecar, so gap closeness is measured in the same space as memory search.
+      embedder: embedder ?? createLocalEmbedder(),
+      ...(opts.triageProvider
+        ? { triage: createTriage({ provider: opts.triageProvider, ...(opts.triageModel ? { model: opts.triageModel } : {}), gaps: () => this.gaps.list() }) }
+        : {}),
+      ...(opts.now ? { now: opts.now } : {}),
+    });
+    this.triageProvider = opts.triageProvider;
     this.shadow = opts.shadow === true;
     // Every model call is metered into the current wake's trace (usage, cost, latency, failures).
     const onCall = (c: Omit<WakeModelCall, 'turn'>) => this.wakeModelCalls.push({ ...c, turn: this.wakeTurn });
@@ -192,7 +213,8 @@ export class RufusCore {
         const openers = before.filter((e) => e.kind === 'owner_direct' && e.timestamp >= windowStart).slice(-3);
         const lead = openers.length ? openers : lastOwner ? [lastOwner] : [];
         return [...lead, ...chat.filter((e) => e.timestamp >= iso)].map(
-          (e) => `- [${e.timestamp}] ${e.kind === 'assistant_sent' ? 'Rufus' : 'Owner'}: ${e.text}`,
+          // The owner's words are evidence; Rufus's messages are claims (they prove only that they were sent).
+          (e) => `- [${e.timestamp}] ${e.kind === 'assistant_sent' ? 'Rufus (claim)' : 'Owner (evidence)'}: ${e.text}`,
         );
       },
     });
@@ -231,12 +253,15 @@ export class RufusCore {
    */
   async sense(event: LosslessEvent): Promise<BouncerDecision | undefined> {
     await this.init();
-    if (!(await this.events.append(event))) return undefined;
-    return this.judge(event);
+    if (await this.events.has(event.id)) return undefined;
+    // Gap and reply-habit features go into the logged event, so training later reads exactly what the Bouncer saw.
+    const { event: seen, look } = await this.senseJudge.prepare(event);
+    if (!(await this.events.append(seen))) return undefined;
+    return this.judge(seen, look);
   }
 
-  private async judge(event: LosslessEvent): Promise<BouncerDecision> {
-    const decision = await this.bouncer.decide(event);
+  private async judge(event: LosslessEvent, look?: Awaited<ReturnType<SenseJudge['prepare']>>['look']): Promise<BouncerDecision> {
+    const decision = await this.senseJudge.judge(event, look);
     // Every bouncer call is logged (WAKE and SLEEP), so the dashboard can show what Rufus sensed and what he let through.
     // One line per sensed event adds up, so the log rotates to decisions.1.jsonl past its cap.
     await appendRotating(
@@ -256,13 +281,16 @@ export class RufusCore {
 
   private async processEventSerial(event: LosslessEvent, opts: ProcessEventOptions = {}): Promise<ProcessEventResult> {
     await this.init();
-    // A sensed event (opts.decision) is already in the log; anything else that is already there was handled before.
+    // A sensed event (opts.decision) is already in the log, features and all; anything else is prepared the same way first.
+    const prepared = opts.decision || (await this.events.has(event.id)) ? undefined : await this.senseJudge.prepare(event);
+    if (prepared) event = prepared.event;
     const fresh = opts.decision ? true : await this.events.append(event);
     for (const extra of opts.additionalEvents ?? []) await this.events.append(extra);
     if (!fresh) {
       return { event, decision: { label: 'SLEEP', confidence: 1, backend: 'rule', reason: 'already seen', durationMs: 0 }, alreadySeen: true };
     }
-    const decision = opts.decision ?? (await this.judge(event));
+    if (opts.decision) event = (await this.events.get(event.id)) ?? event;
+    const decision = opts.decision ?? (await this.judge(event, prepared?.look));
 
     if (decision.label === 'SLEEP') {
       return { event, decision, ...(this.shadow ? { shadowLogged: true } : {}) };
@@ -456,5 +484,6 @@ export class RufusCore {
     await this.bouncer.close();
     (this.reasoningProvider as { close?: () => void }).close?.();
     (this.speakerProvider as { close?: () => void }).close?.();
+    (this.triageProvider as { close?: () => void } | undefined)?.close?.();
   }
 }

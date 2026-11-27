@@ -19,8 +19,10 @@ const MAX_WARM = 2;
  * - no user/project/local settings, CLAUDE.md, memory, hooks, skills or plugins (`--setting-sources ""`, `--safe-mode`);
  * - no MCP servers or tools, and nothing saved to the owner's session history (`--no-session-persistence`).
  */
-export function claudeCliArgs(model: string, system: string): string[] {
+export function claudeCliArgs(model: string, system: string, effort?: string): string[] {
   return [
+    // Less thinking where speed matters more than depth (the Speaker): most of its output tokens were thinking.
+    ...(effort ? ['--effort', effort] : []),
     '-p',
     '--input-format',
     'stream-json',
@@ -73,14 +75,17 @@ export class ClaudeCliProvider implements ModelProvider {
   private readonly defaultModel: string;
   private readonly timeoutMs: number;
   private readonly cwd: string;
+  /** The CLI's `--effort` (low...max); unset keeps the model's default. */
+  readonly effort?: string;
   private warm = new Map<string, WarmSlot>();
   private closed = false;
 
-  constructor(opts: { name?: string; model?: string; timeoutMs?: number; cwd?: string } = {}) {
+  constructor(opts: { name?: string; model?: string; timeoutMs?: number; cwd?: string; effort?: string } = {}) {
     this.defaultModel = opts.model ?? 'opus';
     this.name = opts.name ?? `claude-cli:${this.defaultModel}`;
     this.timeoutMs = opts.timeoutMs ?? 90_000;
     this.cwd = opts.cwd ?? os.tmpdir();
+    if (opts.effort) this.effort = opts.effort;
   }
 
   private static key(model: string, system: string): string {
@@ -89,7 +94,7 @@ export class ClaudeCliProvider implements ModelProvider {
 
   private spawnWarm(model: string, system: string): WarmSlot {
     const key = ClaudeCliProvider.key(model, system);
-    const proc = spawn('claude', claudeCliArgs(model, system), { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+    const proc = spawn('claude', claudeCliArgs(model, system, this.effort), { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
     const rl = readline.createInterface({ input: proc.stdout });
     const slot: WarmSlot = { proc, rl, exited: false };
     proc.once('error', () => {
@@ -149,7 +154,11 @@ export class ClaudeCliProvider implements ModelProvider {
     // Pre-warm the next fresh process for the same model and rules while this call runs
     this.prewarm(model, system);
 
-    const payload = `${JSON.stringify({ type: 'user', message: { role: 'user', content: req.prompt.trim() } })}\n`;
+    // Images go in as content blocks ahead of the text, so a caption call needs no file tools.
+    const content = req.images?.length
+      ? [...req.images.map((i) => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })), { type: 'text', text: req.prompt.trim() }]
+      : req.prompt.trim();
+    const payload = `${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`;
     const started = Date.now();
 
     return new Promise<{ text: string; stats: ModelCallStats }>((resolve, reject) => {
@@ -166,8 +175,10 @@ export class ClaudeCliProvider implements ModelProvider {
         } catch {
           /* ignore */
         }
-        if (err) reject(Object.assign(err, { stats: stats ?? { model, durationMs: Date.now() - started, ok: false, error: err.message } }));
-        else resolve({ text: (value ?? '').trim(), stats: stats ?? { model, durationMs: Date.now() - started, ok: true } });
+        // The effort travels with the stats, so `rufus stats` can compare latency before and after a change.
+        const tag = (s: ModelCallStats): ModelCallStats => (this.effort ? { ...s, effort: this.effort } : s);
+        if (err) reject(Object.assign(err, { stats: tag(stats ?? { model, durationMs: Date.now() - started, ok: false, error: err.message }) }));
+        else resolve({ text: (value ?? '').trim(), stats: tag(stats ?? { model, durationMs: Date.now() - started, ok: true }) });
       };
 
       const timer = setTimeout(() => finish(new Error(`claude CLI timed out after ${this.timeoutMs}ms`)), this.timeoutMs);

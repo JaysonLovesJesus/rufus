@@ -4,7 +4,8 @@ import path from 'node:path';
 /** A channel failure that would otherwise be swallowed: a poll that errored, a send or edit that threw. */
 export interface OpsFailure {
   at: string;
-  kind: 'poll_failed' | 'send_failed' | 'edit_failed';
+  /** promote_failed: a build failed its checks, or came up unhealthy and was rolled back. */
+  kind: 'poll_failed' | 'send_failed' | 'edit_failed' | 'promote_failed';
   channel?: string;
   error: string;
   /** How many identical failures were folded into this line since the previous one was written. */

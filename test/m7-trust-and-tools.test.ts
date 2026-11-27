@@ -204,7 +204,7 @@ describe('A started thread is its gap\'s next move', () => {
       turn === 0
         ? { gap: gapId, toolId: 'coder.start', input: {} }
         : turn === 1
-          ? { gap: 'gap_root', toolId: 'watch.set', input: { kind: 'timer', label: 'look around', minutesFromNow: 30 } }
+          ? { gap: 'gap_root', toolId: 'watch.set', input: { kind: 'timer', label: 'look around', minutesFromNow: 30, waitsOn: 'time', waitsFor: 'next check window', expect: 'New events or work arrive' } }
           : { toolId: 'sleep', input: { reason: 'thread running' } },
     );
     try {

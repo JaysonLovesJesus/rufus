@@ -154,10 +154,14 @@ export async function registerSelfUpgrade(registry: ToolRegistry, opts: SelfUpgr
       id: 'self.upgrade',
       version: 3,
       description:
-        "Edits Rufus's own private VOICE.md (target=voice), or his engine code under src/ (target=engine) with an exact find/replace. Engine edits run in their own git worktree and branch, must pass typecheck + tests there, and land on the live code only when nobody else has uncommitted changes in that file; otherwise the branch is handed back. Changes to gate code need the owner's yes to that exact change.",
+        "Edits Rufus's own private VOICE.md (target=voice), or his engine code under src/ (target=engine) with an exact find/replace. Engine edits run in their own git worktree and branch, must pass typecheck + tests there, and land on the live code only when nobody else has uncommitted changes in that file; otherwise the branch is handed back. Every self-upgrade waits for the owner's yes to that exact change.",
       whenToUse: ['The owner asks Rufus to change his own voice, personality, or core engine behavior'],
       effect: 'write',
       requiresApproval: false,
+      // Rufus changing himself never lands without the owner's tap, however well its checks and replays pass:
+      // it starts at draft and trust.json can't raise it past draft.
+      defaultTrust: 'draft',
+      maxTrust: 'draft',
       timeoutMs: 300_000,
       inputSchema: {
         type: 'object',

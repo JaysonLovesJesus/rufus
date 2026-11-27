@@ -19,8 +19,11 @@ export async function registerMemoryTools(deps: {
         'A memory marked "your own earlier claim" is contradicted by what the owner said or what was observed',
       ],
       notWhen: ["The memory is the owner's words or an observation: those are facts, and newer facts already outrank older ones"],
-      effect: 'meta',
+      effect: 'write',
+      reversible: true,
       requiresApproval: false,
+      // Rufus's own memory hygiene: bookkeeping.
+      defaultTrust: 'act_quietly',
       inputSchema: {
         type: 'object',
         properties: {

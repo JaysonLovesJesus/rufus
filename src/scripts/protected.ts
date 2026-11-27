@@ -11,7 +11,7 @@ const TRUST_FILES = new RegExp(`${B}(trust|permissions|approvals)\\.json\\b`);
 /** A tool's manifest sets its own effect and approval, so editing one is editing the gate. */
 const TOOL_MANIFEST = new RegExp(`${B}tool\\.json\\b`);
 /** Gate code: the trust ladder, the registry and script runner, the built-ins (sleep, verify, approvals), and the wake loop. */
-const GATE_FILES = '(approvals|registry|standard|protected|deadline|builtins|self-upgrade|versions|loop)';
+const GATE_FILES = '(approvals|gate|registry|standard|protected|deadline|builtins|self-upgrade|versions|loop)';
 const GATE_CODE = new RegExp(`${B}(?:src/)?(?:scripts|rpg)/${GATE_FILES}\\.ts\\b`);
 const GATE_BASENAME = new RegExp(`${B}${GATE_FILES}\\.ts\\b`);
 

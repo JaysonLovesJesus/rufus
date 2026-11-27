@@ -1,9 +1,9 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import type { JsonSchema, Receipt, ScriptContext, ScriptOutput, ToolLesson, ToolManifest, ToolStats } from '../types';
 import { withChildScope } from './deadline';
 import { protectedTargets } from './protected';
+import { runPackaged } from './sandbox';
 
 export const MANIFEST_FILE = 'tool.json';
 export const RUN_FILE = 'run.mjs';
@@ -292,8 +292,14 @@ export async function executeScript(opts: {
   let timer: NodeJS.Timeout | undefined;
   let killChildren: () => number = () => 0;
   try {
-    const fn = handler ?? (await loadRunFn(toolDir!));
-    const scoped = withChildScope(() => Promise.resolve().then(() => fn(input, ctx)));
+    // A packaged tool runs in its own process with only its declared secrets; engine handlers run in the daemon.
+    let scoped: { promise: Promise<ScriptOutput>; killChildren: () => number };
+    if (handler) {
+      scoped = withChildScope(() => Promise.resolve().then(() => handler(input, ctx)));
+    } else {
+      const child = runPackaged({ toolDir: toolDir!, manifest, input, ctx });
+      scoped = { promise: child.promise, killChildren: child.kill };
+    }
     killChildren = scoped.killChildren;
     const raw = await Promise.race([
       scoped.promise,
@@ -315,7 +321,7 @@ export async function executeScript(opts: {
     // Invariant: 'read' scripts can NEVER report changes.
     const changes = raw.ok && manifest.effect === 'write' && Array.isArray(raw.changes) ? raw.changes.map(String) : [];
     const asyncWork =
-      raw.ok && raw.asyncWork && raw.asyncWork.kind === 't3_thread' && typeof raw.asyncWork.threadId === 'string' && raw.asyncWork.threadId.trim()
+      raw.ok && raw.asyncWork && (raw.asyncWork.kind === 't3_thread' || raw.asyncWork.kind === 'brain_job') && typeof raw.asyncWork.threadId === 'string' && raw.asyncWork.threadId.trim()
         ? { kind: raw.asyncWork.kind, threadId: raw.asyncWork.threadId.trim(), ...(raw.asyncWork.label ? { label: String(raw.asyncWork.label) } : {}) }
         : undefined;
 
@@ -364,13 +370,4 @@ export async function executeScript(opts: {
   } finally {
     if (timer) clearTimeout(timer);
   }
-}
-
-async function loadRunFn(toolDir: string): Promise<(input: Record<string, unknown>, ctx: ScriptContext) => Promise<ScriptOutput> | ScriptOutput> {
-  const file = path.join(toolDir, RUN_FILE);
-  const stat = await fs.stat(file);
-  const url = `${pathToFileURL(file).href}?m=${Math.round(stat.mtimeMs * 1000)}-${stat.size}`;
-  const mod = (await import(/* @vite-ignore */ url)) as { run?: unknown };
-  if (typeof mod.run !== 'function') throw new Error(`${RUN_FILE} must export async function run(input, ctx).`);
-  return mod.run as (input: Record<string, unknown>, ctx: ScriptContext) => Promise<ScriptOutput> | ScriptOutput;
 }

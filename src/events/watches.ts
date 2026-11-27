@@ -10,13 +10,24 @@ import { genericEvent } from './ingest';
 
 const execFileAsync = promisify(execFile);
 
+/** What a next move waits on: the owner, another person, a running job, or a time when the world changes. */
+export type WaitsOn = 'owner' | 'person' | 'job' | 'time';
+export const WAITS_ON: readonly WaitsOn[] = ['owner', 'person', 'job', 'time'];
+
 export interface WatchItem {
   id: string;
-  kind: 'timer' | 't3_thread';
+  /** A timer, a T3 Code thread, or a brain running in the background (threadId is the job id). */
+  kind: 'timer' | 't3_thread' | 'brain_job';
   label: string;
   gapId?: string;
   fireAt?: string;
   threadId?: string;
+  /** What will change by the time it fires, and who or what changes it: without these a timer is only a re-check. */
+  waitsOn?: WaitsOn;
+  /** Who or what: "Pat's reply", "the shop opens", "sunset". */
+  waitsFor?: string;
+  /** What should be different when it fires. */
+  expect?: string;
   createdAt: string;
   fired?: boolean;
   /** Set on the quick return code schedules when a wake ends without a next move; drives backoff. */
@@ -84,6 +95,25 @@ export function threadNeedsRufus(w: Pick<WatchItem, 'lastState' | 'createdAt'>, 
 /** True when the watch is a next move for this gap (its own gap, or one of the gaps a quick return serves). */
 export function servesGap(w: Pick<WatchItem, 'gapId' | 'gapIds'>, gapId: string): boolean {
   return w.gapId === gapId || !!w.gapIds?.includes(gapId);
+}
+
+/** An expectation that only says "look again" names no change. */
+const BARE_RECHECK = /^(?:re-?check|check(?: again| back| in| on it)?|follow(?:[- ]up)?|look again|see|revisit|try again|ping|later|tbd|n\/?a)\b.{0,24}$/i;
+
+/**
+ * Is this watch a real next move? A running job (thread or brain) is. A timer is when it names what it waits on
+ * (the owner, a person, a job, a time when the world changes) and what it expects to have changed by then.
+ * A bare "re-check later" timer is not: whatever it would re-check can be done now.
+ */
+export function realNextMove(w: Pick<WatchItem, 'kind' | 'waitsOn' | 'waitsFor' | 'expect'>): { ok: true } | { ok: false; why: string } {
+  if (w.kind === 't3_thread' || w.kind === 'brain_job') return { ok: true };
+  if (!w.waitsOn || !WAITS_ON.includes(w.waitsOn)) return { ok: false, why: 'it names nothing it waits on (waitsOn: owner, person, job or time)' };
+  const expect = (w.expect ?? '').trim();
+  if (expect.length < 8 || BARE_RECHECK.test(expect)) return { ok: false, why: 'it does not say what will have changed by then (expect)' };
+  if ((w.waitsOn === 'person' || w.waitsOn === 'time') && !(w.waitsFor ?? '').trim()) {
+    return { ok: false, why: w.waitsOn === 'person' ? 'it does not say which person (waitsFor)' : 'it does not say what changes at that time (waitsFor)' };
+  }
+  return { ok: true };
 }
 
 /** After this many failed checks in a row (~10 minutes), a thread watch fires so Rufus can find another way. */
@@ -188,6 +218,42 @@ export class WatchStore {
   }
 }
 
+/** A brain running in the background, as its job file (`jobs/<id>.json`) records it. */
+export interface BrainJob {
+  id: string;
+  toolId: string;
+  gapId?: string;
+  label: string;
+  status: 'running' | 'finished' | 'failed';
+  pid: number;
+  startedAt: string;
+  timeoutMs: number;
+  finishedAt?: string;
+  summary?: string;
+  data?: unknown;
+  error?: string;
+}
+
+export const brainJobPath = (workspaceDir: string, id: string) => path.join(workspaceDir, 'jobs', `${id.replace(/[^\w.-]/g, '_')}.json`);
+
+export async function readBrainJob(workspaceDir: string, id: string): Promise<BrainJob | undefined> {
+  try {
+    return JSON.parse(await fs.readFile(brainJobPath(workspaceDir, id), 'utf8')) as BrainJob;
+  } catch {
+    return undefined;
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Timers due within this long of one that is due fire with it, so they run as one wake. */
 export const WATCH_MERGE_MS = 3 * 60_000;
 
@@ -218,6 +284,24 @@ export function watchConnector(workspaceDir: string, intervalMs = 30_000, opts: 
               metadata: { watchId: w.id, ...(w.gapId ? { gapId: w.gapId } : {}), ...(w.gapIds?.length ? { gapIds: w.gapIds } : {}), ...(w.resumeAttempt ? { resumeAttempt: w.resumeAttempt } : {}) },
             }),
           );
+        } else if (w.kind === 'brain_job' && w.threadId) {
+          // A brain running in the background: its result wakes Rufus like a thread finishing, tied to the gap.
+          const job = await readBrainJob(workspaceDir, w.threadId);
+          const lost = !job || (job.status === 'running' && (!pidAlive(job.pid) || now > Date.parse(job.startedAt) + job.timeoutMs * 2));
+          if (lost || job.status !== 'running') {
+            await store.markFired(w.id);
+            const what = lost ? 'was lost (the daemon restarted or it ran far past its time); run it again if it still matters' : job.status === 'finished' ? `finished: ${String(job.summary ?? '').slice(0, 600)}` : `failed: ${String(job.error ?? '').slice(0, 300)}`;
+            events.push(
+              genericEvent({
+                id: `watch_fired_${w.id}`,
+                source: 'watch',
+                kind: lost ? 'brain_job_lost' : job.status === 'finished' ? 'brain_job_finished' : 'brain_job_failed',
+                text: `Background ${job?.toolId ?? 'brain'} job ${w.threadId}${w.gapId ? ` for ${w.gapId}` : ''} ${what}${job?.status === 'finished' ? ' (full result in the gap\'s findings and in the job file)' : ''}: ${w.label}`,
+                timestamp: new Date(now).toISOString(),
+                metadata: { watchId: w.id, jobId: w.threadId, ...(w.gapId ? { gapId: w.gapId } : {}), ...(job ? { status: job.status } : {}) },
+              }),
+            );
+          }
         } else if (w.kind === 't3_thread' && w.threadId) {
           try {
             const { stdout } = await execFileAsync(t3Bin, ['thread', 'show', w.threadId, '--json'], { timeout: 10_000, maxBuffer: 2 * 1024 * 1024 });

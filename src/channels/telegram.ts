@@ -97,6 +97,21 @@ export class TelegramChannel implements MessageSink {
     return body.result?.message_id !== undefined ? { messageId: String(body.result.message_id) } : {};
   }
 
+  /** A voice note (OGG/Opus) with the words as a plain caption, so he can read it as well as hear it. */
+  async sendVoice(audioPath: string, caption?: string): Promise<{ messageId?: string }> {
+    const form = new FormData();
+    form.set('chat_id', this.chatId);
+    form.set('voice', new Blob([await fs.readFile(audioPath)], { type: 'audio/ogg' }), path.basename(audioPath));
+    // Telegram caps captions at 1024 characters.
+    if (caption?.trim()) form.set('caption', caption.length > 1024 ? `${caption.slice(0, 1023)}…` : caption);
+    const res = await fetch(`${this.base}/sendVoice`, { method: 'POST', body: form });
+    if (!res.ok) throw new Error(`Telegram sendVoice failed (${res.status}): ${await res.text()}`);
+    const body = (await res.json().catch(() => ({}))) as { result?: { message_id?: number } };
+    const id = body.result?.message_id;
+    if (id !== undefined && caption) this.rememberSent(String(id), caption);
+    return id !== undefined ? { messageId: String(id) } : {};
+  }
+
   async edit(messageId: string, text: string): Promise<void> {
     const res = await this.postText('editMessageText', { message_id: Number(messageId) }, text);
     if (!res.ok) throw new Error(`Telegram editMessageText failed (${res.status}): ${await res.text()}`);

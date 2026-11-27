@@ -53,9 +53,6 @@ export {
   loadWakes,
   computeScorecard,
   formatScorecard,
-  runJudgmentEval,
   type WakeRecord,
   type OutcomeScorecard,
-  type JudgmentEvalCase,
-  type JudgmentEvalReport,
 } from './eval/flight-recorder';

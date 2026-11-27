@@ -16,6 +16,8 @@ export interface ChangeTag {
   reason: string;
   wakeId?: string;
   gapId?: string;
+  /** The tool's trust rungs (trust.json entries for it and its scopes) while this version was live, so a rollback restores them too. */
+  rungs?: Record<string, string>;
 }
 
 export interface VersionInfo {
@@ -25,12 +27,13 @@ export interface VersionInfo {
   version?: number;
   wakeId?: string;
   gapId?: string;
+  rungs?: Record<string, string>;
 }
 
 const stamp = (d: Date) => d.toISOString().replace(/[:.]/g, '-');
 
 function metaOf(tag: ChangeTag, extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return { archivedAt: tag.at.toISOString(), reason: tag.reason, ...(tag.wakeId ? { wakeId: tag.wakeId } : {}), ...(tag.gapId ? { gapId: tag.gapId } : {}), ...extra };
+  return { archivedAt: tag.at.toISOString(), reason: tag.reason, ...(tag.wakeId ? { wakeId: tag.wakeId } : {}), ...(tag.gapId ? { gapId: tag.gapId } : {}), ...(tag.rungs ? { rungs: tag.rungs } : {}), ...extra };
 }
 
 async function exists(p: string): Promise<boolean> {
@@ -82,7 +85,7 @@ export async function listToolVersions(toolDir: string): Promise<VersionInfo[]> 
 }
 
 /** Restores a kept tool version (the newest if none is named). The current code is kept first; stats and lessons carry on. */
-export async function restoreToolVersion(toolDir: string, tag: ChangeTag, name?: string): Promise<{ restored: string; kept?: string } | { error: string }> {
+export async function restoreToolVersion(toolDir: string, tag: ChangeTag, name?: string): Promise<{ restored: string; kept?: string; rungs?: Record<string, string> } | { error: string }> {
   const versions = await listToolVersions(toolDir);
   const pick = name ? versions.find((v) => v.name === name) : versions[0];
   if (!pick) return { error: name ? `No version "${name}". Kept: ${versions.map((v) => v.name).join(', ') || 'none'}.` : 'No earlier version is kept.' };
@@ -92,7 +95,7 @@ export async function restoreToolVersion(toolDir: string, tag: ChangeTag, name?:
   for (const f of TOOL_CODE_FILES) {
     if (await exists(path.join(src, f))) await fs.copyFile(path.join(src, f), path.join(toolDir, f));
   }
-  return { restored: pick.name, ...(kept ? { kept } : {}) };
+  return { restored: pick.name, ...(kept ? { kept } : {}), ...(pick.rungs ? { rungs: pick.rungs } : {}) };
 }
 
 /** Keeps the current `skills/<STATE>.md` in `skills/.history/` before it changes. */

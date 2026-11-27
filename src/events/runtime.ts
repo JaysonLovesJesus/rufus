@@ -76,6 +76,7 @@ export function createSenseRuntime(opts: SenseRuntimeOptions) {
       }
     });
     for (const ev of health.transitions()) await ingest(ev).catch(() => undefined);
+    if (!inbox.size && !waking) void recheckSlept();
     if (polls.length) await health.save().catch(() => undefined);
   }
 
@@ -113,7 +114,30 @@ export function createSenseRuntime(opts: SenseRuntimeOptions) {
     }
   }
 
+  let waking = false;
+
+  /** While nothing waits, a cheap model re-checks what the Bouncer slept on; a miss wakes Rufus now, like any WAKE. */
+  async function recheckSlept(): Promise<void> {
+    try {
+      for (const miss of await core.senseJudge.reviewSlept()) {
+        console.log(`[${miss.event.source}:${miss.event.id}] re-check found a miss: ${miss.decision.reason ?? ''}`);
+        inbox.push({ event: miss.event, decision: miss.decision, done: () => undefined });
+      }
+    } catch (err) {
+      console.error(`slept re-check failed: ${(err as Error).message}`);
+    }
+  }
+
   async function wake(batch: WakeBatch, pollIncoming: () => Promise<LosslessEvent[]>): Promise<void> {
+    waking = true;
+    try {
+      await wakeOnce(batch, pollIncoming);
+    } finally {
+      waking = false;
+    }
+  }
+
+  async function wakeOnce(batch: WakeBatch, pollIncoming: () => Promise<LosslessEvent[]>): Promise<void> {
     const res = await core.processEvent(batch.first.event, {
       ...(batch.first.decision ? { decision: batch.first.decision } : {}),
       ...(batch.extras.length ? { additionalEvents: batch.extras.map((i) => i.event) } : {}),
@@ -131,6 +155,10 @@ export function createSenseRuntime(opts: SenseRuntimeOptions) {
     const owner = [batch.first, ...batch.extras].some((i) => isOwnerInput(i.event));
     const sink = batch.first.sink ?? opts.failureSink ?? opts.tg;
     if (!owner || !sink || core.shadow) return;
+    // The note is a message to the owner: it goes out only if send_message's rung lets messages go out on their own.
+    const talk = core.registry.get('send_message')?.manifest;
+    const level = talk ? await core.registry.levelOf(talk) : 'never';
+    if (level !== 'act_and_report' && level !== 'act_quietly') return;
     const sent = await sink.send(WAKE_FAILURE_NOTE).then((r) => r ?? {}, () => undefined);
     if (!sent) return;
     // Logged like any message Rufus sends, so the next wake's conversation shows the owner was told.

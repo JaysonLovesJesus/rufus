@@ -45,7 +45,7 @@ describe('Milestone 6: Gap tree, 5 Brain-State Tools, 4-Level Trust Ladder & Iso
       // 13. Verify step 2: PASS
       if (call === 13) return JSON.stringify({ done: true, passed: true, evidence: 'demo.read confirmed count=1', criteria: [{ element: 'what', criterion: 'count=1', receiptIndex: 1, observed: 'count=1', met: true }] });
       // 14. Decide: schedule the root gap's next look, then sleep
-      if (call === 14) return JSON.stringify({ gap: ROOT_GAP_ID, toolId: 'watch.set', input: { kind: 'timer', label: 'next look for gaps', fireAt: '2099-01-01T00:00:00Z' } });
+      if (call === 14) return JSON.stringify({ gap: ROOT_GAP_ID, toolId: 'watch.set', input: { kind: 'timer', label: 'next look for gaps', fireAt: '2099-01-01T00:00:00Z', waitsOn: 'time', waitsFor: 'next check window', expect: 'New events or work arrive' } });
       return JSON.stringify({ toolId: 'sleep', input: { reason: 'Gap verified closed' } });
     });
 
@@ -99,11 +99,12 @@ describe('Milestone 6: Gap tree, 5 Brain-State Tools, 4-Level Trust Ladder & Iso
     // Artifact written by brain.create
     const draft = await readFile(path.join(dir, 'drafts', 'launch-spec.md'), 'utf8');
     expect(draft).toContain('Move count from 0 to 1.');
-    // Gap was created and closed ONLY after brain.verify passed
+    // Gap (and the sub-gap planned under it) closed ONLY after brain.verify passed
     const gaps = (await core.gaps.list()).filter((g) => g.id !== ROOT_GAP_ID);
-    expect(gaps).toHaveLength(1);
-    expect(gaps[0]?.status).toBe('closed');
-    expect(gaps[0]?.reality).toContain('count=1');
+    const main = gaps.find((g) => g.title === 'Raise count to 1');
+    expect(main?.status).toBe('closed');
+    expect(main?.reality).toContain('count=1');
+    expect(gaps.every((g) => g.status === 'closed')).toBe(true);
     // Verify ran with fresh context: no Decide prompt leaked in, only the gap as code recorded it
     expect(seenPrompts[11]).not.toContain('Receipts This Wake');
     expect(seenPrompts[11]).not.toContain('THE GAP TREE');

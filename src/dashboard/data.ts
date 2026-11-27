@@ -449,7 +449,7 @@ export class DashboardData {
     }
     const all = [...builtins.map((m) => ({ ...m, builtin: true })), ...custom.map((m) => ({ ...m, builtin: false }))];
     const levels: Record<string, TrustWord> = {};
-    for (const m of all) levels[m.id] = m.id === 'sleep' ? 'act_quietly' : await this.approvals.levelFor(m);
+    for (const m of all) levels[m.id] = await this.approvals.levelFor(m);
     const ladder: Record<TrustWord, number> = { never: 0, rehearse: 0, draft: 0, act_and_report: 0, act_quietly: 0 };
     for (const lvl of Object.values(levels)) ladder[lvl]++;
     return {

@@ -44,7 +44,8 @@ const MMR_LAMBDA = 0.7;
 /** Where an event came from. Senses may set it; otherwise it follows from who produced the event. */
 export function provenanceOf(e: LosslessEvent): Provenance {
   if (e.provenance) return e.provenance;
-  if (e.kind === 'owner_direct') return 'owner_said';
+  // What the owner writes to Rufus, and what he writes to other people (sensed from his chats), are both his own words.
+  if (e.kind === 'owner_direct' || e.kind === 'owner_sent') return 'owner_said';
   // Rufus's own messages, actions and self-set watches, including his messages echoed back by another channel.
   if (e.kind === 'assistant_sent' || e.source === 'self' || e.source === 'watch' || /^rufus$/i.test(e.actor ?? '')) return 'rufus_claimed';
   return 'observed';

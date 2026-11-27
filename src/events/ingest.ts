@@ -77,7 +77,7 @@ export function describeAudience(a: MessageAudience): string {
   if (a.chatType === 'group' || a.to === 'group') {
     return `${from} → group${a.chatTitle ? ` "${a.chatTitle}"` : ''} (${a.network} group)`;
   }
-  const to = a.to === 'rufus' ? 'you (Rufus)' : a.direction === 'outgoing' && a.from === 'owner' ? (a.chatTitle ?? 'someone') : 'the owner';
+  const to = a.to === 'rufus' ? 'you (Rufus)' : a.to === 'contact' || (a.direction === 'outgoing' && a.from === 'owner') ? (a.chatTitle ?? 'someone') : 'the owner';
   const title = a.chatTitle && a.chatTitle !== a.from && a.chatTitle !== to ? ` "${a.chatTitle}"` : '';
   return `${from} → ${to} (${a.network} DM${title})`;
 }
