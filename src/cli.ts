@@ -8,6 +8,7 @@ import { formatTrainingMetrics } from './bouncer/training';
 import { TelegramChannel } from './channels/telegram';
 import { RufusCore } from './daemon';
 import { computeScorecard, formatScorecard } from './eval/flight-recorder';
+import { benchmarkDecideProvider, benchmarkPackagedTools } from './eval/benchmark';
 import { recordOpsFailure } from './eval/ops-log';
 import { loadScenarios, runScenario } from './eval/scenarios';
 import { OUTLINE_ITEMS, verifyAllParts } from './eval/verify';
@@ -19,6 +20,9 @@ import { ensureStarterVoice, seedSelfOptimizationGaps } from './gaps/self-opt';
 import { GapStore } from './gaps/store';
 import { DAEMON_LABEL, defaultReleasesDir, launchAgentPath, promote, sourceRepoDir } from './ops/release';
 import { ClaudeCliProvider } from './providers/claude';
+import { buildProviderSet } from './providers/factory';
+import { GeminiCliProvider } from './providers/gemini';
+import { LocalLlamaProvider, findLocalLlmModel } from './providers/local';
 import type { MessageSink } from './types';
 import { KokoroTts } from './voice/kokoro';
 import { findParakeetModel } from './voice/parakeet';
@@ -39,15 +43,18 @@ async function main(argv: string[]): Promise<void> {
   const pythonPath = defaultPython(dir);
   const sink: MessageSink = { send: async (text) => console.log(`\n[Rufus]\n${text}\n`) };
 
-  const makeCore = () =>
-    new RufusCore({
+  const makeCore = () => {
+    const providers = buildProviderSet({ workspaceDir: dir });
+    return new RufusCore({
       workspaceDir: dir,
-      reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus', cwd: dir }),
-      speakerProvider: new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'haiku', cwd: dir }),
+      reasoningProvider: providers.reasoning,
+      speakerProvider: providers.speaker,
+      triageProvider: providers.triage,
       sink,
       ...(pythonPath ? { pythonPath } : {}),
       shadow,
     });
+  };
 
   if (cmd === 'init') {
     await Promise.all(
@@ -135,15 +142,15 @@ async function main(argv: string[]): Promise<void> {
     stampConsole();
     const offsetPath = path.join(dir, 'sense-state', 'telegram-offset');
     const tg = !telegramOff && tgToken && tgChatId ? new TelegramChannel({ token: tgToken, chatId: tgChatId, ...(stt ? { stt } : {}), onPollError, offsetPath }) : undefined;
+    const providers = buildProviderSet({ workspaceDir: dir });
     const core = new RufusCore({
       workspaceDir: dir,
-      reasoningProvider: new ClaudeCliProvider({ model: process.env.RUFUS_REASONING_MODEL || 'opus', cwd: dir }),
-      speakerProvider: new ClaudeCliProvider({ model: process.env.RUFUS_SPEAKER_MODEL || 'haiku', cwd: dir }),
+      reasoningProvider: providers.reasoning,
+      speakerProvider: providers.speaker,
       sink: tg ?? sink,
       ...(pythonPath ? { pythonPath } : {}),
       shadow,
-      // Its own process, so its calls never evict the Speaker's warm one.
-      triageProvider: new ClaudeCliProvider({ model: process.env.RUFUS_TRIAGE_MODEL || 'haiku', cwd: dir, timeoutMs: 60_000 }),
+      triageProvider: providers.triage,
     });
     const initInfo = await core.init();
     const hub = new HeartbeatHub();
@@ -286,6 +293,40 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (cmd === 'benchmark') {
+    const runLocal = rest.includes('--local') || !rest.some((a) => a.startsWith('--'));
+    const runGemini = rest.includes('--gemini');
+    const runTools = rest.includes('--tools') || !rest.some((a) => a.startsWith('--'));
+    if (runLocal) {
+      const modelPath = findLocalLlmModel(dir);
+      if (!modelPath) {
+        console.log('Local Decide benchmark: skipped (no local .gguf model in ~/.rufus-v2/models/)');
+      } else {
+        console.log(`Benchmarking Decide on local model (${path.basename(modelPath)})...`);
+        const res = await benchmarkDecideProvider(new LocalLlamaProvider({ modelPath }));
+        console.log(`Local Decide: ${res.passed}/${res.total} passed (avg ${res.avgMs}ms/turn)`);
+        for (const c of res.cases) console.log(`  ${c.ok ? 'PASS' : 'FAIL'} ${c.id} -> ${c.toolId} (${c.ms}ms)${c.note ? ` [${c.note}]` : ''}`);
+      }
+    }
+    if (runGemini) {
+      console.log('\nBenchmarking Decide on Gemini CLI...');
+      const res = await benchmarkDecideProvider(new GeminiCliProvider({ cwd: dir }));
+      console.log(`Gemini Decide: ${res.passed}/${res.total} passed (avg ${res.avgMs}ms/turn)`);
+      for (const c of res.cases) console.log(`  ${c.ok ? 'PASS' : 'FAIL'} ${c.id} -> ${c.toolId} (${c.ms}ms)${c.note ? ` [${c.note}]` : ''}`);
+    }
+    if (runTools) {
+      console.log('\nBenchmarking packaged tools...');
+      const rows = await benchmarkPackagedTools(dir);
+      const passCount = rows.filter((r) => r.testOk).length;
+      console.log(`Packaged tools: ${passCount}/${rows.length} pass`);
+      for (const r of rows) {
+        const live = r.liveRuns > 0 ? `, live ${r.liveOkRate}% (${r.liveRuns} calls)` : ', live 0 calls';
+        console.log(`  ${r.testOk ? 'PASS' : 'FAIL'} ${r.id} (${r.testMs}ms${live})${r.error ? ` — ${r.error}` : ''}`);
+      }
+    }
+    return;
+  }
+
   if (cmd === 'promote') {
     const prepare = rest.includes('--prepare');
     const reasonIdx = rest.indexOf('--reason');
@@ -345,6 +386,7 @@ async function main(argv: string[]): Promise<void> {
     '  rufus stats                          Scorecard: wakes, tool success, owner outcomes, model cost, channel failures',
     '  rufus verify                         Measure the code against docs/OUTLINE.md (about 30s, sends nothing)',
     '  rufus verify --live [scenario...]    Replay real owner messages through the real model on a copy of the workspace',
+    '  rufus benchmark [--local|--gemini|--tools]  Benchmark Decide on local/fallback models and every packaged tool',
     '  rufus promote [ref] [--prepare]      Build, check, and switch the daemon to a checked release',
     '  rufus bouncer status                 Count the bouncer training examples',
     '  rufus bouncer train                  Retrain the local SetFit bouncer (kept only if held-out WAKE recall holds)',

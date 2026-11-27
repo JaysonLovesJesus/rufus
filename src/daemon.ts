@@ -13,7 +13,10 @@ import { registerMemoryTools } from './events/memory-tools';
 import { EventStore, provenanceOf } from './events/store';
 import { WatchStore } from './events/watches';
 import { GapStore } from './gaps/store';
+import { CreditTracker, isRateLimitError } from './providers/credits';
+import { FallbackProvider } from './providers/fallback';
 import { runRpgWake } from './rpg/loop';
+import { handleZeroAiMessage } from './rpg/zero-ai';
 import { ApprovalStore } from './scripts/approvals';
 import { registerBuiltins } from './scripts/builtins';
 import { loadMcpConfigs, registerMcpTools, type McpBridgeHandle } from './scripts/mcp-bridge';
@@ -83,11 +86,13 @@ export class RufusCore {
   readonly approvals: ApprovalStore;
   readonly gaps: GapStore;
   readonly watches: WatchStore;
+  readonly credits: CreditTracker;
   readonly bouncer: Bouncer;
   /** Gap and reply-habit features, the cheap model's first call, and the re-check of slept events. */
   readonly senseJudge: SenseJudge;
   private readonly triageProvider: ModelProvider | undefined;
   readonly shadow: boolean;
+  private readonly rawReasoningProvider: ModelProvider;
   private readonly reasoningProvider: ModelProvider;
   private readonly speakerProvider: ModelProvider;
   private readonly reasoningModel?: string;
@@ -114,6 +119,8 @@ export class RufusCore {
     this.approvals = new ApprovalStore(opts.workspaceDir);
     this.gaps = new GapStore(opts.workspaceDir);
     this.watches = new WatchStore(opts.workspaceDir);
+    this.credits = new CreditTracker(opts.workspaceDir);
+    this.rawReasoningProvider = opts.reasoningProvider;
     this.bouncer = new Bouncer({
       workspaceDir: opts.workspaceDir,
       ...(opts.pythonPath ? { pythonPath: opts.pythonPath } : {}),
@@ -334,6 +341,15 @@ export class RufusCore {
         watches: this.watches,
         maxTurns: this.maxTurnsPerWake,
         now: this.now,
+        getCreditsLine: async () => {
+          const fb = this.rawReasoningProvider instanceof FallbackProvider ? this.rawReasoningProvider : undefined;
+          return this.credits.formatForDesk({
+            activeProvider: fb ? fb.activeProviderName() : this.rawReasoningProvider.name,
+            primaryProvider: fb ? fb.primaryProviderName() : this.rawReasoningProvider.name,
+            ...(fb ? { backups: fb.backupNames() } : {}),
+            now: this.now(),
+          });
+        },
         onReceipt: (r) => this.wakeReceipts.push(r),
         onWakeStart: (wakeId) => {
           live = { status: 'awake', wakeId, startedAt: this.now().toISOString(), trigger: { id: event.id, source: event.source, kind: event.kind, text: event.text.slice(0, 500) }, decision, turns: [] };
@@ -373,6 +389,26 @@ export class RufusCore {
           // A crashed wake still spent what its model calls cost.
           costUsd: Number(this.wakeModelCalls.reduce((s, c) => s + (c.costUsd ?? 0), 0).toFixed(6)),
         }).catch(() => undefined);
+      }
+      // If every model failed/hit its limit on a direct owner message, answer in natural language via pure code ($0).
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (event.kind === 'owner_direct' && (/All providers failed/i.test(errMsg) || isRateLimitError(errMsg))) {
+        const fb = this.rawReasoningProvider instanceof FallbackProvider ? this.rawReasoningProvider : undefined;
+        const primary = fb ? fb.primaryProviderName() : this.rawReasoningProvider.name;
+        if (isRateLimitError(errMsg)) await this.credits.recordLimit(primary, errMsg, this.now()).catch(() => undefined);
+        const reply = await handleZeroAiMessage(event.text, {
+          workspaceDir: this.workspaceDir,
+          registry: this.registry,
+          gaps: this.gaps,
+          approvals: this.approvals,
+          credits: this.credits,
+          primaryProvider: primary,
+          now: this.now,
+        }).catch(() => undefined);
+        if (reply && !this.shadow) {
+          const active = this.activeSink ?? this.realSink;
+          await active.send(reply.text).catch(() => undefined);
+        }
       }
       throw err;
     } finally {

@@ -42,6 +42,8 @@ export interface RpgWakeOptions {
   maxTurns?: number;
   topKTools?: number;
   topKContext?: number;
+  /** Optional one-line credit/provider status placed on The Desk ("Credits: active=... | 5h ~XX% left"). */
+  getCreditsLine?: () => Promise<string | undefined>;
   now?: () => Date;
   onReceipt?: (receipt: Receipt) => void;
   /** Called once when the wake starts, and after every turn, so watchers (the dashboard) can see the wake as it happens. */
@@ -377,9 +379,11 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
 
     const triggerMsgId = opts.trigger.metadata?.messageId !== undefined ? ` | messageId:${opts.trigger.metadata.messageId}` : '';
     const replyLine = replyToText ? `\n  (in reply to: "${replyToText}")` : '';
+    const creditsLine = opts.getCreditsLine ? await opts.getCreditsLine().catch(() => undefined) : undefined;
     const prompt = [
       `Workspace path: ${opts.workspaceDir}`,
       `Current local time: ${formatLocalTime(now())}`,
+      ...(creditsLine ? [creditsLine] : []),
       `THE GAP TREE (start here: what the owner wants true vs. what is true, and each gap's next move):\n${gapTree}`,
       ...(offTree ? [`Next moves not on the tree:\n${offTree}`] : []),
       [
