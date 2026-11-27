@@ -16,6 +16,7 @@ import { GapStore } from './gaps/store';
 import { runRpgWake } from './rpg/loop';
 import { ApprovalStore } from './scripts/approvals';
 import { registerBuiltins } from './scripts/builtins';
+import { loadMcpConfigs, registerMcpTools, type McpBridgeHandle } from './scripts/mcp-bridge';
 import { ToolRegistry } from './scripts/registry';
 import type { SpeakerWakeContext } from './speaker/speaker';
 
@@ -97,6 +98,7 @@ export class RufusCore {
   private wakeReceipts: Receipt[] = [];
   private wakeModelCalls: WakeModelCall[] = [];
   private wakeTurn = 1;
+  private mcpBridge?: McpBridgeHandle;
   private wakeContext?: SpeakerWakeContext;
   private activeSink?: MessageSink;
   private wakeQueue: Promise<unknown> = Promise.resolve();
@@ -220,6 +222,12 @@ export class RufusCore {
     });
     await registerMemoryTools({ registry: this.registry, events: this.events, getWakeContext: () => this.wakeContext });
     const disk = await this.registry.loadFromDisk();
+    if (!/^(0|off|false|no)$/i.test(process.env.RUFUS_MCP ?? '')) {
+      const mcpServers = await loadMcpConfigs(this.workspaceDir);
+      if (Object.keys(mcpServers).length) {
+        this.mcpBridge = await registerMcpTools({ registry: this.registry, servers: mcpServers });
+      }
+    }
     return { loadedTools: disk.loaded, toolErrors: disk.errors };
   }
 
@@ -480,6 +488,7 @@ export class RufusCore {
   }
 
   async close(): Promise<void> {
+    this.mcpBridge?.close();
     await this.events.close();
     await this.bouncer.close();
     (this.reasoningProvider as { close?: () => void }).close?.();

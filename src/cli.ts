@@ -2,6 +2,7 @@
 import { existsSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Bouncer } from './bouncer/bouncer';
 import { formatTrainingMetrics } from './bouncer/training';
 import { TelegramChannel } from './channels/telegram';
@@ -18,6 +19,7 @@ import { DAEMON_LABEL, defaultReleasesDir, launchAgentPath, promote, sourceRepoD
 import { ClaudeCliProvider } from './providers/claude';
 import type { MessageSink } from './types';
 import { KokoroTts } from './voice/kokoro';
+import { findParakeetModel } from './voice/parakeet';
 import { createVoiceHttpHandler } from './voice/server';
 
 function defaultWorkspace(): string {
@@ -96,8 +98,12 @@ async function main(argv: string[]): Promise<void> {
     // The legacy ~/.rufus config belongs to the owner's real workspace: a copied or test workspace must never pick up his bot.
     const isDefaultWorkspace = path.resolve(dir) === path.join(os.homedir(), '.rufus-v2');
     const telegramOff = /^(0|off|false|no)$/i.test(process.env.RUFUS_TELEGRAM ?? '');
+    // Prefer local Parakeet (.gguf) over legacy Whisper when a Parakeet model is already on disk.
+    const parakeetModel = findParakeetModel();
+    const parakeetScript = fileURLToPath(new URL('./voice/parakeet.ts', import.meta.url));
     const cfgPaths = [path.join(dir, 'config.json'), ...(isDefaultWorkspace ? [path.join(os.homedir(), '.rufus', 'config.json')] : [])];
-    for (const cfgPath of cfgPaths) {
+    for (let i = 0; i < cfgPaths.length; i++) {
+      const cfgPath = cfgPaths[i]!;
       try {
         const cfg = JSON.parse(await fs.readFile(cfgPath, 'utf8')) as {
           telegram?: { token?: string; chatId?: string | number; transcribe?: { command: string; args: string[] } };
@@ -107,11 +113,14 @@ async function main(argv: string[]): Promise<void> {
           tgToken = cfg.telegram.token;
           tgChatId = String(cfg.telegram.chatId);
         }
+        if (!stt && i === 0) stt = cfg.voice?.stt ?? cfg.telegram?.transcribe;
+        if (!stt && parakeetModel) stt = { command: process.execPath, args: ['--import', 'tsx', parakeetScript, '{file}'] };
         if (!stt) stt = cfg.voice?.stt ?? cfg.telegram?.transcribe;
       } catch {
         /* ignore */
       }
     }
+    if (!stt && parakeetModel) stt = { command: process.execPath, args: ['--import', 'tsx', parakeetScript, '{file}'] };
     const onPollError = (error: string) => void recordOpsFailure(dir, { kind: 'poll_failed', channel: 'telegram', error });
     stampConsole();
     const offsetPath = path.join(dir, 'sense-state', 'telegram-offset');
