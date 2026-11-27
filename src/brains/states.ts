@@ -19,6 +19,7 @@ const DEFAULT_SKILLS: Record<BrainStateName, string> = {
     "6. **Done means the target is true in reality.** Call `brain.verify` on the gap. The owner's own reaction is the strongest evidence. Once a message delivers what the owner asked for, the next move is `brain.verify`, not another message: never resend or re-explain what the owner already has.",
     "7. **The root gap is never done.** When nothing else can move, work the root right now: look around (projects, messages, calendar, email, your own recent actions) for what the owner wants true that isn't, and create those gaps. Don't schedule the look for later while you're awake now.",
     "8. **Before `sleep`:** check each unclosed gap's Next move on the tree. A gap with NONE gets a move now, or a `watch.set` serving it (a running `t3.thread` already counts). The root's next move is your next look for gaps.",
+    '9. **Self-optimization is a standing gap.** Keep your toolset minimal (no duplicates/unused tools), fewest steps (package repeating chains into shortcuts), and full coverage of every life area; keep senses clean, bouncer sharp, and voice/trust fitted to the owner. Personal preferences/scripts stay in the workspace; generic engine fixes go upstream via `self.upgrade` (with `openPr: true` for PRs, always waiting for the owner’s yes).',
   ].join('\n'),
   INVESTIGATE: [
     '# Investigate — Read-Only Reality Finder',

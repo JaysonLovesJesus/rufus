@@ -30,6 +30,35 @@ export interface SelfUpgradeOptions {
   checks?: string[][];
   /** Schedules a daemon restart once a change has landed. */
   restart?: () => void;
+  /** Opens a pull request from a pushed branch (default: `git push` + `gh pr create`). Injectable for tests. */
+  createPr?: (opts: { cwd: string; branch: string; title: string; body: string }) => Promise<{ url: string }>;
+}
+
+const PRIVACY_LEAK_PATTERNS: Array<{ label: string; re: RegExp }> = [
+  { label: 'absolute macOS/Linux user home path', re: /\/(?:Users|home)\/[a-zA-Z0-9._-]+\// },
+  { label: 'OpenAI/Anthropic/Stripe secret key', re: /\b(?:sk-[a-zA-Z0-9_-]{16,}|rk_live_[a-zA-Z0-9]{16,})\b/ },
+  { label: 'GitHub personal access token', re: /\bgh[pousr]_[a-zA-Z0-9]{20,}\b/ },
+  { label: 'Slack/Telegram bot token', re: /\b(?:xox[baprs]-[a-zA-Z0-9-]{10,}|\d{8,12}:[a-zA-Z0-9_-]{30,})\b/ },
+  { label: 'private key block', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+];
+
+/** Scans added diff/replacement text before pushing an upstream PR to block personal paths or secrets. */
+export function scanForPrivacyLeaks(text: string): string[] {
+  const hits: string[] = [];
+  for (const p of PRIVACY_LEAK_PATTERNS) {
+    if (p.re.test(text)) hits.push(p.label);
+  }
+  return hits;
+}
+
+async function defaultCreatePr(opts: { cwd: string; branch: string; title: string; body: string }): Promise<{ url: string }> {
+  await git(opts.cwd, ['push', '-u', 'origin', opts.branch]);
+  const { stdout } = await execFileAsync('gh', ['pr', 'create', '--head', opts.branch, '--title', opts.title, '--body', opts.body], {
+    cwd: opts.cwd,
+    timeout: 60_000,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  return { url: stdout.trim().split('\n').pop()?.trim() || opts.branch };
 }
 
 function defaultRestart(): void {
@@ -61,13 +90,33 @@ function errText(err: unknown): string {
  * The live working tree is never written to directly, so nobody's work in progress can be committed or wiped.
  */
 export async function upgradeInWorktree(
-  req: { relativePath: string; find: string; replace: string; commitMessage?: string; wakeId?: string; gapId?: string },
+  req: {
+    relativePath: string;
+    find: string;
+    replace: string;
+    commitMessage?: string;
+    wakeId?: string;
+    gapId?: string;
+    openPr?: boolean;
+    prTitle?: string;
+    prBody?: string;
+  },
   opts: SelfUpgradeOptions & { signal?: AbortSignal } = {},
-): Promise<ScriptOutput & { landed?: boolean; branch?: string }> {
+): Promise<ScriptOutput & { landed?: boolean; branch?: string; prUrl?: string }> {
   const repo = opts.repoDir ?? RUFUS_REPO_DIR;
   const rel = path.posix.normalize(req.relativePath.trim().replace(/\\/g, '/'));
   if (!rel.startsWith('src/') || rel.includes('..')) {
     return { ok: false, summary: 'Engine edits are restricted to src/ files.', error: 'invalid relativePath' };
+  }
+  if (req.openPr) {
+    const leaks = scanForPrivacyLeaks(`${req.replace}\n${req.commitMessage ?? ''}\n${req.prTitle ?? ''}\n${req.prBody ?? ''}`);
+    if (leaks.length) {
+      return {
+        ok: false,
+        summary: `Blocked upstream PR for ${rel}: privacy scan flagged ${leaks.join(', ')}. Keep personal paths and secrets out of the repo.`,
+        error: 'privacy_scan_failed',
+      };
+    }
   }
   const signal = opts.signal;
   const stampId = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
@@ -103,6 +152,22 @@ export async function upgradeInWorktree(
     const trailers = `Rufus-Wake: ${req.wakeId ?? 'none'}\nRufus-Gap: ${req.gapId ?? 'none'}`;
     await git(wt, ['add', '--', rel]);
     await git(wt, ['commit', '-m', subject, '-m', trailers], { env: { ...process.env, ...NEUTRAL_AUTHOR } });
+
+    if (req.openPr) {
+      keepBranch = true;
+      const prTitle = (req.prTitle?.trim() || subject).slice(0, 120);
+      const prBody = (req.prBody?.trim() || `Automated self-upgrade to \`${rel}\`.\n\n${trailers}`).slice(0, 4000);
+      const pr = await (opts.createPr ?? defaultCreatePr)({ cwd: wt, branch, title: prTitle, body: prBody });
+      return {
+        ok: true,
+        summary: `Opened upstream PR for ${rel} (${pr.url}) from branch ${branch}; passed checks and privacy scan.`,
+        changes: [`pr:${pr.url}`, `branch:${branch}`],
+        data: { branch, prUrl: pr.url, landed: false },
+        landed: false,
+        branch,
+        prUrl: pr.url,
+      };
+    }
 
     // Land only onto a target file nobody else has uncommitted work in.
     const dirtyNow = await git(repo, ['status', '--porcelain', '--', rel]);
@@ -172,6 +237,9 @@ export async function registerSelfUpgrade(registry: ToolRegistry, opts: SelfUpgr
           replace: { type: 'string', description: 'Replacement text' },
           commitMessage: { type: 'string', description: 'Short commit message for engine upgrades' },
           restart: { type: 'boolean', description: 'Restart the daemon after the change lands (default false)' },
+          openPr: { type: 'boolean', description: 'If true, push the checked worktree branch and open an upstream GitHub PR (privacy-scanned) instead of merging directly into the local tree' },
+          prTitle: { type: 'string', description: 'Optional PR title when openPr=true' },
+          prBody: { type: 'string', description: 'Optional PR description when openPr=true' },
         },
         required: ['target', 'replace'],
         additionalProperties: false,
@@ -195,6 +263,9 @@ export async function registerSelfUpgrade(registry: ToolRegistry, opts: SelfUpgr
           ...(typeof input.commitMessage === 'string' ? { commitMessage: input.commitMessage } : {}),
           ...(ctx.wakeId ? { wakeId: ctx.wakeId } : {}),
           ...(ctx.gapId ? { gapId: ctx.gapId } : {}),
+          ...(input.openPr === true ? { openPr: true } : {}),
+          ...(typeof input.prTitle === 'string' ? { prTitle: input.prTitle } : {}),
+          ...(typeof input.prBody === 'string' ? { prBody: input.prBody } : {}),
         },
         { ...opts, ...(ctx.signal ? { signal: ctx.signal } : {}) },
       );

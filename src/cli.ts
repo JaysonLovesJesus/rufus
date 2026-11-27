@@ -15,6 +15,8 @@ import { buildDefaultConnectors, HeartbeatHub } from './events/connectors';
 import { messageEvent } from './events/ingest';
 import { createSenseRuntime, stampConsole } from './events/runtime';
 import { startEventWebhook } from './events/webhook';
+import { ensureStarterVoice, seedSelfOptimizationGaps } from './gaps/self-opt';
+import { GapStore } from './gaps/store';
 import { DAEMON_LABEL, defaultReleasesDir, launchAgentPath, promote, sourceRepoDir } from './ops/release';
 import { ClaudeCliProvider } from './providers/claude';
 import type { MessageSink } from './types';
@@ -48,9 +50,17 @@ async function main(argv: string[]): Promise<void> {
     });
 
   if (cmd === 'init') {
-    await fs.mkdir(path.join(dir, 'tools'), { recursive: true });
-    await fs.mkdir(path.join(dir, 'training'), { recursive: true });
-    console.log(`Initialized Rufus v2 workspace at ${dir}`);
+    await Promise.all(
+      ['tools', 'training', 'skills', 'projects', 'drafts'].map((sub) => fs.mkdir(path.join(dir, sub), { recursive: true })),
+    );
+    const createdVoice = await ensureStarterVoice(dir);
+    const seeded = await seedSelfOptimizationGaps(new GapStore(dir));
+    const parakeet = findParakeetModel();
+    console.log(`Initialized Rufus workspace at ${dir}`);
+    console.log(`- Gap board: root gap + ${seeded.added.length} standing self-optimization gap(s) seeded (${seeded.total} total)`);
+    console.log(`- VOICE.md: ${createdVoice ? 'created starter' : 'kept existing'}`);
+    console.log(`- Local Parakeet STT: ${parakeet ? `detected (${path.basename(parakeet)})` : 'not found (optional)'}`);
+    console.log(`Next: run \`pnpm rufus wake "Help me get set up"\` or \`pnpm rufus start\`.`);
     return;
   }
 
