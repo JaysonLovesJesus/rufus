@@ -86,7 +86,7 @@ export function buildProviderSet(opts: { workspaceDir: string; credits?: CreditT
   }
 
   const reasoningSpecs = cfg.reasoning ?? [
-    `claude:${process.env.RUFUS_DECIDE_MODEL || process.env.RUFUS_REASONING_MODEL || 'haiku'}`,
+    `claude:${process.env.RUFUS_DECIDE_MODEL || process.env.RUFUS_REASONING_MODEL || 'sonnet'}`,
     'gemini',
     'local',
   ];

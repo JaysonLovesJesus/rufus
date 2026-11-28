@@ -1449,7 +1449,21 @@ export async function registerBuiltins(deps: BuiltinDeps): Promise<void> {
       }
       const id = typeof input.approvalId === 'string' && input.approvalId.trim() ? input.approvalId.trim() : undefined;
       const queued = await deps.approvals.listPending();
+      if (!id && queued.length > 1) {
+        return {
+          ok: false,
+          summary: `Refused: ${queued.length} approvals are pending (${queued.map((a) => `${a.id}:${a.toolId}${a.gapId ? `/${a.gapId}` : ''}`).join(', ')}). Pass the exact approvalId matching what the owner actually said yes to.`,
+          error: 'ambiguous pending approval',
+        };
+      }
       const peek = id ? queued.find((a) => a.id === id) : queued[queued.length - 1];
+      if (peek && ctx.gapId && peek.gapId && peek.gapId !== ctx.gapId) {
+        return {
+          ok: false,
+          summary: `Refused: pending approval ${peek.id} (${peek.toolId}) belongs to ${peek.gapId}, not ${ctx.gapId}. Never apply the owner's yes on one topic to an unrelated pending draft.`,
+          error: 'approval gap mismatch',
+        };
+      }
       if (peek && registry.get(peek.toolId)?.manifest.effect === 'write') {
         // A change to the trust files, tool manifests or gate code needs an owner message that came after the draft:
         // a message that predates the draft cannot have approved it.
