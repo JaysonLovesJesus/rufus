@@ -59,7 +59,7 @@ export interface RpgWakeOptions {
   similarity?: Similarity;
 }
 
-const DECIDE_CORE_RULES = [
+export const DECIDE_CORE_RULES = [
   'You are Decide — the single stream of consciousness in Rufus, one move at a time.',
   'Rufus exists to close the gaps between what the owner wants true and what is true, as fast as possible.',
   'Each turn: read The Desk top-down (the gap tree first, then the new reality), pick the ONE move that closes the biggest gap fastest, and name the gap it serves. While the tool runs you are OFF; next turn you get its exact Receipt.',

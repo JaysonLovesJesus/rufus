@@ -8,7 +8,7 @@ import { formatTrainingMetrics } from './bouncer/training';
 import { TelegramChannel } from './channels/telegram';
 import { RufusCore } from './daemon';
 import { computeScorecard, formatScorecard } from './eval/flight-recorder';
-import { benchmarkDecideProvider, benchmarkPackagedTools } from './eval/benchmark';
+import { benchmarkDecideProvider, benchmarkDecideStress, benchmarkPackagedTools } from './eval/benchmark';
 import { recordOpsFailure } from './eval/ops-log';
 import { loadScenarios, runScenario } from './eval/scenarios';
 import { OUTLINE_ITEMS, verifyAllParts } from './eval/verify';
@@ -299,6 +299,20 @@ async function main(argv: string[]): Promise<void> {
     const runLocal = rest.includes('--local') || !rest.some((a) => a.startsWith('--'));
     const runGemini = rest.includes('--gemini');
     const runTools = rest.includes('--tools') || !rest.some((a) => a.startsWith('--'));
+    const stressIdx = rest.indexOf('--stress');
+    if (stressIdx >= 0) {
+      // rufus benchmark --stress [haiku,sonnet,opus]: Decide on messy, real-shaped Desks, head to head.
+      const arg = rest[stressIdx + 1];
+      const models = arg && !arg.startsWith('--') ? arg.split(',') : ['haiku', 'sonnet', 'opus'];
+      for (const m of models) {
+        const provider = new ClaudeCliProvider({ model: m, timeoutMs: 120_000, cwd: dir });
+        const res = await benchmarkDecideStress(provider, { concurrency: 5 });
+        provider.close();
+        console.log(`\nDecide stress (${m}): ${res.passed}/${res.total} passed (avg ${res.avgMs}ms/case)`);
+        for (const c of res.cases) console.log(`  ${c.ok ? 'PASS' : 'FAIL'} ${c.id} -> ${c.toolId} (${c.ms}ms)${c.note ? ` [${c.note}]` : ''}`);
+      }
+      return;
+    }
     if (runLocal) {
       const modelPath = findLocalLlmModel(dir);
       if (!modelPath) {
