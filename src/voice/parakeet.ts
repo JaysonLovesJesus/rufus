@@ -32,7 +32,7 @@ export async function decodeToFloat32Pcm(audioPath: string, ffmpegPath = process
   const { stdout } = await execFileAsync(
     bin,
     ['-nostdin', '-hide_banner', '-loglevel', 'error', '-i', audioPath, '-ar', '16000', '-ac', '1', '-f', 'f32le', '-acodec', 'pcm_f32le', 'pipe:1'],
-    { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout: 60_000 },
+    { encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, timeout: 120_000 },
   );
   const aligned = new Uint8Array(stdout.byteLength);
   aligned.set(stdout);
