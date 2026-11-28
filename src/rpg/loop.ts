@@ -471,7 +471,15 @@ export async function runRpgWake(opts: RpgWakeOptions): Promise<RpgWakeReport> {
           'root_gap_write',
         );
       }
-      if (!receipt && servedGapId && servedGapId !== ROOT_GAP_ID && manifest?.effect === 'write' && !ROOT_WRITE_TOOLS.has(action.toolId) && !TALK_TOOLS.has(action.toolId)) {
+      if (
+        !receipt &&
+        servedGapId &&
+        servedGapId !== ROOT_GAP_ID &&
+        manifest?.effect === 'write' &&
+        !ROOT_WRITE_TOOLS.has(action.toolId) &&
+        !TALK_TOOLS.has(action.toolId) &&
+        action.toolId !== 'gaps.approve'
+      ) {
         const served = await opts.gaps.get(servedGapId);
         if (served?.status === 'proposed') {
           receipt = rejected(
