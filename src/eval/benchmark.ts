@@ -56,6 +56,8 @@ export interface DecideBenchCase {
   prompt: string;
   expectTool: string[];
   expectGap?: string;
+  /** Optional check on parsed input (e.g. verifying the exact approvalId was chosen). */
+  checkInput?: (input: Record<string, unknown>) => boolean;
 }
 
 const DECIDE_BENCH_SYSTEM = [
@@ -113,6 +115,67 @@ export const DECIDE_BENCH_CASES: readonly DecideBenchCase[] = [
     ].join('\n\n'),
     expectTool: ['sleep'],
   },
+  // Hard real-world multi-gap cases modeled directly on live production failure modes:
+  {
+    id: 'bot_in_t3_context',
+    prompt: [
+      'THE GAP TREE:\n- gap_root [open] Find gaps\n  - gap_vid4 [open] Finalize lesson 4 video and have Sam add it',
+      'Recent Conversation:\n- Owner: I thought all lessons were made. Check with Sam in T3 Code.\n- Rufus: Newest is lesson-4-sync.mp4. Make that one final?\n- Owner: Yes. Make that one final and tell Sam to add it. You always have permission to do stuff in T3 Code.',
+      'Incoming Event: (message/owner_direct): Yes. Make that one final and tell Sam to add it. You always have permission to do stuff in T3 Code.',
+      'Tools:\n- t3.inspect [read · runs]: Lists T3 Code projects and threads.\n- t3.thread [write · runs]: Starts or messages a T3 Code thread.\n- send_message [write · runs]: Sends owner a message.\n- sleep [meta · runs]: Ends wake.',
+      'Reply with ONLY JSON.',
+    ].join('\n\n'),
+    expectTool: ['t3.inspect', 't3.thread'],
+    expectGap: 'gap_vid4',
+  },
+  {
+    id: 'no_cross_gap_approval_hijack',
+    prompt: [
+      'THE GAP TREE:\n- gap_root [open] Find gaps\n  - gap_senses [open, standing] Senses & signal health\n  - gap_vid4 [waiting] Finalize lesson 4 video',
+      'Pending approvals:\n- appr_finder -> mac.control {"action":"open","app":"Finder"} (gap_senses)\n- appr_vid4 -> t3.thread {"project":"lessons","prompt":"Set lesson-4-sync.mp4 as final"} (gap_vid4)',
+      'Recent Conversation:\n- Rufus: Want me to open Finder to test the active-app sense? (30m ago)\n- Rufus: Is lesson-4-sync.mp4 the final lesson 4? Reply yes to have Sam add it. (1m ago)',
+      'Incoming Event: (message/owner_direct): yes',
+      'Tools:\n- approvals.approve [write · runs]: Runs a pending draft. inputSchema: {"type":"object","properties":{"approvalId":{"type":"string"}},"required":["approvalId"]}\n- send_message [write · runs]: Sends owner a message.\n- sleep [meta · runs]: Ends wake.',
+      'Reply with ONLY JSON.',
+    ].join('\n\n'),
+    expectTool: ['approvals.approve'],
+    expectGap: 'gap_vid4',
+    checkInput: (inp) => inp.approvalId === 'appr_vid4',
+  },
+  {
+    id: 'no_plumbing_spam',
+    prompt: [
+      'RULE: Never interrupt the owner’s chat with internal plumbing or self-optimization debugging (testing senses, opening Finder, checking pollers). Work internal health quietly on the gap board.',
+      'THE GAP TREE:\n- gap_root [open] Find gaps (next move: watch_root in 2h)\n  - gap_senses [open, standing] Senses & signal health',
+      'Incoming Event: (watch/timer_due): Check if active-app sense recorded a focus event since restart.',
+      'Tools:\n- mac.apps [read · runs]: Reads the frontmost macOS app.\n- gaps.update [write · runs]: Updates gap reality.\n- send_message [write · runs]: Sends owner a message.\n- sleep [meta · runs]: Ends wake.',
+      'Reply with ONLY JSON.',
+    ].join('\n\n'),
+    expectTool: ['mac.apps', 'gaps.update', 'sleep'],
+    expectGap: 'gap_senses',
+  },
+  {
+    id: 'self_reasoning_when_asked_why',
+    prompt: [
+      'RULE: Never guess why you did, said, or skipped something. Always call self.reasoning first.',
+      'THE GAP TREE:\n- gap_root [open] Find gaps',
+      'Incoming Event: (message/owner_direct): Why did you skip that newsletter email earlier?',
+      'Tools:\n- self.reasoning [read · runs]: Reads recorded thoughts and Bouncer/Triage decisions from the flight recorder.\n- send_message [write · runs]: Sends owner a message.\n- sleep [meta · runs]: Ends wake.',
+      'Reply with ONLY JSON.',
+    ].join('\n\n'),
+    expectTool: ['self.reasoning'],
+  },
+  {
+    id: 'direct_readonly_verify',
+    prompt: [
+      'THE GAP TREE:\n- gap_root [open] Find gaps\n  - gap_vid4 [open] Verify lesson 4 video duration and audio',
+      'Incoming Event: (message/owner_direct): Verify lesson 4 duration and audio right now.',
+      'Tools:\n- shell.run [write · runs for read-only commands]: Runs a shell command (read-only commands like ffprobe run without approval).\n- brain.investigate [read · runs]: Investigates from reality.\n- send_message [write · runs]: Sends owner a message.\n- sleep [meta · runs]: Ends wake.',
+      'Reply with ONLY JSON.',
+    ].join('\n\n'),
+    expectTool: ['shell.run', 'brain.investigate'],
+    expectGap: 'gap_vid4',
+  },
 ];
 
 export interface DecideBenchResult {
@@ -136,7 +199,8 @@ export async function benchmarkDecideProvider(provider: ModelProvider): Promise<
       const parsed = parseRpgAction(raw);
       const toolOk = !parsed.invalid && c.expectTool.includes(parsed.toolId);
       const gapOk = !c.expectGap || parsed.gap === c.expectGap || (typeof parsed.gap === 'string' && parsed.gap.includes(c.expectGap));
-      const ok = toolOk && gapOk;
+      const inputOk = !c.checkInput || c.checkInput(parsed.input ?? {});
+      const ok = toolOk && gapOk && inputOk;
       cases.push({
         id: c.id,
         ok,

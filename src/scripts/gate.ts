@@ -1,5 +1,6 @@
 import type { Receipt, ToolManifest, TrustLevel } from '../types';
 import { capLevel, ceilingFor, defaultLevel, stricterOf, type ApprovalStore } from './approvals';
+import { isReadOnlyShellCommand } from './shell-safety';
 import { validateInput } from './standard';
 
 export type GateLevel = TrustLevel | 'never';
@@ -37,7 +38,16 @@ export async function passGate(opts: {
   stepOf?: string;
 }): Promise<GateDecision> {
   const { manifest, input } = opts;
-  const rung = await resolveLevel(manifest, opts.approvals, input);
+  const rawRung = await resolveLevel(manifest, opts.approvals, input);
+  // Provably read-only shell inspections (ffprobe, ls, git status, etc.) run quietly without nagging for approval,
+  // while writes, redirects, subshells, or blocked/rehearse settings keep their strict rung.
+  const rung: GateLevel =
+    manifest.id === 'shell.run' &&
+    rawRung === 'draft' &&
+    typeof input.command === 'string' &&
+    isReadOnlyShellCommand(input.command)
+      ? 'act_quietly'
+      : rawRung;
   // Spend counts in the gate as a runaway guard: a tool that looks stuck in a loop asks before its next call.
   const runaway = (rung === 'act_and_report' || rung === 'act_quietly') && opts.approvals ? await opts.approvals.spend.runaway(manifest.id, opts.now) : undefined;
   const level: GateLevel = runaway ? 'draft' : rung;
